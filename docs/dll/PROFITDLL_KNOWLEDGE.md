@@ -1,0 +1,330 @@
+# PROFITDLL_KNOWLEDGE.md — Síntese Viva do Manual ProfitDLL (pt_br)
+
+**Curador:** Nelo 🗝️ (profitdll-specialist)
+**Fonte primária:** `Manual - ProfitDLL pt_br.pdf` (extraído em `manual_profitdll.txt`, 4452 linhas)
+**Fontes secundárias:** `profitdll/Exemplo Python/main.py` (1274L) · `profit_dll.py` (signatures) · `profitTypes.py` (structs/enums)
+**Validação empírica:** whale-detector v2 (live mode 2026-03-09) · Sentinel §12
+**Última atualização:** 2026-05-03
+
+> **Regra de uso:** Este documento é a referência canônica do squad data-downloader. Toda afirmação aqui referencia seção/linha do manual OU está marcada como `[empírico]` / `[ambíguo]` com link ao quirk em `QUIRKS.md`. Quando manual e prática divergem, divergência é registrada — nunca escondida.
+
+---
+
+## Índice
+
+1. [Visão geral da DLL (manual §2)](#1-visão-geral)
+2. [Funções expostas (manual §3.1)](#2-funções-expostas)
+3. [Callbacks (manual §3.2)](#3-callbacks)
+4. [Uso, threading, linkagem (manual §4)](#4-uso--threading)
+5. [Códigos de erro NL_* (manual §5)](#5-códigos-de-erro)
+6. [Sequência canônica de inicialização](#6-sequência-canônica-de-inicialização)
+7. [Padrão canônico callback → queue](#7-padrão-canônico-de-uso)
+8. [Versões da DLL documentadas](#8-versões-da-dll)
+
+---
+
+## 1. Visão geral
+
+A ProfitDLL é uma DLL Windows (Win32 + Win64) escrita em Delphi pela Nelogica que expõe market data e roteamento (envio de ordens) para a plataforma B3. Carregada em Python via `ctypes.WinDLL` (stdcall convention).
+
+**Áreas funcionais (manual §2):**
+1. **Lifecycle / Sessão** — autenticar, conectar, encerrar
+2. **Market Data** — subscribe/unsubscribe + callbacks de trade/livro/diário
+3. **Trading** — envio/cancelamento/alteração de ordens, posições
+4. **Metadata / Agentes** — resolução de nomes de corretoras, tradução de trades V2
+
+**Modelos de inicialização:**
+- `DLLInitializeMarketLogin` — **11 args** — só market data (esta é a função usada pelo data-downloader)
+- `DLLInitializeLogin` — **13 args** — market data + roteamento (trading habilitado)
+
+**Threading model (manual §3.2 linha 2732, §4 linha 4382):**
+> "Os callbacks são chamados a partir de uma thread chamada ConnectorThread. Os dados recebidos são armazenados em uma única fila de dados. As funções de requisições à DLL ou qualquer outra função da interface da DLL **NÃO devem** ser chamadas dentro de um callback, pois isso pode causar exceções inesperadas e comportamento indefinido."
+
+Esta regra (R3 do MANIFEST do squad) é **oficial**, não quirk.
+
+---
+
+## 2. Funções expostas
+
+### 2.1 V1 vs V2 (R10)
+
+A Nelogica modernizou a API ao longo das versões 4.0.0.18+ adicionando funções V2 que aceitam **structs** ao invés de listas longas de argumentos primitivos. **Funções V1 estão marcadas como obsoletas no manual** mas mantidas por compat.
+
+| Área | V1 (obsoleta) | V2 (recomendada) | Versão de introdução |
+|------|---------------|------------------|---------------------|
+| Envio de ordem (compra) | `SendBuyOrder` | `SendOrder(TConnectorSendOrder*)` | 4.0.0.18 |
+| Envio de ordem (venda) | `SendSellOrder` | `SendOrder` (mesmo, side=cosSell) | 4.0.0.18 |
+| Envio market | `SendMarketBuyOrder`/`SendMarketSellOrder` | `SendOrder(OrderType=cotMarket=1)` | 4.0.0.18 |
+| Envio stop | `SendStopBuyOrder`/`SendStopSellOrder` | `SendOrder(OrderType=cotStopLimit=4)` | 4.0.0.18 |
+| Alterar ordem | `SendChangeOrder` | `SendChangeOrderV2(TConnectorChangeOrder*)` | 4.0.0.18 |
+| Cancelar ordem | `SendCancelOrder` | `SendCancelOrderV2(TConnectorCancelOrder*)` | 4.0.0.18 |
+| Cancelar várias | `SendCancelOrders` | `SendCancelOrdersV2(TConnectorCancelOrders*)` | 4.0.0.18 |
+| Cancelar todas | `SendCancelAllOrders` | `SendCancelAllOrdersV2(TConnectorCancelAllOrders*)` | 4.0.0.18 |
+| Zerar posição | `SendZeroPosition` | `SendZeroPositionV2(TConnectorZeroPosition*)` | 4.0.0.18 |
+| Listar ordens | `GetOrders` / `GetOrder` / `GetOrderProfitID` | `GetOrderDetails(TConnectorOrderOut*)` + `EnumerateOrdersByInterval` / `EnumerateAllOrders` | 4.0.0.20 |
+| Posição | `GetPosition` | `GetPositionV2(TConnectorTradingAccountPosition*)` | 4.0.0.20 |
+| Conta | `GetAccount` | `GetAccountDetails(TConnectorTradingAccountOut*)` + `GetAccountCount`/`GetAccounts` | — |
+| Nome agente | `GetAgentNameByID` / `GetAgentShortNameByID` | `GetAgentNameLength(id, shortFlag)` + `GetAgentName(length, id, buf, shortFlag)` | 4.0.0.24 |
+| Trade callback | `SetTradeCallback` (TNewTradeCallback) | `SetTradeCallbackV2` (TConnectorTradeCallback + `TranslateTrade`) | 4.0.0.20 |
+| History trade callback | `SetHistoryTradeCallback` (THistoryTradeCallback) | `SetHistoryTradeCallbackV2` (TConnectorTradeCallback + `TranslateTrade`) | 4.0.0.20 |
+| Order change callback | `SetOrderChangeCallback` | `SetOrderChangeCallbackV2` (+ ValidityType, LastUpdate, etc.) | — |
+| History callback | `SetHistoryCallback` | `SetHistoryCallbackV2` | — |
+| Adjust history callback | `SetAdjustHistoryCallback` | `SetAdjustHistoryCallbackV2` | — |
+| Asset list info | `SetAssetListInfoCallback` | `SetAssetListInfoCallbackV2` (+ setor, subSetor, segmento) | — |
+| Offer book callback | `SetOfferBookCallback` | `SetOfferBookCallbackV2` (Int64 nQtd) | — |
+| Price book callback | `SetPriceBookCallback` (DEPRECIADA) | `SetPriceBookCallbackV2` (DEPRECIADA → use **PriceDepth**) | — |
+| Livro de preços | `SubscribePriceBook` (DEPRECIADA) | `SubscribePriceDepth` + `SetPriceDepthCallback` + `GetPriceDepthSideCount` + `GetPriceGroup(TConnectorPriceGroup*)` | 4.0.0.31 |
+
+### 2.2 Lifecycle (manual §3.1, §4)
+
+| Função | Args | Retorno | Uso |
+|--------|------|---------|-----|
+| `DLLInitializeLogin` | 13 (key, user, pass, state, history, orderChange, account, trade, daily, priceBook, offerBook, histTrade, progress, tinyBook) | `int` | Market + trading |
+| `DLLInitializeMarketLogin` | 11 (key, user, pass, **state**, **trade**, **daily**, **priceBook**, **offerBook**, **histTrade**, **progress**, **tinyBook**) | `int` | Só market data |
+| `DLLFinalize` | 0 | `int` | Encerrar — **OFICIAL no manual** [Q09-AMB: whale-detector observou `Finalize()`] |
+| `SetServerAndPort` | 2 (server, port) | `int` | Antes de init, com orientação Nelogica |
+| `GetServerClock` | 8 (out dtDate, y, m, d, h, min, s, ms) | `int` | Relógio servidor |
+| `SetDayTrade` | 1 (useDayTrade: int) | `int` | 1=True, 0=False |
+| `SetEnabledLogToDebug` | 1 (enabled: int) | `int` | 0=silencia log nativo da DLL (recomendado em produção) |
+| `SetEnabledHistOrder` | 1 (enabled: int) | `int` | Habilita histórico de ordens (chamar após init) |
+| `GetDLLVersion` | 0 (signature TBD via profit_dll.py) | versão | Usado por data-downloader em metadata Parquet |
+
+### 2.3 Market Data — Subscriptions
+
+| Subscribe | Unsubscribe | Callback disparado |
+|-----------|-------------|-------------------|
+| `SubscribeTicker(ticker, bolsa)` | `UnsubscribeTicker(ticker, bolsa)` | `TNewTradeCallback` (V1) ou `TConnectorTradeCallback` (V2) |
+| `SubscribeOfferBook(ticker, bolsa)` | `UnsubscribeOfferBook` | `TOfferBookCallback`/V2 |
+| `SubscribePriceBook` (**DEPRECIADA**) | `UnsubscribePriceBook` | — (use Depth) |
+| `SubscribePriceDepth(assetId*)` | `UnsubscribePriceDepth` | `TConnectorPriceDepthCallback` |
+| `SubscribeAdjustHistory(ticker, bolsa)` | `UnsubscribeAdjustHistory` | `TAdjustHistoryCallback`/V2 |
+| `RequestTickerInfo(ticker, bolsa)` | — | `TAssetListInfoCallback`/V2 |
+
+**Bolsa = uma letra única** (Q05-V): `B` (Bovespa), `F` (BMF). Manual §3.1 linha 1673 é literal: `"Ticker: PETR4, Bolsa: B"`. Usar string `"BMF"` retorna `NL_EXCHANGE_UNKNOWN`.
+
+### 2.4 Market Data — Queries
+
+| Função | Retorna |
+|--------|---------|
+| `GetPriceDepthSideCount(assetId*, side)` | tamanho do lado do livro |
+| `GetPriceGroup(assetId*, side, position, priceGroup*)` | entrada do livro |
+| `GetTheoreticalValues(assetId*, out price, out qty)` | preço teórico (leilão) |
+| `GetLastDailyClose(ticker, bolsa, out close, adjusted)` | fechamento D-1 |
+| `GetHistoryTrades(ticker, bolsa, dtStart, dtEnd)` | dispara `HistoryTradeCallback` + `ProgressCallback` |
+
+**`GetHistoryTrades` quirks:**
+- **Q01-V**: `WDOFUT`/`WINFUT` (genéricos) retornam **0 trades** em janelas históricas. Usar **contrato vigente** (`WDOJ26`, `WINH26`).
+- **Q02-E**: progresso 99% NÃO é trava — DLL cicla conexão antes de entregar histórico. Aguardar até **1800s** sem progresso real.
+- **Q12-E**: chunk size **adaptativo** — WDO 5d, WIN 1d funciona. Maior pode timeout.
+
+### 2.5 Trading — Ordens (V2)
+
+| Função V2 | Struct param | Retorno |
+|-----------|--------------|---------|
+| `SendOrder` | `TConnectorSendOrder*` | `int64` (LocalOrderID ou NL_*) |
+| `SendChangeOrderV2` | `TConnectorChangeOrder*` | `int` |
+| `SendCancelOrderV2` | `TConnectorCancelOrder*` | `int` |
+| `SendCancelOrdersV2` | `TConnectorCancelOrders*` | `int` |
+| `SendCancelAllOrdersV2` | `TConnectorCancelAllOrders*` | `int` |
+| `SendZeroPositionV2` | `TConnectorZeroPosition*` | `int64` |
+
+Rastreamento: `ClOrderID` (permanente) + `MessageID` (sessão).
+
+### 2.6 Metadata / Agentes (manual §3.1)
+
+- `GetAgentNameLength(id, shortFlag)` → `int` — **OBRIGATÓRIO chamar PRIMEIRO** (Q14-E)
+- `GetAgentName(length, id, buffer, shortFlag)` → `int` — preenche buffer
+- `GetAgentNameByID` / `GetAgentShortNameByID` → **DEPRECIADAS** desde 4.0.0.24
+- `TranslateTrade(pTrade, TConnectorTrade*)` → destrincha trade V2
+
+**Cache local obrigatório.** **JAMAIS** chamar de dentro do callback (manual §4).
+
+---
+
+## 3. Callbacks
+
+### 3.1 Tabela completa
+
+Todos com convenção **stdcall** (`WINFUNCTYPE` em Python ctypes). Todos disparados na **ConnectorThread** interna da DLL.
+
+| Callback | Signature (resumo) | Manual ref | Notas |
+|----------|-------------------|------------|-------|
+| `TStateCallback` | `(nConnStateType: int, nResult: int)` | §3.2 L2738, L3267 | Estados de conexão; sequência canônica seção 6 |
+| `TProgressCallback` | `(rAssetID: TAssetIDRec, nProgress: int)` | §3.2 L2739, L3750 | 1..100; 99 + reconnect = quirk Q02-E |
+| `TNewTradeCallback` (V1) | `(rAssetID, pwcDate, nTradeNumber, dPrice, dVol, nQtd, nBuyAgent, nSellAgent, nTradeType, bEdit)` | §3.2 L2740, L3331 | Trade real-time |
+| `TConnectorTradeCallback` (V2) | `(a_Asset, a_pTrade: Pointer, a_nFlags: Cardinal)` | §3.2 L3243 | Use `TranslateTrade` para desempacotar |
+| `TNewDailyCallback` | 19 args (open/high/low/close/vol/etc.) | §3.2 L2762, L3376 | Diário |
+| `TPriceBookCallback`/V2 | (vários) — **DEPRECIADO** → use PriceDepth | §3.2 L2802, L2822 | — |
+| `TOfferBookCallback`/V2 | 16 args (V2 com Int64 nQtd) | §3.2 L2841, L2875 | Livro de ofertas |
+| `TConnectorPriceDepthCallback` | `(a_AssetID, a_Side: Byte, a_nPosition, a_UpdateType: Byte)` | §3.2 L3250 | Livro de preços novo |
+| `TTinyBookCallback` | `(rAssetID, dPrice, nQtd, nSide)` | §3.2 L3022, L3759 | Top of book |
+| `THistoryTradeCallback` (V1) | mesma de TNewTradeCallback | §3.2 L3002, L3730 | Trades históricos |
+| `THistoryTradeCallbackV2` | usa TConnectorTradeCallback; flag `TC_LAST_PACKET` indica fim | §3.2 L1912 | V2 |
+| `TInvalidTickerCallback` | `(AssetID)` | §3.2 L3098, L4095 | Ticker inválido |
+| `TChangeStateTicker` | `(rAssetID, pwcDate, nState)` | §3.2 L3093, L4224 | Mudança fase pregão |
+| `TChangeCotation` | `(rAssetID, pwcDate, nTradeNumber, dPrice)` | §3.2 L3144, L4208 | — |
+| `TAdjustHistoryCallback`/V2 | 8/9 args | §3.2 L3103, L3121 | V2 inclui flags + dMult |
+| `TTheoreticalPriceCallback` | `(rAssetID, dPrice, nQtd: Int64)` | §3.2 L3136, L4102 | Leilão |
+| `TAccountCallback` | (legado) | §3.2 L2914 | Use só com DLLInitializeLogin |
+| `TAssetListCallback` | `(rAssetID, pwcName)` | §3.2 L3032, L3871 | — |
+| `TAssetListInfoCallback`/V2 | 12/15 args | §3.2 L3035, L3061 | V2 inclui setor/subSetor/segmento |
+| `TOrderChangeCallback`/V2 | 17/22 args | §3.2 L2933, L3194 | V2 inclui Validity, dates |
+| `THistoryCallback`/V2 | 16/20 args | §3.2 L2968, L3154 | Hist de ordens |
+| `TConnectorOrderCallback` | `(a_OrderID: TConnectorOrderIdentifier)` | §3.2 L3233 | — |
+| `TConnectorAccountCallback` | `(a_AccountID: TConnectorAccountIdentifier)` | §3.2 L3238 | — |
+| `TConnectorAssetPositionListCallback` | `(AccountID, AssetID, EventID: Int64)` | §3.2 L2909 | — |
+| `TConnectorBrokerAccountListCallback` | `(BrokerID, Changed: Cardinal)` | §3.2 L2924, L4352 | — |
+| `TConnectorBrokerSubAccountListCallback` | `(a_AccountID)` | §3.2 L2928, L4361 | — |
+| `TConnectorTradingMessageResultCallback` | `(a_pResult: PConnectorTradingMessageResult)` | §3.2 L3262 | Resultado de envio ordem |
+| `TConnectorEnumerateOrdersProc` | `(a_Order, a_Param: LPARAM): BOOL` | §3 L794 | Enumerator |
+
+### 3.2 Ordem de chegada / thread
+
+- **Todos** os callbacks chegam na **mesma** thread (`ConnectorThread`), serializados em uma **fila única interna** (manual §4 L4382).
+- Processamento demorado em qualquer callback **bloqueia toda a fila** (logs, livros, trades, states param de chegar).
+- **Padrão obrigatório:** callback faz APENAS `queue.put_nowait(...)` e retorna em <100µs.
+
+---
+
+## 4. Uso & Threading
+
+**Manual §4 linha 4382 — regras oficiais:**
+1. Callbacks executam em ConnectorThread (única thread DLL → cliente).
+2. Fila interna única — processamento lento atrasa tudo.
+3. **Funções da DLL NÃO devem ser chamadas dentro de callback** (Q06-V).
+4. Convenção stdcall (`WINFUNCTYPE`).
+
+**Regra ctypes (não no manual mas obrigatória):**
+- `_cb_refs: list = []` global retém os `WINFUNCTYPE`-wrapped objects para impedir GC. Sem isso, GC libera o objeto e a DLL crasha ao chamar callback (Q07-V).
+
+**Linkagem (manual §4):**
+- DLL principal: `ProfitDLL.dll` (Win64 ou Win32 conforme arquitetura)
+- Companions: várias `.dll` na mesma pasta + arquivos `.dat` (lista canônica em `profitdll/DLLs/Win64/`).
+- **Ausência de companion** causa erro críptico do Windows loader. Validar antes de `WinDLL()` via `verify_dll_companions()` (Story 1.2 AC12).
+
+---
+
+## 5. Códigos de erro
+
+Códigos `NL_*` são `int` retornados por funções (negativos = erro, 0 ou positivo = sucesso/ID). Lista canônica em `profitTypes.py`. Categorias principais (manual §3 "Códigos de erro"):
+
+| Faixa | Categoria | Exemplos |
+|-------|-----------|----------|
+| `NL_OK` (0) | sucesso | — |
+| `NL_INTERNAL_ERROR` | interno DLL | `NL_INVALID_ARGS`, `NL_NOT_INITIALIZED`, `NL_INVALID_HANDLE` |
+| `NL_LICENSE_*` | autenticação/licença | `NL_LICENSE_NOT_FOUND`, `NL_LICENSE_BLOCKED`, `NL_LICENSE_EXPIRED` |
+| `NL_SUBSCRIBE_*` | subscriptions | `NL_SUBSCRIBE_INVALID_TICKER`, `NL_EXCHANGE_UNKNOWN` (Q05-V) |
+| `NL_HISTORY_*` | histórico | `NL_HISTORY_TIMEOUT`, `NL_HISTORY_NO_DATA` |
+| `NL_ORDER_*` | trading | `NL_ORDER_REJECTED`, `NL_ORDER_INVALID_QTY` |
+| `NL_QUEUE_FULL` | fila interna DLL cheia | sintoma de consumer lento (Q15-OPEN) |
+| `cosTimeout` | timeout em conexão | manual §3.1 |
+
+> **Decode obrigatório** via `dll/errors.py decode_nl_error(code) -> NLError(name, message)`. Mapa completo gerado a partir de `profitTypes.py`.
+
+---
+
+## 6. Sequência canônica de inicialização
+
+**Manual §3.2 linha 3317-3329** documenta os 4 conn_types e seus result codes esperados durante o boot:
+
+| conn_type | Nome | result esperado | Significado |
+|-----------|------|----------------|-------------|
+| `0` | `LOGIN` | `0` (CONNECTED) | login OK |
+| `1` | `ROTEAMENTO` | `2` (variável) | roteamento estabelecido |
+| `2` | `MARKET_DATA` | `4` (`MARKET_CONNECTED`) **OU** `2` (`MARKET_WAITING`) [Q10-AMB / Q-AMB-01] | market data conectado |
+| `3` | `MARKET_LOGIN` | `0` | login market OK |
+
+**Decisão Story 1.2 AC5:** aceitar **ambos** `2` e `4` para `conn_type=2` como market data conectado. Logar qual veio com alias resolvido (`MARKET_WAITING` vs `MARKET_CONNECTED`).
+
+**Sequência típica observada (whale-detector v2):**
+```
+(0, 0)  →  LOGIN connected
+(1, 2)  →  ROTEAMENTO connected
+(2, 4)  →  MARKET_DATA → MARKET_CONNECTED  [ou (2, 2) → MARKET_WAITING]
+(3, 0)  →  MARKET_LOGIN OK
+```
+
+Após `(2, 4)` ou `(2, 2)`, market data está pronto para `SubscribeTicker` / `GetHistoryTrades`.
+
+---
+
+## 7. Padrão canônico de uso
+
+```python
+# 1. Verificar companions
+missing = verify_dll_companions(dll_path)
+if missing:
+    raise DLLInitError(-1, "COMPANIONS_MISSING", str(missing))
+
+# 2. Carregar DLL
+dll = WinDLL(str(dll_path))
+
+# 3. Configurar argtypes/restype (reuse de profit_dll.py)
+configure_argtypes(dll)
+
+# 4. SILENCIAR log nativo ANTES do init
+dll.SetEnabledLogToDebug(0)
+
+# 5. Construir 11 callbacks (1 ativo + 8 noop) — JAMAIS passar None (Q11-E)
+state_cb = register_state_callback(state_queue)  # appended to _cb_refs
+noops = [make_noop_callback(t) for t in (TNoopTrade, TNoopDaily, ...)]
+
+# 6. Init com TODOS os 11 slots preenchidos
+ret = dll.DLLInitializeMarketLogin(
+    c_wchar_p(key), c_wchar_p(user), c_wchar_p(pwd),
+    state_cb, *noops,  # 11 args total
+)
+if ret < 0:
+    raise DLLInitError(ret, *decode_nl_error(ret))
+
+# 7. Drenar state queue em thread separada (NÃO no callback)
+while True:
+    conn_type, result = state_queue.get(timeout=remaining)
+    if conn_type == MARKET_DATA and result in (MARKET_WAITING, MARKET_CONNECTED):
+        break  # connected!
+
+# 8. Pronto para SubscribeTicker / GetHistoryTrades
+
+# 9. Finalize: tenta DLLFinalize (manual §4) → fallback Finalize (Q09-AMB)
+try:
+    dll.DLLFinalize()
+except AttributeError:
+    dll.Finalize()
+# NÃO _cb_refs.clear() — ConnectorThread ainda pode referenciar
+```
+
+**Regra absoluta no callback:**
+```python
+def state_callback(conn_type, result):
+    state_queue.put_nowait((conn_type, result))  # SÓ ISSO
+    # PROIBIDO: log, print, dll.foo(), self.bar(), file I/O, sleep, etc.
+```
+
+---
+
+## 8. Versões da DLL
+
+Mudanças notáveis (ordem reversa cronológica) — `agents/profitdll-specialist.md` `expertise.manual_changelog_summary`:
+
+| Versão | Mudanças |
+|--------|----------|
+| **4.0.0.34** | Bug fixes: timeout em send order, revalidação de ativos, livro de preços compra |
+| **4.0.0.31** | Modernização do livro de preços: `TConnectorPriceGroup`, `SubscribePriceDepth`, `SetPriceDepthCallback`, `GetPriceGroup`, `GetPriceDepthSideCount`. `SubscribePriceBook` agora **DEPRECIADA**. |
+| **4.0.0.30** | `AccountType` adicionado em `TConnectorTradingAccountOut` |
+| **4.0.0.28** | Iteração sobre ativos (`EnumerateAllPositionAssets`); listas de contas/subcontas por broker (`GetAccountCountByBroker`, `GetAccountsByBroker`); `EventID` em `TConnectorTradingAccountPosition`, `TConnectorOrder`, `TConnectorOrderOut` |
+| **4.0.0.24** | Resolução de nomes de agentes: `GetAgentNameLength` + `GetAgentName` (substituem `GetAgentNameByID` que vira **DEPRECIADA**). Q14-E: length first. |
+| **4.0.0.20** | Callbacks **V2** de trade: `SetTradeCallbackV2`, `SetHistoryTradeCallbackV2`, `TranslateTrade`. Histórico de ordens aprimorado: `SetOrderHistoryCallback`, `HasOrdersInInterval`, `EnumerateOrdersByInterval`, `EnumerateAllOrders` |
+| **4.0.0.18** | Introdução de `SendOrder` V1 com enums novos: `cotMarket=1`, `cotLimit=2`, `cotStopLimit=4`; `cosBuy=1`, `cosSell=2` (anteriores: `cosBuy=0`, `cosSell=1` — quebra de compat documentada no manual L875/L882) |
+
+**Versão alvo do data-downloader V1:** **4.0.0.34** (mais recente documentada). Versão real exposta em runtime via `ProfitDLL.dll_version` (Story 1.2 AC13) e gravada em metadata Parquet por Sol (H19).
+
+---
+
+## Manutenção
+
+- **Atualizar este arquivo** quando: (a) novo quirk descoberto, (b) nova versão da DLL liberada, (c) divergência manual-vs-prática resolvida.
+- **Comandos Nelo:** `*knowledge-doc` (regenera/atualiza este arquivo); `*manual --section X` (consulta seção crua).
+- **Quirks separados** em [`QUIRKS.md`](./QUIRKS.md). Aqui só ficam referências `[Qxx-S]`.
+- **Perguntas abertas** em [`OPEN_QUESTIONS_RESPONSES.md`](./OPEN_QUESTIONS_RESPONSES.md).
+
+— Nelo, guardião da DLL 🗝️

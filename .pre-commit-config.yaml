@@ -1,0 +1,171 @@
+# =============================================================================
+# .pre-commit-config.yaml — Squad data-downloader
+# Owner: Gage (devops). Endereça finding H17 (pre-commit hook não versionado).
+# Story 0.2 — Pre-commit Framework.
+#
+# Instalar:
+#   pip install pre-commit
+#   pre-commit install
+#   pre-commit install --hook-type commit-msg     # commitlint
+#   pre-commit install --hook-type pre-push       # secrets gate
+#
+# Rodar manualmente:
+#   pre-commit run --all-files
+#
+# Atualizar versões:
+#   pre-commit autoupdate
+# =============================================================================
+
+minimum_pre_commit_version: "3.5.0"
+
+default_language_version:
+  python: python3.11
+
+default_stages: [pre-commit]
+
+# Falha rápida — primeiro hook que falhar interrompe.
+fail_fast: false
+
+repos:
+  # ===========================================================================
+  # 1. Sanity gerais (rápidos, rodam primeiro)
+  # ===========================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$|profitdll/Manual/.*'
+      - id: end-of-file-fixer
+        exclude: 'profitdll/Manual/.*\.pdf$'
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: [--unsafe]   # permite tags Pydantic/pre-commit custom
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=1024]   # 1 MB
+        # Manual PDFs ProfitDLL podem exceder; pasta inteira excluída.
+        exclude: 'profitdll/Manual/.*'
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ===========================================================================
+  # 2. Detecção de secrets — CRITICAL (regex de credenciais conhecidas)
+  # ===========================================================================
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args:
+          - --baseline
+          - .secrets.baseline
+        exclude: |
+          (?x)^(
+            \.secrets\.baseline$ |
+            poetry\.lock$ |
+            uv\.lock$ |
+            profitdll/Manual/.*
+          )$
+
+  # ===========================================================================
+  # 3. Ruff — lint + format (substitui black/isort/flake8)
+  # ===========================================================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # ===========================================================================
+  # 4. mypy — type-check estrito
+  # ===========================================================================
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        args: [--strict, --ignore-missing-imports]
+        additional_dependencies:
+          - pydantic>=2.0
+          - types-PyYAML
+        files: ^src/
+        exclude: ^tests/
+
+  # ===========================================================================
+  # 5. Custom hooks locais — guard-rails específicos do squad
+  # ===========================================================================
+  - repo: local
+    hooks:
+      # ---------------------------------------------------------------------
+      # 5.1 — Bloquear commit em src/data_downloader/dll/ sem story-id na msg
+      # Justificativa: R12 (mudanças no wrapper DLL exigem disciplina/auditoria).
+      # ---------------------------------------------------------------------
+      - id: dll-story-discipline
+        name: "DLL changes require story reference in commit message"
+        entry: python scripts/hooks/check_dll_story_ref.py
+        language: python
+        stages: [commit-msg]
+        always_run: true
+        pass_filenames: false
+
+      # ---------------------------------------------------------------------
+      # 5.2 — Bloquear print() / console.log em src/
+      # Justificativa: hot path (R21) + structlog obrigatório (ADR-010 futuro).
+      # ---------------------------------------------------------------------
+      - id: no-print-in-src
+        name: "Block print() and console.log in src/"
+        entry: python scripts/hooks/check_no_print.py
+        language: python
+        files: ^src/.*\.(py|ts|js|tsx|jsx)$
+        pass_filenames: true
+
+      # ---------------------------------------------------------------------
+      # 5.3 — Validar conventional commits (commitlint nativo via Python)
+      # Formato: <type>(<scope>)?: <subject> [Story N.M]
+      # Types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert
+      # ---------------------------------------------------------------------
+      - id: conventional-commits
+        name: "Enforce conventional commits with story reference"
+        entry: python scripts/hooks/check_conventional_commit.py
+        language: python
+        stages: [commit-msg]
+        always_run: true
+        pass_filenames: false
+
+      # ---------------------------------------------------------------------
+      # 5.4 — Bloquear .env, .env.* em qualquer commit
+      # Defense-in-depth (gitignore + hook explícito).
+      # ---------------------------------------------------------------------
+      - id: no-dotenv
+        name: "Block .env files from being committed"
+        entry: python scripts/hooks/check_no_dotenv.py
+        language: python
+        always_run: true
+        pass_filenames: false
+
+  # ===========================================================================
+  # 6. Pre-push — última linha de defesa antes de Gage publicar
+  # ===========================================================================
+  - repo: local
+    hooks:
+      - id: gage-pre-push-gate
+        name: "Gage pre-push gate (Quinn PASS + Morgan auth + clean tree)"
+        entry: python scripts/hooks/gage_pre_push_gate.py
+        language: python
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+
+# =============================================================================
+# CI Integration (futuro — Story de Epic 4)
+# pre-commit.ci automerges autoupdate PRs; configurado em .pre-commit-ci.yaml
+# =============================================================================
+ci:
+  autofix_commit_msg: 'style: pre-commit auto-fixes [skip ci]'
+  autofix_prs: true
+  autoupdate_branch: chore/pre-commit-autoupdate
+  autoupdate_commit_msg: 'chore: pre-commit autoupdate'
+  autoupdate_schedule: monthly
+  skip: [mypy, gage-pre-push-gate, conventional-commits, dll-story-discipline]
+  submodules: false

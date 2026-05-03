@@ -1,0 +1,155 @@
+# =============================================================================
+# .gitignore — data-downloader
+# Owner: Gage (devops). Spec final aprovada em Story 0.1 (BOOTSTRAP_PROTOCOL).
+# Coordenado com Aria via ADR-008 (DLL Distribution Strategy).
+# Não modificar sem PR + revisão de Gage.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.installed.cfg
+develop-eggs/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+MANIFEST
+
+# -----------------------------------------------------------------------------
+# Build / dist artifacts
+# -----------------------------------------------------------------------------
+build/
+dist/
+*.spec.bak
+
+# -----------------------------------------------------------------------------
+# Test / coverage / type / lint caches
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# -----------------------------------------------------------------------------
+# Virtual envs
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# -----------------------------------------------------------------------------
+# Environment / secrets — NEVER COMMIT
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# -----------------------------------------------------------------------------
+# Data — datasets baixados nunca entram no repo
+# -----------------------------------------------------------------------------
+data/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite-journal
+*.db
+
+# -----------------------------------------------------------------------------
+# ProfitDLL — distribuição via scripts/bootstrap-dll.ps1 (ADR-008)
+# Mantém: profitdll/Manual/ + profitdll/Exemplo Python/ + profitdll/__init__.py
+# Exclui: ProfitDLL.dll + companions + .dat files + Logs DLL + diretórios runtime
+# -----------------------------------------------------------------------------
+profitdll/DLLs/Win64/ProfitDLL.dll
+profitdll/DLLs/Win64/libssl-1_1-x64.dll
+profitdll/DLLs/Win64/libcrypto-1_1-x64.dll
+profitdll/DLLs/Win64/libeay32.dll
+profitdll/DLLs/Win64/ssleay32.dll
+profitdll/DLLs/Win64/*.dat
+profitdll/DLLs/Win64/Logs/
+profitdll/DLLs/Win64/MarketHours2/
+profitdll/DLLs/Win64/PopupManagerV2/
+profitdll/DLLs/Win64/database/
+profitdll/DLLs/Win64/strategy/
+profitdll/DLLs/Win64/Erro.log
+profitdll/DLLs/Win32/ProfitDLL.dll
+profitdll/bin/
+
+# Logs gerados pela DLL em qualquer working dir
+**/Logs/
+
+# Local DLL working dir (placeholder usado por bootstrap-dll.ps1 em desenvolvimento)
+/dll/
+
+# -----------------------------------------------------------------------------
+# Logs / temp
+# -----------------------------------------------------------------------------
+logs/
+*.log
+*.tmp
+*.tmp.*
+*.bak
+*.swp
+*~
+
+# -----------------------------------------------------------------------------
+# IDE / editor
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/settings.json.example
+!.vscode/extensions.json
+*.sublime-project
+*.sublime-workspace
+
+# -----------------------------------------------------------------------------
+# OS
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# -----------------------------------------------------------------------------
+# AIOX runtime
+# -----------------------------------------------------------------------------
+.aiox/handoffs/
+.aiox/logs/
+
+# -----------------------------------------------------------------------------
+# Pre-commit cache
+# -----------------------------------------------------------------------------
+.pre-commit-config.yaml.bak
+
+# -----------------------------------------------------------------------------
+# Secrets-baseline (gerenciado por detect-secrets, ok commitar mas sem valores)
+# -----------------------------------------------------------------------------
+# .secrets.baseline  # mantido versionado intencionalmente
