@@ -36,9 +36,9 @@ JSON schema (resumido):
 
 from __future__ import annotations
 
-import json
+import json  # noqa: F401  # used by commented-out skeleton body
 import statistics
-import time
+import time  # noqa: F401  # used by commented-out skeleton body
 from pathlib import Path
 from typing import Any
 

@@ -36,9 +36,12 @@ Uso:
 
 from __future__ import annotations
 
-import random
-import time
-from typing import Iterator
+import random  # noqa: F401  # used by commented-out skeleton body
+import time  # noqa: F401  # used by commented-out skeleton body
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 
 # TODO: alinhar schema final com Sol Story 0.0 — campos podem mudar

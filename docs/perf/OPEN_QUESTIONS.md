@@ -151,4 +151,23 @@ Outros agentes podem adicionar perguntas pendentes que afetem performance:
 
 Pyro audita semanalmente e fecha perguntas resolvidas (move para `OPEN_QUESTIONS_RESOLVED.md` futuro).
 
+---
+
+## Hotfixes aplicados
+
+### 2026-05-03 — Fix F821 em `benchmarks/fixtures/synthetic_trades.py`
+
+**Detector:** Gage (devops) durante `pre-commit run --all-files` na validação do framework Story 0.2.
+
+**Bug:** `ruff F821 — Undefined name 'pa'` em `benchmarks/fixtures/synthetic_trades.py:142` (anotação de retorno `"pa.Table"` em `generate_batch_arrow`). Faltava `import pyarrow as pa`.
+
+**Fix aplicado:**
+- Adicionado `import pyarrow as pa` sob bloco `if TYPE_CHECKING:` (anotação é forward-reference em string; runtime não precisa carregar pyarrow enquanto skeleton só `raise NotImplementedError`).
+- Adicionado `# noqa: F401` aos imports placeholder (`random`, `time`, etc.) em `benchmarks/fixtures/synthetic_trades.py`, `benchmarks/fixtures/mock_dll.py` e `benchmarks/bench_*.py` para preservar imports usados pelo corpo comentado dos skeletons (alvo: pre-commit ruff `--fix` não mais remover esses imports e quebrar quando código real for descomentado).
+- Ruff-format aplicou reformatação automática em 5 arquivos (sem mudança de lógica).
+
+**Validação:** `ruff check benchmarks/` → `All checks passed!`; `pre-commit run ruff --files benchmarks/...` → `Passed`; `pre-commit run ruff-format --files benchmarks/...` → `Passed`.
+
+**Não-fix (deixado intencionalmente):** lógica dos skeletons permanece como esqueletos com `raise NotImplementedError` — implementação real continua dependente de Sol Story 0.0 (schema final), Story 1.4 (dedup), Story 1.7a (orchestrator), etc.
+
 — Pyro ⚡

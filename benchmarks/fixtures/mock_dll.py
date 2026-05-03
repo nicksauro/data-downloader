@@ -30,8 +30,8 @@ Uso:
 from __future__ import annotations
 
 import threading
-import time
-from typing import Callable, Iterator
+import time  # noqa: F401  # used by commented-out skeleton body
+from typing import Callable, Iterator  # noqa: F401  # Iterator used by commented-out skeleton body
 
 # TODO: imports
 # from benchmarks.fixtures.synthetic_trades import generate
@@ -186,8 +186,13 @@ class MockProfitDLL:
         # return 0
         raise NotImplementedError("Aguarda implementação")
 
-    def fire_trade(self, trade_id: int, *, inject_marker: bool = False,
-                   inject_ts_ns: int | None = None) -> bool:
+    def fire_trade(
+        self,
+        trade_id: int,
+        *,
+        inject_marker: bool = False,
+        inject_ts_ns: int | None = None,
+    ) -> bool:
         """Helper para benchmarks: força injeção de 1 trade no callback.
 
         Returns:

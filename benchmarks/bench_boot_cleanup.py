@@ -40,10 +40,10 @@ JSON schema:
 
 from __future__ import annotations
 
-import os
-import json
+import os  # noqa: F401  # used by commented-out skeleton body
+import json  # noqa: F401  # used by commented-out skeleton body
 import statistics
-import time
+import time  # noqa: F401  # used by commented-out skeleton body
 from pathlib import Path
 from typing import Any
 
@@ -112,9 +112,7 @@ def main() -> None:
     # results = [run_scenario(s, tmp_dir) for s in SCENARIOS]
     # verdict = "PASS" if max(r["elapsed_ms_p99"] for r in results
     #                          if r["n_orphans"] == 10000) < TARGET_MS_10K else "FAIL"
-    raise NotImplementedError(
-        "bench_boot_cleanup é esqueleto sintético (Story 1.4.5)."
-    )
+    raise NotImplementedError("bench_boot_cleanup é esqueleto sintético (Story 1.4.5).")
 
 
 if __name__ == "__main__":

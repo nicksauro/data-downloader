@@ -44,9 +44,9 @@ JSON schema:
 
 from __future__ import annotations
 
-import json
-import statistics
-import time
+import json  # noqa: F401  # used by commented-out skeleton body
+import statistics  # noqa: F401  # used by commented-out skeleton body
+import time  # noqa: F401  # used by commented-out skeleton body
 from pathlib import Path
 from typing import Any
 
@@ -126,9 +126,7 @@ def main() -> None:
     # result = measure_full_month(tmp_dir)
     # result["verdict"] = "PASS" if result["total_ms"] < TARGET_TOTAL_MIN * 60_000 else "FAIL"
     # _save(result)
-    raise NotImplementedError(
-        "bench_chunking é esqueleto sintético (Story 1.4.5)."
-    )
+    raise NotImplementedError("bench_chunking é esqueleto sintético (Story 1.4.5).")
 
 
 if __name__ == "__main__":

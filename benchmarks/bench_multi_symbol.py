@@ -44,10 +44,10 @@ JSON schema:
 
 from __future__ import annotations
 
-import json
-import statistics
-import subprocess
-import time
+import json  # noqa: F401  # used by commented-out skeleton body
+import statistics  # noqa: F401  # used by commented-out skeleton body
+import subprocess  # noqa: F401  # used by commented-out skeleton body
+import time  # noqa: F401  # used by commented-out skeleton body
 from pathlib import Path
 from typing import Any
 

@@ -39,9 +39,9 @@ JSON schema:
 
 from __future__ import annotations
 
-import json
-import statistics
-import time
+import json  # noqa: F401  # used by commented-out skeleton body
+import statistics  # noqa: F401  # used by commented-out skeleton body
+import time  # noqa: F401  # used by commented-out skeleton body
 from pathlib import Path
 from typing import Any
 
@@ -63,13 +63,17 @@ FILTER_SELECTIVITIES = {
 }
 
 
-def setup_parquet_files(row_group_size: int, tmp_dir: Path) -> tuple[list[Path], int, int]:
+def setup_parquet_files(
+    row_group_size: int, tmp_dir: Path
+) -> tuple[list[Path], int, int]:
     """Gera 10M trades; retorna (files, ts_min, ts_max)."""
     # TODO: gerar via fixtures.synthetic_trades, retornar range temporal
     raise NotImplementedError("Aguarda fixtures.synthetic_trades")
 
 
-def compute_filter_range(ts_min: int, ts_max: int, selectivity: float) -> tuple[int, int]:
+def compute_filter_range(
+    ts_min: int, ts_max: int, selectivity: float
+) -> tuple[int, int]:
     """Retorna (lo, hi) que selecionam ~selectivity dos trades, centrados."""
     span = ts_max - ts_min
     width = int(span * selectivity)
