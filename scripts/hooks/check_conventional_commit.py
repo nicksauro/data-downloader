@@ -7,7 +7,8 @@ Contrato pre-commit (commit-msg):
 
 Bloqueia (exit 1) quando:
     - Linha de subject (primeira linha não-vazia) NÃO casa com regex conventional commits:
-        ^(feat|fix|docs|chore|refactor|test|perf|build|ci|style|revert)(\\([\\w\\-./]+\\))?(!)?:\\s.+
+        ^(feat|fix|docs|chore|refactor|test|perf|build|ci|style|revert)
+        (\\([\\w\\-./]+\\))?(!)?:\\s.+
     - Subject excede 100 caracteres (warning leve, não bloqueia)
     - Comentários (#...) e linhas vazias no topo são ignorados (modo `git commit -v`)
 
@@ -67,11 +68,13 @@ def main(argv: list[str]) -> int:
         print("BLOCKED: commit subject does not follow Conventional Commits.", file=sys.stderr)
         print(f"  Got: {subject!r}", file=sys.stderr)
         print(
-            "  Expected: <type>(<scope>)?: <subject>  e.g. 'feat(dll): add reconnection (Story 1.4)'",
+            "  Expected: <type>(<scope>)?: <subject>"
+            "  e.g. 'feat(dll): add reconnection (Story 1.4)'",
             file=sys.stderr,
         )
         print(
-            "  Allowed types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert",
+            "  Allowed types: feat, fix, docs, chore, refactor, test,"
+            " perf, build, ci, style, revert",
             file=sys.stderr,
         )
         return 1
