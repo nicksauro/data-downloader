@@ -1,9 +1,28 @@
 # CODERABBIT_DECISION — Story 0.4
 
 **Owner:** Gage (devops) + Quinn (qa)
-**Status:** spec — recomendação registrada, aprovação pendente Morgan
+**Status:** **ADOPTED — Opção B (advisory only)**
+**Adoption Date:** 2026-05-03
+**Approvers:** Gage (devops, infra) + Quinn (qa, gate authority)
 **Story:** 0.4 — CodeRabbit adoption decision
 **Finding:** M3 (PLAN_REVIEW_2026-05-03.md) — CodeRabbit referenciado em `agents/dev.md` mas não adaptado nem em stories.
+
+---
+
+## 0. DECISÃO FORMAL (TL;DR)
+
+| Item | Decisão |
+|------|---------|
+| **Status** | ADOPTED — Opção B (advisory only) |
+| **Self-healing automático em `Dex *develop`** | **DESLIGADO** |
+| **Trigger inicial** | Quinn invoca manualmente em PR > 500 LOC (NÃO automático em pre-commit, NÃO em `*develop`) |
+| **Squad usa especialistas** | Nelo (DLL), Sol (storage), Aria (arquitetura), Quinn (qualidade) — CodeRabbit é input opcional, NUNCA gate |
+| **Severity matrix (canônica em `docs/qa/CODE_RABBIT_INTEGRATION.md` §4-5)** | CRITICAL bloqueia QA gate; HIGH/MEDIUM viram dívida em `docs/debt/`; LOW ignorado/informativo |
+| **`.coderabbit.yaml` versionado** | NÃO criar |
+| **CI workflow CodeRabbit** | NÃO configurar em Epic 1 |
+| **Revisitar** | Após Story 1.7b (gate Epic 1) — avaliar se valor entregue justifica overhead |
+
+> **Autoridade:** Quinn é autoridade final sobre QA gate (inclusive sobre severity reclassification). Gage é autoridade sobre infra/instalação WSL. Conflitos de severity → Quinn decide.
 
 ---
 
@@ -72,7 +91,7 @@ Remover toda referência a CodeRabbit das stories, dos agents, e dos rules locai
 | `Dex *develop` self-heal loop | Ativo (max 2 iter) | **DESATIVADO** |
 | `agents/dev.md` referência CodeRabbit | Implícita (via rules) | **Explicitamente: "consultar somente sob solicitação de Quinn"** |
 | `.coderabbit.yaml` | Não existe | **Continua não existindo** (decisão revisitada se Story de Epic 4 trouxer back) |
-| Quinn `*qa-gate` | Sem CodeRabbit | **Pode invocar manualmente** se PR > 500 LOC ou se sentir necessário |
+| Quinn `*qa-gate` | Sem CodeRabbit | **Invoca manualmente APENAS em PR > 500 LOC** (trigger formal — ver §0) |
 | CI workflow CodeRabbit | Não configurado | **Não configurar** em Epic 1; reavaliar em Epic 4 (release) |
 
 ---
@@ -105,13 +124,16 @@ CodeRabbit retorna texto estruturado em formato Markdown com:
 
 ### 4.4 Como Quinn deve interpretar
 
-| Severidade CodeRabbit | Ação Quinn |
-|-----------------------|------------|
-| Critical | Considerar como input — ainda decide com base em INV-* e checklists |
-| Major | Avaliar se conflita com Nelo/Sol/Aria; se sim, especialista do squad tem precedência |
-| Minor | Ignorar se já passou pre-commit/ruff |
+> **CANÔNICO:** A matriz de severity completa vive em `docs/qa/CODE_RABBIT_INTEGRATION.md` §4 (Quinn é autoridade). Resumo abaixo:
 
-> **REGRA:** CodeRabbit é **input para Quinn**, NUNCA gate automático. Verdict final é Quinn.
+| Severidade CodeRabbit (mapeada) | Ação Quinn | Política |
+|---------------------------------|------------|----------|
+| **CRITICAL** (bug/security/correctness violando INV-*) | Bloqueia PASS | Vai para QA_FIX_REQUEST.md; Dex DEVE corrigir |
+| **HIGH** (bug não-hot path, perf hot path) | NÃO bloqueia automaticamente; >= 3 HIGH → CONCERNS | Vira dívida em `docs/debt/` (story-debt criada) |
+| **MEDIUM** (maintainability, perf não-hot) | NÃO bloqueia | Vira dívida em `docs/debt/` (catálogo cumulativo) |
+| **LOW** (style, naming, nitpick) | Informativo | Ignorado / aplicação oportunística |
+
+> **REGRA:** CodeRabbit é **input para Quinn**, NUNCA gate automático. Verdict final é Quinn. Se CodeRabbit conflita com Nelo/Sol/Aria, especialista do squad tem precedência (Quinn documenta no QA_REPORT).
 
 ---
 
@@ -119,20 +141,23 @@ CodeRabbit retorna texto estruturado em formato Markdown com:
 
 | Gate | Roda CodeRabbit? | Quem invoca |
 |------|------------------|-------------|
-| `Dex *develop` (self-heal) | **NÃO** | — |
-| `Quinn *qa-gate` em PR pequeno (< 200 LOC) | NÃO (default) | — |
-| `Quinn *qa-gate` em PR grande (> 500 LOC) | **OPCIONAL** | Quinn decide |
-| `Quinn *qa-gate` em PR de DLL wrapper | **NÃO** (Nelo audita) | — |
-| `Quinn *qa-gate` em PR de storage | **NÃO** (Sol audita) | — |
-| `Quinn *qa-gate` em PR de arquitetura | **NÃO** (Aria audita) | — |
-| `Quinn *qa-gate` em PR de UI/CLI | **OPCIONAL** | Quinn decide |
+| `Dex *develop` (self-heal) | **NÃO** (DESLIGADO formalmente em §0) | — |
+| Pre-commit / pre-push automático | **NÃO** (decisão revisada — não é trigger automático) | — |
+| `Quinn *qa-gate` em PR <= 500 LOC | NÃO | — |
+| `Quinn *qa-gate` em PR > 500 LOC | **SIM (manual)** — trigger formal | Quinn decide |
+| `Quinn *qa-gate` em PR de DLL wrapper | **NÃO** (Nelo audita, mesmo se > 500 LOC) | — |
+| `Quinn *qa-gate` em PR de storage | **NÃO** (Sol audita, mesmo se > 500 LOC) | — |
+| `Quinn *qa-gate` em PR de arquitetura | **NÃO** (Aria audita, mesmo se > 500 LOC) | — |
+| `Quinn *qa-gate` em PR de UI/CLI > 500 LOC | **OPCIONAL** | Quinn decide |
 | Release final (Gage) | NÃO | — |
 
 ---
 
 ## 6. Re-avaliação programada
 
-Esta decisão é **revisitada em Story de Epic 4 (release V1)**. Triggers para re-avaliar:
+**Re-avaliação obrigatória após Story 1.7b (gate Epic 1)** — avaliar se valor entregue justifica overhead operacional. Decisão pode ser mantida (Opção B), promovida (Opção A), ou removida (Opção C).
+
+Esta decisão é **também revisitada em Story de Epic 4 (release V1)**. Triggers para re-avaliar:
 
 - Squad cresce com agente humano externo → CodeRabbit vira útil para alinhar
 - Especialistas internos atrasarem reviews → CodeRabbit vira gap-filler
@@ -156,10 +181,25 @@ Até lá: **modo advisory, opcional, invocação manual por Quinn**.
 
 ## 8. Decisão final
 
-**Status proposto:** **Opção B — Advisory tool, opt-in, manual invocation por Quinn.**
+**Status:** **ADOPTED — Opção B — Advisory tool, opt-in, manual invocation por Quinn em PR > 500 LOC.**
 
-**Pendência:**
-- Morgan ratificar (15 min de leitura)
-- Quinn confirmar protocolo de invocação manual (atualizar QA_PROTOCOL futuro)
+**Aprovadores:**
+- ⚙️ **Gage (devops):** assina autoridade sobre infra (instalação WSL, ausência de `.coderabbit.yaml`, ausência de CI workflow)
+- 🧪 **Quinn (qa):** assina autoridade sobre QA gate (severity matrix canônica em `docs/qa/CODE_RABBIT_INTEGRATION.md` §4-5; trigger; bloqueio CRITICAL)
 
-— Gage, publicando com cuidado ⚙️
+**Data:** 2026-05-03
+
+**Pendências (não-bloqueantes):**
+- Morgan ratificar formalmente em próximo `*release-readiness` (informativo — adoção já válida)
+- Re-avaliar após Story 1.7b (gate Epic 1)
+
+— Gage, publicando com cuidado ⚙️ + Quinn, no portão 🧪
+
+---
+
+## Change Log
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2026-05-03 | Gage (Fase A) | Documento criado — recomendação Opção B registrada (status spec) |
+| 2026-05-03 | Gage + Quinn (Fase B) | **Status ADOPTED.** Adicionada §0 (decisão TL;DR formal). Harmonizada §3.2 (trigger restringido a PR > 500 LOC). Harmonizada §4.4 (severity matrix delegada à autoridade canônica de Quinn em CODE_RABBIT_INTEGRATION.md §4-5). Harmonizada §5 (tabela de gates clarificada: pre-commit/automatic NÃO é trigger). Adicionada §6 trigger de re-avaliação após Story 1.7b. §8 atualizada com aprovadores formais + data. |

@@ -13,27 +13,31 @@
 
 | Aspecto              | Decisão                                                                |
 |----------------------|------------------------------------------------------------------------|
-| **Status**           | Advisory (não-bloqueante por padrão; CRITICAL bloqueia)                 |
-| **Decisão de adoção**| Gage owner — `docs/release/CODERABBIT_DECISION.md` (Story 0.4)         |
-| **Quem roda**        | Dex (pre-commit / pre-push) ou Quinn (durante `*qa-gate`)              |
+| **Status**           | **ADOPTED — Opção B (advisory; CRITICAL bloqueia QA gate)**             |
+| **Decisão formal**   | `docs/release/CODERABBIT_DECISION.md` §0 (Story 0.4, ADOPTED 2026-05-03) |
+| **Trigger único**    | **Quinn invoca manualmente em PR > 500 LOC** (NÃO pre-commit, NÃO `*develop`) |
+| **Self-healing automático** | **DESLIGADO** — squad usa especialistas (Nelo/Sol/Aria/Quinn) |
 | **Quem audita output**| Quinn — incorpora ao QA_REPORT seção 6                                |
 | **Ambiente**         | WSL (Windows Subsystem for Linux) — ferramenta CLI Linux               |
+| **Instalação CodeRabbit CLI no WSL** | **Responsabilidade do usuário** (ver Apêndice A) — não bloqueia Story 0.4 |
 
-> Se Gage decidir em Story 0.4 NÃO adotar CodeRabbit, este documento vira
-> placeholder e a seção 6 do `QA_REPORT.md` é marcada como N/A.
+> Adoção formalizada em `docs/release/CODERABBIT_DECISION.md` §0 + §8 (Gage + Quinn aprovaram em 2026-05-03). Re-avaliação obrigatória após Story 1.7b.
 
 ---
 
 ## 2. Comando WSL
 
-### 2.1 Pre-commit (uncommitted changes)
+### 2.1 Manual sobre uncommitted changes (uso ad-hoc por Quinn — NÃO automático)
+
+> **Não é hook de pre-commit.** Trigger automático foi DESLIGADO em §0/CODERABBIT_DECISION §0.
+> Comando preservado abaixo apenas para invocação manual de Quinn quando útil.
 
 ```bash
 wsl bash -c 'cd /mnt/c/Users/Pichau/Desktop/data-downloader \
   && ~/.local/bin/coderabbit --prompt-only -t uncommitted'
 ```
 
-### 2.2 Pre-PR (vs base branch)
+### 2.2 Pre-PR vs base branch (uso manual por Quinn em PR > 500 LOC)
 
 ```bash
 wsl bash -c 'cd /mnt/c/Users/Pichau/Desktop/data-downloader \
@@ -179,9 +183,57 @@ Em todos os casos de skip, Quinn anota `CodeRabbit: skipped — rationale: {{ X 
 
 ## 10. Pendências
 
-- **Story 0.4** (Gage): decisão final de adoção. Se NÃO adotar, rever este doc.
+- ~~**Story 0.4** (Gage): decisão final de adoção.~~ **RESOLVED 2026-05-03** — ADOPTED Opção B (advisory).
 - Mapping para severity ainda é manual; futuro: script `tools/coderabbit_to_qa_report.py` (issue tracker).
 - Considerar custo de runs em PRs grandes (timeout WSL — Gage avalia).
+- **Instalação CodeRabbit CLI no WSL** — pendente (responsabilidade do usuário; ver Apêndice A). Não bloqueia Story 0.4.
+- **Re-avaliação obrigatória após Story 1.7b** (gate Epic 1) — Quinn + Gage avaliam se valor entregue justifica overhead.
+
+---
+
+## Apêndice A — Probe de disponibilidade do CodeRabbit no WSL (2026-05-03)
+
+**Executado por:** Gage durante fechamento da Story 0.4.
+
+| Check | Resultado | Detalhe |
+|-------|-----------|---------|
+| WSL disponível | **YES** | Distros: `Ubuntu (Padrão)`, `docker-desktop` |
+| Comando: `wsl bash -c 'which coderabbit \|\| ls -la ~/.local/bin/coderabbit 2>/dev/null \|\| echo NOT_INSTALLED'` | **NOT_INSTALLED** | CodeRabbit CLI não está instalado em `$PATH` nem em `~/.local/bin/coderabbit` |
+
+### Implicação
+
+CodeRabbit não é executável neste host **agora**. Como adoção é **advisory + on-demand** (Opção B), isso **NÃO bloqueia** o fechamento da Story 0.4 nem qualquer story subsequente até a primeira ocasião em que Quinn precise invocar (PR > 500 LOC).
+
+### Instalação (responsabilidade do usuário, quando necessário)
+
+Documentação oficial: https://docs.coderabbit.ai/cli (verificar URL atual). Comando típico (sujeito a mudança):
+
+```bash
+wsl bash -c 'curl -fsSL https://cli.coderabbit.ai/install.sh | sh'
+```
+
+Após instalar, validar:
+
+```bash
+wsl bash -c '~/.local/bin/coderabbit --version'
+```
+
+### Quando instalar
+
+- Quando Quinn identificar primeiro PR > 500 LOC fora do escopo de especialista (Nelo/Sol/Aria) e quiser segunda opinião.
+- Antes da Story 1.7b (gate Epic 1) é recomendado para que Quinn possa invocar se decidir.
+- Custo: ~5-10 min de install + autenticação CodeRabbit (chave API ou OAuth, conforme produto).
+
+> **Decisão:** Sem instalação automatizada via squad. Gage não prescreve infra que não vai usar imediatamente. Usuário instala quando Quinn pedir.
+
+---
+
+## Change Log
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2026-05-03 | Quinn (Fase A) | Documento criado — operacionalização da decisão de Gage (status pendente) |
+| 2026-05-03 | Gage + Quinn (Fase B) | Status atualizado para **ADOPTED**. §1 harmonizada (trigger único = Quinn manual em PR > 500 LOC; pre-commit removido como auto-trigger). §2.1/§2.2 reclassificadas como invocação manual (não hook). §10 pendência Story 0.4 marcada como RESOLVED. **Apêndice A adicionado** (probe WSL: CodeRabbit NOT_INSTALLED — instalação delegada ao usuário, não bloqueante). |
 
 ---
 
