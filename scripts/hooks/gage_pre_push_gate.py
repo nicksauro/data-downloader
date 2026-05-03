@@ -23,6 +23,7 @@ Justificativa:
 
 Owner: Gage (devops). Story 0.2.
 """
+
 from __future__ import annotations
 
 import os
@@ -54,9 +55,14 @@ def commits_in_range(local_sha: str, remote_sha: str) -> list[str]:
         rev_range = f"{remote_sha}..{local_sha}"
         extra = []
     try:
+        # Force UTF-8 to avoid cp1252 UnicodeDecodeError on Windows (Task #38 fix)
         result = subprocess.run(
             ["git", "log", "--format=%H%x00%B%x1e", rev_range, *extra],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return [c for c in result.stdout.split("\x1e") if c.strip()]
     except subprocess.CalledProcessError:
@@ -65,8 +71,14 @@ def commits_in_range(local_sha: str, remote_sha: str) -> list[str]:
 
 def working_tree_clean() -> bool:
     try:
+        # Force UTF-8 to avoid cp1252 UnicodeDecodeError on Windows (Task #38 fix)
         result = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True, check=True,
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return not result.stdout.strip()
     except subprocess.CalledProcessError:
@@ -76,7 +88,9 @@ def working_tree_clean() -> bool:
 def qa_report_pass(story_id: str) -> bool:
     if not QA_REPORTS_DIR.exists():
         return True  # fail-open: pre-Story 1.x
-    matches = list(QA_REPORTS_DIR.glob(f"{story_id}-*.md")) + list(QA_REPORTS_DIR.glob(f"{story_id}.md"))
+    matches = list(QA_REPORTS_DIR.glob(f"{story_id}-*.md")) + list(
+        QA_REPORTS_DIR.glob(f"{story_id}.md")
+    )
     if not matches:
         return False
     for report in matches:
@@ -88,7 +102,10 @@ def qa_report_pass(story_id: str) -> bool:
 
 def main() -> int:
     if os.environ.get("GAGE_BYPASS") == "1":
-        print("WARN: GAGE_BYPASS=1 active — pre-push gate skipped (audit this!).", file=sys.stderr)
+        print(
+            "WARN: GAGE_BYPASS=1 active — pre-push gate skipped (audit this!).",
+            file=sys.stderr,
+        )
         return 0
     if not working_tree_clean():
         print("BLOCKED: working tree not clean. Commit or stash before pushing.", file=sys.stderr)
@@ -107,9 +124,18 @@ def main() -> int:
     if failing:
         print("BLOCKED: push references stories without QA PASS report:", file=sys.stderr)
         for sid in failing:
-            print(f"  - Story {sid}: no PASS in {QA_REPORTS_DIR.relative_to(REPO_ROOT)}/{sid}-*.md", file=sys.stderr)
-        print("  Quinn must produce QA report with `verdict: PASS` before Gage pushes.", file=sys.stderr)
-        print("  Bypass: GAGE_BYPASS=1 git push (emergency only — log in AUDIT.md).", file=sys.stderr)
+            print(
+                f"  - Story {sid}: no PASS in {QA_REPORTS_DIR.relative_to(REPO_ROOT)}/{sid}-*.md",
+                file=sys.stderr,
+            )
+        print(
+            "  Quinn must produce QA report with `verdict: PASS` before Gage pushes.",
+            file=sys.stderr,
+        )
+        print(
+            "  Bypass: GAGE_BYPASS=1 git push (emergency only — log in AUDIT.md).",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

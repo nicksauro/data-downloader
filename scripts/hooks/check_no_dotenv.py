@@ -9,10 +9,10 @@ Bloqueia (exit 1) quando:
     - QUALQUER arquivo staged casa com pattern `.env` ou `.env.*`
       (excluindo whitelist explícita: `.env.example`, `.env.template`, `.env.sample`).
     - Conteúdo staged contém linhas suspeitas de credenciais (regex de segurança):
-        * PROFITDLL_KEY=...
-        * AWS_SECRET_ACCESS_KEY=...
-        * api[_-]?key\\s*=\\s*['"][^'"]{16,}
-        * password\\s*=\\s*['"][^'"]+
+        * PROFITDLL_<NAME> assignment (KEY/USER/PASS)
+        * AWS_SECRET_ACCESS_KEY assignment
+        * api[_-]?key quoted assignment (>=16 chars)
+        * password quoted assignment
 
 Justificativa:
     Defense-in-depth (gitignore + hook) para R18/R19 — uma vez no histórico git,
@@ -20,6 +20,7 @@ Justificativa:
 
 Owner: Gage (devops). Story 0.2.
 """
+
 from __future__ import annotations
 
 import re
@@ -40,9 +41,14 @@ SECRET_PATTERNS = [
 
 def staged_files() -> list[str]:
     try:
+        # Force UTF-8 to avoid cp1252 UnicodeDecodeError on Windows (Task #38 fix)
         result = subprocess.run(
             ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     except subprocess.CalledProcessError:
@@ -51,9 +57,14 @@ def staged_files() -> list[str]:
 
 def staged_blob(path: str) -> str:
     try:
+        # Force UTF-8 to avoid cp1252 UnicodeDecodeError on Windows (Task #38 fix)
         result = subprocess.run(
             ["git", "show", f":{path}"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return result.stdout
     except subprocess.CalledProcessError:
@@ -75,7 +86,9 @@ def main() -> int:
     violations: list[str] = []
     for f in files:
         if is_dotenv_violation(f):
-            violations.append(f"  - {f}: matches .env pattern (not in whitelist {WHITELIST_SUFFIXES})")
+            violations.append(
+                f"  - {f}: matches .env pattern (not in whitelist {WHITELIST_SUFFIXES})"
+            )
             continue
         content = staged_blob(f)
         for pat in SECRET_PATTERNS:

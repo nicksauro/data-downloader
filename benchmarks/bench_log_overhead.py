@@ -154,8 +154,7 @@ def main() -> None:
     #     "policy_recommendation": policy,
     # }
     raise NotImplementedError(
-        "bench_log_overhead é CRÍTICO (Story 1.4.5). "
-        "Resultado informa HOT_PATH_RULES.md (R21)."
+        "bench_log_overhead é CRÍTICO (Story 1.4.5). Resultado informa HOT_PATH_RULES.md (R21)."
     )
 
 

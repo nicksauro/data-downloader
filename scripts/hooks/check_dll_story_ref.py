@@ -16,6 +16,7 @@ Justificativa:
 
 Owner: Gage (devops). Story 0.2.
 """
+
 from __future__ import annotations
 
 import re
@@ -30,11 +31,14 @@ STORY_PATTERN = re.compile(r"\[?\s*story\s+\d+\.\d+\s*\]?", re.IGNORECASE)
 def staged_files() -> list[str]:
     """Retorna lista de arquivos staged (versus HEAD ou index inicial)."""
     try:
+        # Force UTF-8 to avoid cp1252 UnicodeDecodeError on Windows (Task #38 fix)
         result = subprocess.run(
             ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
             capture_output=True,
             text=True,
             check=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     except subprocess.CalledProcessError:
@@ -42,11 +46,10 @@ def staged_files() -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
-        print("ERROR: check_dll_story_ref.py requires commit-msg file as argv[1]", file=sys.stderr)
-        return 1
-
-    commit_msg_file = Path(argv[1])
+    # commit-msg file is normally passed as argv[1] by pre-commit framework.
+    # Fallback to .git/COMMIT_EDITMSG when invoked without args (defensive against
+    # pass_filenames:false misconfiguration in .pre-commit-config.yaml — Task #38).
+    commit_msg_file = Path(argv[1]) if len(argv) >= 2 else Path(".git/COMMIT_EDITMSG")
     if not commit_msg_file.exists():
         print(f"ERROR: commit-msg file not found: {commit_msg_file}", file=sys.stderr)
         return 1
@@ -60,11 +63,16 @@ def main(argv: list[str]) -> int:
     if STORY_PATTERN.search(msg):
         return 0
 
-    print("BLOCKED: commit touches src/data_downloader/dll/ but lacks story reference.", file=sys.stderr)
+    print(
+        "BLOCKED: commit touches src/data_downloader/dll/ but lacks story reference.",
+        file=sys.stderr,
+    )
     print("  Files touched:", file=sys.stderr)
     for f in dll_touched:
         print(f"    - {f}", file=sys.stderr)
-    print("  Required: include `[Story N.M]` or `Story N.M` in commit message (R12).", file=sys.stderr)
+    print(
+        "  Required: include `[Story N.M]` or `Story N.M` in commit message (R12).", file=sys.stderr
+    )
     return 1
 
 

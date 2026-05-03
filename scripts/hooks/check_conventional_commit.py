@@ -22,6 +22,7 @@ Justificativa:
 
 Owner: Gage (devops). Story 0.2.
 """
+
 from __future__ import annotations
 
 import re
@@ -48,10 +49,10 @@ def first_real_line(text: str) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
-        print("ERROR: check_conventional_commit.py requires commit-msg file as argv[1]", file=sys.stderr)
-        return 1
-    commit_msg_file = Path(argv[1])
+    # commit-msg file is normally passed as argv[1] by pre-commit framework.
+    # Fallback to .git/COMMIT_EDITMSG when invoked without args (defensive against
+    # pass_filenames:false misconfiguration in .pre-commit-config.yaml — Task #38).
+    commit_msg_file = Path(argv[1]) if len(argv) >= 2 else Path(".git/COMMIT_EDITMSG")
     if not commit_msg_file.exists():
         print(f"ERROR: commit-msg file not found: {commit_msg_file}", file=sys.stderr)
         return 1
@@ -65,11 +66,20 @@ def main(argv: list[str]) -> int:
     if not CONVENTIONAL_PATTERN.match(subject):
         print("BLOCKED: commit subject does not follow Conventional Commits.", file=sys.stderr)
         print(f"  Got: {subject!r}", file=sys.stderr)
-        print("  Expected: <type>(<scope>)?: <subject>  e.g. 'feat(dll): add reconnection (Story 1.4)'", file=sys.stderr)
-        print("  Allowed types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert", file=sys.stderr)
+        print(
+            "  Expected: <type>(<scope>)?: <subject>  e.g. 'feat(dll): add reconnection (Story 1.4)'",
+            file=sys.stderr,
+        )
+        print(
+            "  Allowed types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert",
+            file=sys.stderr,
+        )
         return 1
     if len(subject) > MAX_SUBJECT_LEN:
-        print(f"WARN: subject is {len(subject)} chars (>{MAX_SUBJECT_LEN}). Consider shortening.", file=sys.stderr)
+        print(
+            f"WARN: subject is {len(subject)} chars (>{MAX_SUBJECT_LEN}). Consider shortening.",
+            file=sys.stderr,
+        )
     return 0
 
 

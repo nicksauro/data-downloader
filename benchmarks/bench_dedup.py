@@ -59,9 +59,7 @@ for batch_size in [10_000, 100_000, 1_000_000]:
             )
 
 
-def setup_batch(
-    batch_size: int, duplicate_pct: float, dedup_key: str
-) -> list[dict[str, Any]]:
+def setup_batch(batch_size: int, duplicate_pct: float, dedup_key: str) -> list[dict[str, Any]]:
     """Gera batch sintético com `duplicate_pct` * batch_size duplicatas."""
     # TODO: gerar via fixtures.synthetic_trades + injetar duplicatas
     # n_unique = int(batch_size * (1 - duplicate_pct))
@@ -108,8 +106,7 @@ def run_config(config: dict[str, Any]) -> dict[str, Any]:
         "elapsed_ms_p50": statistics.median(elapsed_ms),
         "elapsed_ms_p95": sorted(elapsed_ms)[int(0.95 * len(elapsed_ms))],
         "elapsed_ms_p99": max(elapsed_ms),
-        "throughput_trades_per_sec": config["batch_size"]
-        / (statistics.median(elapsed_ms) / 1000),
+        "throughput_trades_per_sec": config["batch_size"] / (statistics.median(elapsed_ms) / 1000),
         "n_unique_returned": runs[0]["n_out"],
     }
 

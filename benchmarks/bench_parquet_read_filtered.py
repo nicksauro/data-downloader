@@ -63,17 +63,13 @@ FILTER_SELECTIVITIES = {
 }
 
 
-def setup_parquet_files(
-    row_group_size: int, tmp_dir: Path
-) -> tuple[list[Path], int, int]:
+def setup_parquet_files(row_group_size: int, tmp_dir: Path) -> tuple[list[Path], int, int]:
     """Gera 10M trades; retorna (files, ts_min, ts_max)."""
     # TODO: gerar via fixtures.synthetic_trades, retornar range temporal
     raise NotImplementedError("Aguarda fixtures.synthetic_trades")
 
 
-def compute_filter_range(
-    ts_min: int, ts_max: int, selectivity: float
-) -> tuple[int, int]:
+def compute_filter_range(ts_min: int, ts_max: int, selectivity: float) -> tuple[int, int]:
     """Retorna (lo, hi) que selecionam ~selectivity dos trades, centrados."""
     span = ts_max - ts_min
     width = int(span * selectivity)
@@ -81,9 +77,7 @@ def compute_filter_range(
     return mid - width // 2, mid + width // 2
 
 
-def measure_filtered_scan(
-    parquet_files: list[Path], ts_lo: int, ts_hi: int
-) -> dict[str, Any]:
+def measure_filtered_scan(parquet_files: list[Path], ts_lo: int, ts_hi: int) -> dict[str, Any]:
     """SELECT com WHERE timestamp_ns BETWEEN; mede trades/s e pruning."""
     # TODO:
     # con = duckdb.connect(":memory:", config={"threads": 1})
@@ -102,9 +96,7 @@ def measure_filtered_scan(
 def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     # TODO: rodar matriz row_group_size × selectivity, salvar JSON
-    raise NotImplementedError(
-        "bench_parquet_read_filtered é esqueleto sintético (Story 1.4.5)."
-    )
+    raise NotImplementedError("bench_parquet_read_filtered é esqueleto sintético (Story 1.4.5).")
 
 
 if __name__ == "__main__":
