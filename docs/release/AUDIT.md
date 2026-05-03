@@ -64,7 +64,7 @@
 
 | timestamp | action | actor | requested_by | sha | target | justification | story_id | gate_status | morgan_auth |
 |-----------|--------|-------|--------------|-----|--------|---------------|----------|-------------|-------------|
-| _(nenhuma entrada ainda — primeira será o bootstrap inicial via BOOTSTRAP_PROTOCOL §3)_ | | | | | | | | | |
+| 2026-05-03T20:30:00Z | bootstrap | Gage | user | 62c9df7 | main | git init -b main + initial commit per BOOTSTRAP_PROTOCOL.md §3 — Story 0.1 execution. 143 files committed, gitignore validated (ProfitDLL.dll + companions + .env not staged). No remote yet (Story 0.3). | 0.1 | n/a | delegated_in_PLAN_REVIEW |
 
 ---
 
