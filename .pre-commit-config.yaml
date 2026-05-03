@@ -18,10 +18,23 @@
 
 minimum_pre_commit_version: "3.5.0"
 
-default_language_version:
-  python: python3.11
+# default_language_version pinada removida temporariamente — Story 0.2 instala
+# pre-commit no Python 3.14 host (squad ainda sem venv). Story 1.1 re-pina para
+# python3.11 quando venv project-local existir. Tracking: docs/stories/1.1.story.md.
+# default_language_version:
+#   python: python3.11
 
 default_stages: [pre-commit]
+
+# Exclude global — vendor-provided Nelogica reference code (não-squad, mantido por
+# ADR-008 para referência DLL). Não passar lint/format/mypy nesses arquivos.
+exclude: |
+  (?x)^(
+    profitdll/Exemplo\ .*|
+    profitdll/Manual/.*|
+    profitdll/Imagens/.*|
+    \.secrets\.baseline$
+  )$
 
 # Falha rápida — primeiro hook que falhar interrompe.
 fail_fast: false
