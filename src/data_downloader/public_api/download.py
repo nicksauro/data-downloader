@@ -519,15 +519,26 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     )
     dll = ProfitDLL()
     dll.initialize_market_only(key, user, password)
-    connect_timeout = int(os.getenv("DATA_DOWNLOADER_DLL_CONNECT_TIMEOUT", "300"))
-    if not dll.wait_market_connected(timeout=connect_timeout):
+    # Story 2.12 — retry policy mitiga flakiness Q-DRIFT-02 revisado.
+    # Defaults: 300s/tentativa, 3 tentativas, 30s cooldown — cap superior
+    # 990s no pior caso (3*300 + 2*30). Operador ajusta via env vars se
+    # rede/horário exigir.
+    connect_timeout = _env_int("DATA_DOWNLOADER_DLL_CONNECT_TIMEOUT", 300, minimum=1)
+    retry_attempts = _env_int("DATA_DOWNLOADER_DLL_CONNECT_RETRY_ATTEMPTS", 3, minimum=1)
+    retry_cooldown = _env_float("DATA_DOWNLOADER_DLL_CONNECT_RETRY_COOLDOWN", 30.0, minimum=0.0)
+    if not dll.wait_market_connected(
+        timeout=connect_timeout,
+        retry_attempts=retry_attempts,
+        retry_cooldown=retry_cooldown,
+    ):
         raise DLLInitError(
             -1,
             "NL_WAITING_SERVER",
             (
-                f"MARKET_DATA não conectou após {connect_timeout}s. "
-                "Verifique se ProfitChart está aberto e logado com a mesma "
-                "chave de licença Nelogica (Q-DRIFT-02)."
+                f"MARKET_DATA não conectou após {retry_attempts} tentativas "
+                f"de {connect_timeout}s (cooldown {retry_cooldown:.0f}s). "
+                "Verifique horário de pregão B3 (09:00-18:30 BRT) e conexão "
+                "de rede (Q-DRIFT-02)."
             ),
         )
     _emit(
@@ -540,6 +551,55 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
         ),
     )
     return dll
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Lê env var como int com fallback robusto (Story 2.12).
+
+    Valores inválidos (não-int, abaixo de ``minimum``) caem para ``default``
+    silenciosamente — env malformada não para o sistema.
+
+    Args:
+        name: Nome da env var.
+        default: Valor a usar se ausente ou inválido.
+        minimum: Valor mínimo aceitável (>= ``minimum``).
+
+    Returns:
+        Int válido (env value ou default).
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < minimum:
+        return default
+    return value
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    """Lê env var como float com fallback robusto (Story 2.12).
+
+    Args:
+        name: Nome da env var.
+        default: Valor a usar se ausente ou inválido.
+        minimum: Valor mínimo aceitável (>= ``minimum``).
+
+    Returns:
+        Float válido (env value ou default).
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < minimum:
+        return default
+    return value
 
 
 def _emit(events_queue: queue.Queue[object], event: DownloadProgress) -> None:

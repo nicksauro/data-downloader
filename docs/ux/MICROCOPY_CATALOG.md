@@ -146,7 +146,8 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `ERR_DLL_DISCONNECTED` | NL_DISCONNECTED | Conexão caiu | A DLL perdeu conexão com a corretora. | Reconectando automaticamente — aguarde 30s. |
 | `ERR_DLL_VERSION_MISMATCH` | NL_VERSION_MISMATCH | Versão da DLL incompatível | A DLL instalada não bate com a versão esperada pelo app. | Atualize ProfitDLL ou rode `data-downloader doctor`. |
 | `ERR_DLL_GENERIC` | (catch-all) | Erro não documentado da ProfitDLL | Código {code}: {message}. | Use `--verbose` para detalhes. Reporte em github issues. |
-| `ERR_DLL_MARKET_TIMEOUT` | (timeout interno) | Não conectei ao Market Data | MARKET_DATA não conectou após {timeout}s. | Verifique credenciais em `.env`, conexão de rede, e rode `data-downloader doctor` para diagnóstico completo. |
+| `ERR_DLL_MARKET_TIMEOUT` | (timeout interno) | Não conectei ao Market Data | MARKET_DATA não conectou após {timeout}s nesta tentativa. | Aguardando próxima tentativa de retry (Story 2.12 — Q-DRIFT-02). |
+| `ERR_DLL_MARKET_RETRY_EXHAUSTED` | (retry interno) | Não conectei ao Market Data após retries | Market data não conectou após {max} tentativas. | Verifique horário de pregão B3 (09:00-18:30 BRT) e conexão de rede. Rode `data-downloader doctor` para diagnóstico completo. |
 
 ---
 
@@ -227,6 +228,7 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `WAR_HIGH_DLL_QUEUE` | warning | Fila DLL acima de {threshold}% | Sistema sob alta carga. Pode haver perda de eventos se não drenar. | Considere fechar outros apps pesados. |
 | `WAR_LOW_DISK` | warning | Espaço em disco baixo | Restam apenas {free_mb} MB em {path}. | Libere espaço para evitar falha no meio do download. |
 | `WAR_OLD_DLL_VERSION` | warning | Versão da DLL antiga ({version}) | Recomendado >= {min_version} para suporte completo. | Atualize ProfitDLL pelo cliente Nelogica. |
+| `WAR_DLL_MARKET_RETRY` | warning | Reconectando market data | Reconectando market data — tentativa {n}/{max}... | (nenhuma — automática) |
 
 ---
 

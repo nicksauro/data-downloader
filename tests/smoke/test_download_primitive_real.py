@@ -60,9 +60,14 @@ def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
 
     with ProfitDLL() as dll:
         dll.initialize_market_only(key, user, password)
-        # Q-DRIFT-02: 300s — handshake MARKET_DATA pode levar >60s.
+        # Q-DRIFT-02 (revisado Story 2.12): handshake é flakey — às vezes 1s,
+        # às vezes timeout em 300s com mesma config. Retry policy interna
+        # (3 tentativas, 300s timeout/tentativa, 30s cooldown) mitiga.
         connected = dll.wait_market_connected(timeout=300)
-        assert connected, "Market data não conectou em 300s — verificar credenciais/rede."
+        assert connected, (
+            "Market data não conectou após retries — verificar horário "
+            "de pregão B3 (09:00-18:30 BRT), credenciais e rede."
+        )
 
         result = download_chunk(
             dll,

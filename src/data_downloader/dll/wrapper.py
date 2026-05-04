@@ -456,11 +456,23 @@ class ProfitDLL:
         )
 
     # =================================================================
-    # Wait for connected (AC5)
+    # Wait for connected (AC5) — Story 2.12 retry policy
     # =================================================================
 
-    def wait_market_connected(self, timeout: int = 300) -> bool:
-        """Aguarda sequência canônica de connection states até MARKET_DATA conectado.
+    def wait_market_connected(
+        self,
+        timeout: int = 300,
+        *,
+        retry_attempts: int = 3,
+        retry_cooldown: float = 30.0,
+    ) -> bool:
+        """Aguarda MARKET_CONNECTED com retry policy (Story 2.12).
+
+        Conexão é flakey (Q-DRIFT-02 revisado — smoke real attempt 4
+        2026-05-04): às vezes o handshake completa em 1 segundo, às vezes
+        timeout em 300s com a MESMA configuração e credenciais. Retry policy
+        com cooldown 30s entre tentativas mitiga o comportamento
+        intermitente do servidor.
 
         Drena ``self._state_queue`` em loop (na thread do caller — NÃO no
         callback, R3) e retorna ``True`` SOMENTE quando recebe
@@ -477,16 +489,116 @@ class ProfitDLL:
             (2, 4) → MARKET_CONNECTED (autoritativo — retorna True)
             (3, 0) → MARKET_LOGIN OK
 
-        Default 300s (5 min): em ambientes reais o handshake pode levar
-        >60s. Heartbeat a cada 30s mostra que o wait está vivo.
+        Default 300s por tentativa (5 min): em ambientes reais o handshake
+        pode levar >60s. Heartbeat a cada 30s mostra que o wait está vivo.
+        Reset entre tentativas: drena state_queue (eventos antigos podem
+        confundir nova rodada). DLLInitialize NÃO é chamado de novo —
+        apenas o handshake do market data falhou; a DLL continua viva.
 
         Args:
-            timeout: Timeout total em segundos (default 300 — 5 min).
+            timeout: Timeout POR TENTATIVA em segundos (default 300 — 5 min).
+            retry_attempts: Número total de tentativas (incluindo a primeira).
+                Default 3. ``1`` = comportamento legado (1 tentativa só).
+            retry_cooldown: Cooldown entre tentativas em segundos. Default 30.
 
         Returns:
-            ``True`` se MARKET_DATA conectou (result=4) dentro do timeout;
-            ``False`` em timeout (sem raise — caller decide se aborta ou
-            re-tenta).
+            ``True`` se MARKET_DATA conectou (result=4) em alguma tentativa;
+            ``False`` se esgotou ``retry_attempts`` sem sucesso (sem raise —
+            caller decide se aborta ou reporta).
+
+        Raises:
+            DLLInitError: Sinalização explícita de erro fatal vinda de um
+                callback (NL_NO_LOGIN, NL_NO_LICENSE etc.) que foi enfileirado
+                pela DLL — aborta sem retry (R7 fail fast). Apenas códigos
+                NL_* enfileirados como ``(_NL_RESULT_SENTINEL, code)`` viram
+                raise; pares ``(conn_type, result)`` normais NÃO viram raise.
+        """
+        if retry_attempts < 1:
+            raise ValueError(f"retry_attempts must be >= 1; got {retry_attempts}")
+        if retry_cooldown < 0:
+            raise ValueError(f"retry_cooldown must be >= 0; got {retry_cooldown}")
+
+        for attempt in range(1, retry_attempts + 1):
+            log.info(
+                "dll.market_connect_attempt",
+                attempt=attempt,
+                max_attempts=retry_attempts,
+                timeout=timeout,
+            )
+            connected = self._wait_market_connected_once(timeout=timeout)
+            if connected:
+                if attempt > 1:
+                    log.info(
+                        "dll.market_connect_recovered",
+                        attempt=attempt,
+                        max_attempts=retry_attempts,
+                    )
+                return True
+
+            if attempt < retry_attempts:
+                # Não é a última tentativa — aplicar cooldown + reset state.
+                # Microcopy ID alinha com docs/ux/MICROCOPY_CATALOG.md
+                # WAR_DLL_MARKET_RETRY (Story 2.12).
+                log.warning(
+                    "dll.market_connect_retry",
+                    attempt=attempt,
+                    max_attempts=retry_attempts,
+                    cooldown_seconds=retry_cooldown,
+                    microcopy_id="WAR_DLL_MARKET_RETRY",
+                )
+                # Drena state_queue antes da próxima tentativa — eventos
+                # antigos (LOGIN/ROTEAMENTO já vistos) confundem a próxima
+                # rodada, pois ela esperaria-os de novo. DLL ainda está
+                # inicializada; só o handshake market data falhou.
+                self._drain_state_queue()
+                if retry_cooldown > 0:
+                    time.sleep(retry_cooldown)
+
+        # Esgotou todas as tentativas. Microcopy ID alinha com
+        # docs/ux/MICROCOPY_CATALOG.md ERR_DLL_MARKET_RETRY_EXHAUSTED.
+        log.error(
+            "dll.market_connect_retry_exhausted",
+            attempts=retry_attempts,
+            timeout_per_attempt=timeout,
+            microcopy_id="ERR_DLL_MARKET_RETRY_EXHAUSTED",
+        )
+        return False
+
+    def _drain_state_queue(self) -> int:
+        """Drena ``self._state_queue`` (Story 2.12 — reset entre retries).
+
+        Eventos antigos (LOGIN/ROTEAMENTO/MARKET_WAITING já consumidos numa
+        tentativa anterior) podem permanecer no buffer interno se a DLL
+        estiver enviando states em rajadas; uma nova rodada de
+        :meth:`_wait_market_connected_once` espera ver MARKET_DATA novo,
+        não estados velhos. Drenamos sem bloquear.
+
+        Returns:
+            Número de eventos descartados (apenas para logging/forensics).
+        """
+        drained = 0
+        while True:
+            try:
+                self._state_queue.get_nowait()
+            except Empty:
+                break
+            drained += 1
+        if drained > 0:
+            log.info("dll.state_queue_drained", events_discarded=drained)
+        return drained
+
+    def _wait_market_connected_once(self, timeout: int) -> bool:
+        """Aguarda 1 tentativa de handshake (lógica original Story 1.7b).
+
+        Extraída de :meth:`wait_market_connected` para Story 2.12 (retry
+        policy). Comportamento idêntico ao código pré-2.12: drena state
+        queue até ``MARKET_CONNECTED`` ou timeout.
+
+        Args:
+            timeout: Timeout em segundos para ESTA tentativa.
+
+        Returns:
+            ``True`` se conectou; ``False`` em timeout.
         """
         # Heartbeat a cada 30s para visibilidade quando o handshake é lento
         # (silêncio total >60s confunde operador — parece travado).
@@ -501,7 +613,9 @@ class ProfitDLL:
                 # Mensagem genérica sem hipóteses refutadas (ProfitChart como
                 # pré-requisito foi refutado pelo usuário — manual + exemplo
                 # confirmam que init standalone basta). Microcopy ID alinha
-                # com docs/ux/MICROCOPY_CATALOG.md ERR_DLL_MARKET_TIMEOUT.
+                # com docs/ux/MICROCOPY_CATALOG.md ERR_DLL_MARKET_TIMEOUT
+                # (mantido para compatibilidade — caller acima emite
+                # ERR_DLL_MARKET_RETRY_EXHAUSTED após esgotar retries).
                 log.warning(
                     "dll.connected_timeout",
                     timeout=timeout,
