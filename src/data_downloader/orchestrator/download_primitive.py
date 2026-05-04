@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 import structlog
 
+from data_downloader.dll.agent_resolver import AgentResolver
 from data_downloader.dll.callbacks import (
     make_history_trade_callback_v2,
     make_progress_callback,
@@ -56,7 +57,6 @@ from data_downloader.dll.callbacks import (
 from data_downloader.dll.types import (
     TC_IS_EDIT,
     TC_LAST_PACKET,
-    TConnectorTrade,
 )
 from data_downloader.orchestrator.timestamp import format_brt_timestamp
 
@@ -147,6 +147,15 @@ class TradeRecord:
     side: int | None = None
     chunk_id: str | None = None
 
+    # Story 1.7b-followup — agent names resolvidos via AgentResolver
+    # (GetAgentNameLength + GetAgentName, manual §3.1 L1707-1729). Nullable
+    # quando ID == 0 ou ID desconhecido pela DLL (fallback ``Agent#{id}``
+    # ainda é populado pelo resolver para non-zero IDs). Campos NÃO fazem
+    # parte do schema Parquet v1.0.0 (Sol authority — adição requer bump
+    # SCHEMA_VERSION); writer atual descarta se não encontrar coluna.
+    buy_agent_name: str | None = None
+    sell_agent_name: str | None = None
+
 
 @dataclass(frozen=True)
 class ChunkResult:
@@ -193,6 +202,13 @@ class ChunkResult:
     """Código NL_* retornado por ``GetHistoryTrades`` (0 = sucesso). Em
     status=='failed', valor < 0 indica o erro específico."""
 
+    subscribed: bool = False
+    """``True`` se ``SubscribeTicker`` retornou código de sucesso (>= 0)
+    ANTES de ``GetHistoryTrades``. ``False`` se subscribe falhou ou foi
+    pulado (DLL pode tolerar tickers já subscritos retornando código não-zero
+    mas trades ainda chegam — caller usa este flag para forensics).
+    Story 1.7b-followup: subscribe é pré-requisito (autoridade ProfitDLL)."""
+
     progress_history_summary: str = field(default="")
 
 
@@ -202,14 +218,17 @@ class ChunkResult:
 
 
 class _IngestorThread(threading.Thread):
-    """Thread que drena ``trade_queue`` e chama ``TranslateTrade``.
+    """Thread que drena ``trade_queue`` e chama ``TranslateTrade`` + ``AgentResolver``.
 
-    Lei R3: ``TranslateTrade`` é chamada FORA do callback (callback faz
-    APENAS ``put_nowait((handle, flags))`` — ver
+    Lei R3: ``TranslateTrade`` e ``GetAgentName`` são chamados FORA do
+    callback (callback faz APENAS ``put_nowait((handle, flags))`` — ver
     ``callbacks.make_history_trade_callback_v2``).
 
-    Reusa um único ``TConnectorTrade`` struct entre chamadas (caller copia
-    para ``TradeRecord`` antes de overwriter).
+    Story 1.7b-followup (TranslateTrade complete): consome
+    :class:`data_downloader.dll.types.TradeFields` retornado por
+    :meth:`ProfitDLL.translate_trade` (nova API). Resolve nomes de
+    corretora via :class:`AgentResolver` (cache local — manual §3.1
+    L1707-1729).
     """
 
     def __init__(
@@ -221,6 +240,7 @@ class _IngestorThread(threading.Thread):
         chunk_id: str,
         dll_version: str,
         stop_event: threading.Event,
+        agent_resolver: AgentResolver | None = None,
     ) -> None:
         super().__init__(name=f"ingestor-{symbol}-{chunk_id[:8]}", daemon=True)
         self._dll = dll
@@ -230,6 +250,11 @@ class _IngestorThread(threading.Thread):
         self._chunk_id = chunk_id
         self._dll_version = dll_version
         self._stop_event = stop_event
+        # Story 1.7b-followup: resolver injetado (testes mockam) ou criado
+        # default a partir do dll passado. Cache local sobrevive durante
+        # toda a vida da thread (lookup primeira vez por agent_id, depois
+        # dict-hit em hot path).
+        self._agent_resolver = agent_resolver if agent_resolver is not None else AgentResolver(dll)
 
         # Story 2.9 — captura snapshot de contextvars do thread chamador
         # (orchestrator) para propagar logs com job_id/correlation_id/symbol.
@@ -247,10 +272,6 @@ class _IngestorThread(threading.Thread):
         # Sequência por (timestamp_ns) para preencher
         # ``sequence_within_ns`` (Sol — SCHEMA.md §2.1).
         self._sequence_counter: dict[int, int] = defaultdict(int)
-
-        # Reusável (Q06-V — alocar 1 vez fora do callback é OK; Version=0
-        # antes de cada TranslateTrade — main.py L328).
-        self._struct: TConnectorTrade = TConnectorTrade(Version=0)
 
     def run(self) -> None:
         """Drena trades até stop_event setado.
@@ -300,50 +321,73 @@ class _IngestorThread(threading.Thread):
             )
 
     def _process_trade(self, handle: int, flags: int) -> None:
-        """Processa 1 trade: TranslateTrade → TradeRecord → append.
+        """Processa 1 trade: TranslateTrade → AgentResolver → TradeRecord → append.
 
-        # @hot_path — per-trade @ 100-4000/s. R21: counters atomic only,
-        # SEM logging síncrono / json / strftime aqui. Logs agregados
-        # emitidos em ``_run_inner`` após drain (cool path).
+        Story 1.7b-followup: usa nova API ``ProfitDLL.translate_trade(handle)``
+        que retorna :class:`TradeFields` (ou ``None`` em erro NL_*).
+        Resolve agent names via :class:`AgentResolver` (cache local — primeira
+        vez por broker, depois dict-hit O(1)).
+
+        @hot_path — per-trade @ 100-4000/s. R21: counters atomic only,
+        SEM logging síncrono / json / strftime aqui. Logs agregados
+        emitidos em ``_run_inner`` após drain (cool path).
         """
-        # Resetar Version=0 antes de cada chamada (main.py L328 demonstra).
-        self._struct.Version = 0
-        rc = self._dll.translate_trade(handle, self._struct)
-        if rc != NL_OK:
+        fields = self._dll.translate_trade(handle)
+        if fields is None:
             # R21.4 — counter atomic; agregado é exposto em
             # ``ChunkResult`` via ``ingestor.translate_failures`` e logado
             # 1x no ``download.complete`` (cool path).
             self.translate_failures += 1
             return
 
-        # Copia campos do struct ANTES de overwriter no próximo loop.
-        timestamp_ns = _system_time_to_ns(self._struct.TradeDate)
+        timestamp_ns = fields.timestamp_ns
         timestamp_str = format_brt_timestamp(timestamp_ns)
-        trade_number = int(self._struct.TradeNumber)
+        trade_number = fields.trade_number
         # trade_id=0 da DLL → tratar como ausente (cai em chave longa de
         # dedup, Sol SCHEMA.md §2.1).
         trade_id: int | None = trade_number if trade_number > 0 else None
         seq = self._sequence_counter[timestamp_ns]
         self._sequence_counter[timestamp_ns] = seq + 1
 
+        # Agent IDs — 0 é convenção "desconhecido" pela DLL (Q14-E). Cai em
+        # None tanto para id quanto para name (não chamamos resolver para
+        # 0 — economiza 1 lookup/trade quando broker não populou os campos).
+        buy_id_raw = fields.buy_agent_id
+        sell_id_raw = fields.sell_agent_id
+        buy_agent_id: int | None = buy_id_raw if buy_id_raw != 0 else None
+        sell_agent_id: int | None = sell_id_raw if sell_id_raw != 0 else None
+
+        # AgentResolver.resolve usa cache local — primeira chamada por broker
+        # paga GetAgentNameLength + GetAgentName; subsequentes são dict-hit.
+        # Lei R3 respeitada: AgentResolver chama DLL DIRETAMENTE em
+        # IngestorThread (Python thread), NÃO em callback (ConnectorThread).
+        buy_agent_name: str | None = (
+            self._agent_resolver.resolve(buy_agent_id) if buy_agent_id is not None else None
+        )
+        sell_agent_name: str | None = (
+            self._agent_resolver.resolve(sell_agent_id) if sell_agent_id is not None else None
+        )
+
         record = TradeRecord(
             symbol=self._symbol,
             exchange=self._exchange,
             timestamp_ns=timestamp_ns,
             timestamp_str=timestamp_str,
-            price=float(self._struct.Price),
-            quantity=int(self._struct.Quantity),
-            trade_type=int(self._struct.TradeType),
+            price=fields.price,
+            quantity=fields.quantity,
+            trade_type=fields.trade_type,
             flags=int(flags),
             source_callback="history_v2",
             ingestion_ts_ns=time.time_ns(),
             dll_version=self._dll_version,
             sequence_within_ns=seq,
             trade_id=trade_id,
-            buy_agent_id=int(self._struct.BuyAgent) or None,
-            sell_agent_id=int(self._struct.SellAgent) or None,
+            buy_agent_id=buy_agent_id,
+            sell_agent_id=sell_agent_id,
             side=None,  # not in V2 trade struct (live-only)
             chunk_id=self._chunk_id,
+            buy_agent_name=buy_agent_name,
+            sell_agent_name=sell_agent_name,
         )
         self.trades.append(record)
 
@@ -461,20 +505,24 @@ def download_chunk(
 ) -> ChunkResult:
     """Baixa 1 chunk (1 símbolo, 1 intervalo) e retorna ``ChunkResult``.
 
-    Sequência (Story 1.3 AC2/AC3/AC5/AC6/AC7/AC8/AC9):
+    Sequência (Story 1.3 AC2/AC3/AC5/AC6/AC7/AC8/AC9 + 1.7b-followup):
 
     1. Valida exchange ∈ ('F', 'B') — R8/Q05-V.
     2. Cria filas bounded para trade handles (100k) + progresso (1k).
     3. Cria callbacks via factories (R3 — `put_nowait` only).
     4. Inicia IngestorThread + ProgressMonitor.
-    5. Registra callbacks no DLL via `set_history_trade_callback_v2` +
+    5. **SubscribeTicker(symbol, exchange)** — pré-requisito ProfitDLL
+       (Story 1.7b-followup); sem subscribe a DLL não entrega trades.
+       Falha = WARNING (best-effort), não bloqueia download.
+    6. Registra callbacks no DLL via `set_history_trade_callback_v2` +
        `set_progress_callback`.
-    6. Formata datas para `"DD/MM/YYYY HH:mm:SS"` (manual §3.1 L1750).
-    7. Chama ``GetHistoryTrades``.
-    8. Loop principal aguarda: progresso=100 OU TC_LAST_PACKET OU timeout.
+    7. Formata datas para `"DD/MM/YYYY HH:mm:SS"` (manual §3.1 L1750).
+    8. Chama ``GetHistoryTrades``.
+    9. Loop principal aguarda: progresso=100 OU TC_LAST_PACKET OU timeout.
        Quirk Q02-E: 99% reconectando NÃO é erro — continua aguardando.
-    9. Sinaliza stop_event → joina threads → coleta resultados.
-    10. Retorna ChunkResult.
+    10. **UnsubscribeTicker** (em ``finally`` — sempre executa).
+    11. Sinaliza stop_event → joina threads → coleta resultados.
+    12. Retorna ChunkResult (com ``subscribed`` flag).
 
     Args:
         dll: Instância já inicializada de ``ProfitDLL`` (Story 1.2).
@@ -559,8 +607,36 @@ def download_chunk(
     deadline = start_monotonic + timeout
     nl_code = 0
     status: Literal["completed", "timeout", "failed"]
+    subscribed = False
 
     try:
+        # Story 1.7b-followup — SubscribeTicker é PRÉ-REQUISITO de
+        # GetHistoryTrades (autoridade ProfitDLL). Sem subscribe a DLL
+        # aceita a chamada mas NÃO entrega trades. Falha aqui é WARNING
+        # (DLL pode aceitar tickers já subscritos retornando código não-zero;
+        # trades ainda podem chegar) — não bloqueia o download.
+        try:
+            sub_rc = dll.subscribe_ticker(symbol, exchange)
+        except Exception as exc:  # defensivo; subscribe é melhor-esforço
+            log.warning(
+                "download.subscribe_failed",
+                chunk_id=chunk_id,
+                symbol=symbol,
+                exchange=exchange,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        else:
+            subscribed = sub_rc >= 0
+            if not subscribed:
+                log.warning(
+                    "download.subscribe_nonzero_code",
+                    chunk_id=chunk_id,
+                    symbol=symbol,
+                    exchange=exchange,
+                    code=sub_rc,
+                )
+
         dll.set_history_trade_callback_v2(history_cb)
         dll.set_progress_callback(progress_cb)
         nl_code = dll.get_history_trades(symbol, exchange, dt_start_str, dt_end_str)
@@ -601,6 +677,30 @@ def download_chunk(
         ingestor.join(timeout=10.0)
         monitor.join(timeout=5.0)
 
+        # Story 1.7b-followup — UnsubscribeTicker SEMPRE (mesmo em erro)
+        # para liberar slot interno da DLL. Falha aqui é WARNING (estado
+        # já está sujo de qualquer forma; downstream cleanup é responsabilidade
+        # do caller / orchestrator superior). Só desinscreve se subscribe
+        # foi tentado — evita unsubscribe em ticker nunca registrado.
+        try:
+            unsub_rc = dll.unsubscribe_ticker(symbol, exchange)
+            log.info(
+                "download.unsubscribe",
+                chunk_id=chunk_id,
+                symbol=symbol,
+                exchange=exchange,
+                code=unsub_rc,
+            )
+        except Exception as exc:  # defensivo
+            log.warning(
+                "download.unsubscribe_failed",
+                chunk_id=chunk_id,
+                symbol=symbol,
+                exchange=exchange,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
     duration = time.monotonic() - start_monotonic
     trades = ingestor.trades
 
@@ -629,6 +729,7 @@ def download_chunk(
         chunk_id=chunk_id,
         last_packet_seen=ingestor.last_packet_seen,
         nl_error_code=nl_code,
+        subscribed=subscribed,
     )
 
     log.info(
@@ -642,6 +743,7 @@ def download_chunk(
         trade_edits=ingestor.trade_edits,
         progress_99_reconnect=monitor.reconnect_99_detected,
         last_packet_seen=ingestor.last_packet_seen,
+        subscribed=subscribed,
     )
 
     return result

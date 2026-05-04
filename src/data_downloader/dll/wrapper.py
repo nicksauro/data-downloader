@@ -54,6 +54,8 @@ from data_downloader.dll.types import (
     MARKET_DATA,
     NOOP_SLOT_SIGNATURES,
     STATE_CODE_ALIAS,
+    TConnectorTrade,
+    TradeFields,
 )
 
 __all__ = ["DEFAULT_DLL_PATH", "ProfitDLL"]
@@ -234,6 +236,236 @@ class ProfitDLL:
         log.info("dll.companions_check", status="ok", base_path=str(base_dir))
 
     # =================================================================
+    # CRIT-2 — argtypes/restype (audit Nelo 2026-05-04, commit 29ad70d)
+    # =================================================================
+
+    def _configure_dll_signatures(self) -> None:
+        """Configura argtypes/restype de TODAS as funções DLL chamadas.
+
+        CRÍTICO (CRIT-2 audit Nelo 2026-05-04 — commit 29ad70d): sem isso
+        ctypes assume ``c_int`` para todos os args/return e desalinha o
+        stack frame stdcall em x64. Sintomas:
+
+        - ``c_size_t`` handles (``TranslateTrade``) truncados em 32 bits;
+        - ``c_int64`` retornos (``SendOrder``, ``DLLInitializeMarketLogin``)
+          chegam corrompidos;
+        - ``POINTER(struct)`` desalinha a chamada stdcall e a DLL lê lixo.
+
+        Espelha o canônico ``profitdll/Exemplo Python/profit_dll.py:7-101``
+        (Nelogica). Cobre apenas as funções cujos tipos já estão em
+        :mod:`data_downloader.dll.types` — funções de trading que dependem
+        de structs ainda-não-mirroradas (``TConnectorSendOrder`` etc.) ficam
+        de fora desta passada (ConstituionArt. IV — No Invention; squad só
+        usa download/market). Quando o trading entrar no escopo, o struct
+        é mirrorado em ``types.py`` e a entrada correspondente acrescentada
+        a ``configs`` aqui.
+
+        Funções configuradas (versão atual — espelha CRIT-2 audit lista):
+
+        - ``TranslateTrade`` — handle V2 + struct out (CRÍTICO Q-DRIFT MED-4).
+        - ``SubscribeTicker`` / ``UnsubscribeTicker`` — pré-req download.
+        - ``GetAgentNameLength`` / ``GetAgentName`` — agent resolver V2.
+        - ``GetHistoryTrades`` — 4 ``c_wchar_p`` + ``c_int`` ret.
+        - ``DLLInitializeMarketLogin`` / ``DLLFinalize`` / ``Finalize`` —
+          ``c_int`` ret.
+        - ``SetEnabledLogToDebug`` — ``c_int`` arg + ``c_int`` ret.
+        - ``GetDLLVersion`` — ``c_wchar_p`` ret (Q-DRIFT-09: pode não estar
+          exportada; tolerada).
+        - 14 ``Set*Callback`` — argtypes não setados aqui (ctypes infere
+          do WINFUNCTYPE passado; setar argtypes para ``Set*Callback`` é
+          contra-indicado pois cada signature distinta exigiria literal).
+
+        Tolerância: cada função é configurada em try/except — funções
+        deprecated ou não exportadas pela DLL atual são puladas com log
+        warning. Esta tolerância é essencial (Q-DRIFT-01 confirma drift
+        entre versões: ``GetDLLVersion``, ``SetProgressCallback`` são
+        ausentes em versões reais).
+
+        WINFUNCTYPE callbacks: NÃO configurados aqui — já vinculados via
+        ``Set*Callback`` em :mod:`callbacks` factories que retornam objeto
+        ``WINFUNCTYPE``-wrapped (ctypes infere do tipo passado).
+
+        Raises:
+            (não levanta) — função tolera AttributeError + OSError; bloquear
+            init aqui mascararia drift entre versões da DLL e é mais nocivo
+            que prosseguir e falhar adiante com erro mais específico.
+        """
+        if self._dll is None:
+            # Defensivo — chamado SOMENTE no fim do load WinDLL, mas guarda
+            # contra reentrância acidental (ex.: testes que chamam direto).
+            return
+
+        # Lazy import: ``ctypes`` types só são úteis em Windows; em outras
+        # plataformas o shim em ``types.py`` traz CFUNCTYPE com mesma forma.
+        # Importamos os tipos primitivos uma vez aqui — todos consumidos
+        # pelas entradas de ``configs`` abaixo.
+        from ctypes import (
+            POINTER,
+            c_double,
+            c_int,
+            c_int64,
+            c_longlong,
+            c_size_t,
+            c_ubyte,
+            c_wchar_p,
+        )
+
+        from data_downloader.dll.types import (
+            TConnectorAccountIdentifier,
+            TConnectorAssetIdentifier,
+            TConnectorTrade,
+        )
+
+        # Lista canônica espelhada de profit_dll.py:7-101 (Nelogica). Cada
+        # entrada é ``(name, argtypes, restype)``; ``argtypes=None`` significa
+        # "não tocar argtypes" (deixar default ctypes — usado para funções
+        # cuja chamada já passa wrappers ``c_wchar_p`` explícitos por valor,
+        # ou cujo exemplo Nelogica também não setou). ``restype=None``
+        # significa "não tocar restype" (idem).
+        configs: list[tuple[str, list[Any] | None, Any]] = [
+            # ----------------------------------------------------------------
+            # Lifecycle (não está em profit_dll.py mas crítico para audit CRIT-2)
+            # ----------------------------------------------------------------
+            # DLLInitializeMarketLogin: 11 args (3 wchar + 8 callback) → int.
+            # argtypes=None: cada slot callback tem signature WINFUNCTYPE
+            # distinta — ctypes infere do objeto passado. restype SIM
+            # (audit CRIT-2: "DLLInitializeMarketLogin.restype").
+            ("DLLInitializeMarketLogin", None, c_int),
+            ("DLLFinalize", [], c_int),
+            ("Finalize", [], c_int),
+            ("SetEnabledLogToDebug", [c_int], c_int),
+            # ``GetDLLVersion`` retorna ``c_wchar_p`` (PWideChar). Q-DRIFT-09:
+            # pode não estar exportada — tolerada via try/except abaixo.
+            ("GetDLLVersion", [], c_wchar_p),
+            # ----------------------------------------------------------------
+            # profit_dll.py:7-15 — orders V1 (sem argtypes no exemplo, só restype)
+            # ----------------------------------------------------------------
+            ("SendSellOrder", None, c_longlong),
+            ("SendBuyOrder", None, c_longlong),
+            ("SendZeroPosition", None, c_longlong),
+            ("GetAgentNameByID", None, c_wchar_p),
+            ("GetAgentShortNameByID", None, c_wchar_p),
+            ("GetPosition", None, POINTER(c_int)),
+            ("SendMarketSellOrder", None, c_int64),
+            ("SendMarketBuyOrder", None, c_int64),
+            # ----------------------------------------------------------------
+            # profit_dll.py:16-21 — stop orders (args primitivos)
+            # ----------------------------------------------------------------
+            (
+                "SendStopSellOrder",
+                [c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_double, c_double, c_int],
+                c_longlong,
+            ),
+            (
+                "SendStopBuyOrder",
+                [c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_double, c_double, c_int],
+                c_longlong,
+            ),
+            # ----------------------------------------------------------------
+            # profit_dll.py:40-41, 88-89 — account count (args primitivos)
+            # ----------------------------------------------------------------
+            ("GetAccountCount", [], c_int),
+            ("GetAccountCountByBroker", [c_int], c_int),
+            # ----------------------------------------------------------------
+            # profit_dll.py:70-71 — TranslateTrade (CRÍTICO MED-4)
+            # ----------------------------------------------------------------
+            ("TranslateTrade", [c_size_t, POINTER(TConnectorTrade)], c_int),
+            # ----------------------------------------------------------------
+            # profit_dll.py:94-98 — Agent name V2 (CRIT-3 dependency)
+            # ----------------------------------------------------------------
+            ("GetAgentNameLength", [c_int, c_int], c_int),
+            ("GetAgentName", [c_int, c_int, c_wchar_p, c_int], c_int),
+            # ----------------------------------------------------------------
+            # Subscribe/Unsubscribe ticker — pré-req download (CRIT-1)
+            # ----------------------------------------------------------------
+            # Não está em profit_dll.py:7-101 (exemplo Nelogica usa diretamente
+            # sem argtypes), mas signature é canônica: (c_wchar_p ticker,
+            # c_wchar_p exchange) → c_int. Argumentos já são passados via
+            # c_wchar_p explícito em wrapper.subscribe_ticker, mas argtypes
+            # garantem coerção robusta e validação ctypes upfront.
+            ("SubscribeTicker", [c_wchar_p, c_wchar_p], c_int),
+            ("UnsubscribeTicker", [c_wchar_p, c_wchar_p], c_int),
+            # ----------------------------------------------------------------
+            # GetHistoryTrades — 4 wchar_p + int ret (manual §3.1 L1750)
+            # ----------------------------------------------------------------
+            ("GetHistoryTrades", [c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p], c_int),
+            # ----------------------------------------------------------------
+            # profit_dll.py:73-83 — Price depth (V2 — usa structs já em types.py)
+            # ----------------------------------------------------------------
+            ("SubscribePriceDepth", [POINTER(TConnectorAssetIdentifier)], c_int),
+            ("UnsubscribePriceDepth", [POINTER(TConnectorAssetIdentifier)], c_int),
+            ("GetPriceDepthSideCount", [POINTER(TConnectorAssetIdentifier), c_ubyte], c_int),
+            # ----------------------------------------------------------------
+            # profit_dll.py:49-50 — sub-account count (struct em types.py)
+            # ----------------------------------------------------------------
+            ("GetSubAccountCount", [POINTER(TConnectorAccountIdentifier)], c_int),
+        ]
+
+        # Entradas que profit_dll.py configura mas dependem de structs ainda
+        # não mirroradas em types.py (squad ainda não usa trading API). NÃO
+        # invocamos (Constituição Art. IV — No Invention). Lista preservada
+        # como comentário para sinalizar dívida técnica futura:
+        #
+        # - SendOrder [POINTER(TConnectorSendOrder)] -> c_int64
+        # - SendChangeOrderV2 [POINTER(TConnectorChangeOrder)] -> c_int
+        # - SendCancelOrderV2 [POINTER(TConnectorCancelOrder)] -> c_int
+        # - SendCancelOrdersV2 [POINTER(TConnectorCancelOrders)] -> c_int
+        # - SendCancelAllOrdersV2 [POINTER(TConnectorCancelAllOrders)] -> c_int
+        # - SendZeroPositionV2 [POINTER(TConnectorZeroPosition)] -> c_int64
+        # - GetAccounts / GetAccountDetails / GetSubAccounts / GetAccountsByBroker
+        # - GetPositionV2 / GetOrderDetails / HasOrdersInInterval
+        # - EnumerateOrdersByInterval / EnumerateAllOrders
+        # - GetPriceGroup / GetTheoreticalValues
+        # - EnumerateAllPositionAssets
+        #
+        # Quando algum desses entrar no escopo: mirrorar struct em types.py
+        # (autoridade Nelo via Q-DRIFT-*) + adicionar entrada acima.
+
+        registered: list[str] = []
+        skipped: list[str] = []
+        for name, argtypes, restype in configs:
+            try:
+                func = getattr(self._dll, name)
+            except AttributeError:
+                # Função não exportada pela versão atual da DLL (Q-DRIFT).
+                # Tolerar — algumas funções são deprecated ou ausentes em
+                # versões antigas (ex.: GetDLLVersion confirmado por
+                # Q-DRIFT-09 em smoke 2026-05-04).
+                skipped.append(name)
+                log.warning(
+                    "dll.signature_skipped",
+                    function=name,
+                    reason="not_exported",
+                )
+                continue
+            try:
+                if argtypes is not None:
+                    func.argtypes = argtypes
+                if restype is not None:
+                    func.restype = restype
+            except (TypeError, AttributeError) as exc:
+                # ctypes pode rejeitar tipos inválidos (não deveria acontecer
+                # com types canônicos, mas defensive). Loga e segue.
+                skipped.append(name)
+                log.warning(
+                    "dll.signature_skipped",
+                    function=name,
+                    reason="set_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                continue
+            registered.append(name)
+
+        log.info(
+            "dll.signatures_configured",
+            count_registered=len(registered),
+            count_skipped=len(skipped),
+            registered=registered,
+            skipped=skipped,
+        )
+
+    # =================================================================
     # Initialization (AC2, AC7, AC11, AC12)
     # =================================================================
 
@@ -305,6 +537,14 @@ class ProfitDLL:
                 cause=exc,
                 details={"path": str(self._dll_path)},
             ) from exc
+
+        # CRIT-2 (audit Nelo 2026-05-04): configurar argtypes/restype ANTES
+        # de qualquer chamada à DLL. Sem isso ctypes assume args ``c_int`` e
+        # desalinha o stack stdcall em x64 — handles ``c_size_t`` truncam,
+        # ponteiros para struct viram int (32 bits), retornos ``c_int64``
+        # chegam corrompidos. Pode ter causado a flakey de attempt 4
+        # (smoke 2026-05-04).
+        self._configure_dll_signatures()
 
         # AC11 — silenciar log nativo da DLL ANTES do init para não poluir
         # structlog com formato próprio da DLL. Se função não existe na
@@ -939,29 +1179,201 @@ class ProfitDLL:
         log.info("dll.get_history_trades_return", code=ret)
         return ret
 
-    def translate_trade(self, p_trade_handle: int, trade_struct: Any) -> int:
-        """Desempacota handle V2 em ``TConnectorTrade`` struct (Story 1.3).
+    # =================================================================
+    # Story 1.7b-followup — SubscribeTicker / UnsubscribeTicker
+    # =================================================================
+    # ProfitDLL exige ``SubscribeTicker(ticker, exchange)`` ANTES de
+    # ``GetHistoryTrades``. Sem subscribe, a DLL aceita a chamada de
+    # GetHistoryTrades mas NÃO entrega trades (state interno do ticker
+    # nunca é populado). Confirmado pelo usuário (autoridade ProfitDLL)
+    # — alinhado com exemplo oficial Nelogica (main.py L590-602
+    # ``subscribeTicker()`` / ``unsubscribeTicker()``).
+    #
+    # Lei R8/Q05-V (revalidada): exchange ∈ {'F', 'B'}. Strings tipo 'BMF'
+    # rejeitadas com ValueError ANTES de chamar a DLL (mesma lei usada por
+    # ``get_history_trades``).
+    # =================================================================
 
-        Wraps ``self._dll.TranslateTrade(handle, byref(struct))``. **DEVE ser
-        chamado em IngestorThread (FORA do callback)** — chamar a DLL de
-        dentro do callback viola lei R3 / manual §4 L4382 / Q06-V.
+    def subscribe_ticker(self, ticker: str, exchange: str) -> int:
+        """Inscreve ticker na DLL — pré-requisito para ``GetHistoryTrades``.
 
-        Caller é responsável por:
+        ProfitDLL não popula trades históricos sem subscribe explícito antes
+        do ``GetHistoryTrades`` (confirmado pelo usuário, autoridade ProfitDLL,
+        e alinhado com exemplo Nelogica ``main.py`` L590-595).
 
-        1. Setar ``trade_struct.Version = 0`` antes da primeira chamada
-           (main.py L328 demonstra).
-        2. Copiar campos relevantes do struct ANTES da próxima chamada (a DLL
-           reusa o buffer apontado pela próxima invocação).
+        Após o download, caller DEVE chamar :meth:`unsubscribe_ticker` para
+        liberar o slot interno (``download_chunk`` faz isso em ``try/finally``).
+
+        Args:
+            ticker: Contrato vigente (NÃO alias). Ex.: ``"WDOJ26"``, ``"PETR4"``.
+            exchange: ``"F"`` (BMF) ou ``"B"`` (Bovespa). Strings tipo ``"BMF"``
+                são rejeitadas (R8/Q05-V).
+
+        Returns:
+            Código retornado por ``SubscribeTicker`` (``0 = NL_OK`` em sucesso,
+            NL_* negativo em erro). Caller decide se prossegue (DLL pode
+            aceitar tickers já subscritos retornando código não-fatal).
+
+        Raises:
+            ValueError: Bolsa inválida (≠ 'F'/'B').
+            DLLInitError: DLL não inicializada.
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de subscribe_ticker.",
+            )
+        # R8/Q05-V — exchange single-letter. Mensagem alinha com get_history_trades
+        # para consistência (mesma lei, mesmo erro).
+        if exchange not in ("F", "B"):
+            raise ValueError(
+                f"exchange must be 'F' (BMF) or 'B' (Bovespa); got {exchange!r}. "
+                "Strings como 'BMF', 'BOVESPA' são REJEITADAS pela DLL "
+                "(R8/Q05-V — manual §3.1 L1673)."
+            )
+        from ctypes import c_wchar_p
+
+        log.info("dll.subscribe_ticker", ticker=ticker, exchange=exchange)
+        ret: int = self._dll.SubscribeTicker(c_wchar_p(ticker), c_wchar_p(exchange))
+        log.info(
+            "dll.subscribe_ticker_return",
+            ticker=ticker,
+            exchange=exchange,
+            code=ret,
+        )
+        return ret
+
+    def unsubscribe_ticker(self, ticker: str, exchange: str) -> int:
+        """Remove inscrição do ticker — chamado APÓS download (try/finally).
+
+        Mantém o estado interno da DLL limpo entre chunks/símbolos. Se a
+        chamada falhar (ticker já não-subscrito, DLL em estado inconsistente),
+        caller deve apenas logar — não há ação de recuperação útil.
+
+        Args:
+            ticker: Mesmo ticker passado a :meth:`subscribe_ticker`.
+            exchange: ``"F"`` ou ``"B"`` — mesma validação R8/Q05-V.
+
+        Returns:
+            Código retornado por ``UnsubscribeTicker``.
+
+        Raises:
+            ValueError: Bolsa inválida (≠ 'F'/'B').
+            DLLInitError: DLL não inicializada.
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de unsubscribe_ticker.",
+            )
+        if exchange not in ("F", "B"):
+            raise ValueError(
+                f"exchange must be 'F' (BMF) or 'B' (Bovespa); got {exchange!r}. "
+                "Strings como 'BMF', 'BOVESPA' são REJEITADAS pela DLL "
+                "(R8/Q05-V — manual §3.1 L1673)."
+            )
+        from ctypes import c_wchar_p
+
+        log.info("dll.unsubscribe_ticker", ticker=ticker, exchange=exchange)
+        ret: int = self._dll.UnsubscribeTicker(c_wchar_p(ticker), c_wchar_p(exchange))
+        log.info(
+            "dll.unsubscribe_ticker_return",
+            ticker=ticker,
+            exchange=exchange,
+            code=ret,
+        )
+        return ret
+
+    def translate_trade(self, p_trade_handle: int) -> TradeFields | None:
+        """Desempacota handle V2 em :class:`TradeFields` (Story 1.7b-followup).
+
+        Wraps ``self._dll.TranslateTrade(handle, byref(struct))`` + extração
+        dos 9 campos do struct para uma ``NamedTuple`` Python idiomática.
+        **DEVE ser chamado em IngestorThread (FORA do callback)** — chamar
+        a DLL de dentro do callback viola lei R3 / manual §4 L4382 / Q06-V.
+
+        Story 1.7b-followup (TranslateTrade complete): API pública agora
+        retorna :class:`TradeFields` em vez de receber struct out-param.
+        Aloca um ``TConnectorTrade`` interno por chamada (custo ~ ns —
+        struct é small POD; CPython ctypes alloc é barato). Para hot
+        paths que reusam struct manualmente, ver
+        :meth:`_translate_trade_raw` (low-level / privado).
+
+        ``Version=0`` é setado antes de cada ``TranslateTrade`` (main.py
+        L328 demonstra). Conversão ``SystemTime`` → ``timestamp_ns`` BRT
+        naive (lei R7) é aplicada via :func:`_system_time_to_ns` em
+        ``orchestrator.download_primitive`` — caller (IngestorThread) já
+        tem helper local + reusa.
+
+        Atenção: ``timestamp_ns`` em ``TradeFields`` aqui é convertido via
+        helper local desta classe (mesma lei R7 — datetime naive
+        interpretado como BRT, sem conversão UTC).
 
         Args:
             p_trade_handle: Handle opaco recebido pelo callback V2 (1º item
-                da tuple enfileirada).
-            trade_struct: Instância de ``TConnectorTrade`` reutilizável (caller
-                aloca uma vez e reusa entre chamadas — barato).
+                da tuple enfileirada por ``make_history_trade_callback_v2``).
 
         Returns:
-            Código retornado por ``TranslateTrade`` (``0 = NL_OK`` em sucesso,
-            NL_* negativo em erro). Caller decide se descarta ou loga.
+            :class:`TradeFields` populada com os 9 campos do struct, ou
+            ``None`` se ``TranslateTrade`` retornar erro NL_*. Caller
+            (IngestorThread) trata ``None`` como falha (counter agregado
+            ``translate_failures``) e descarta o trade silenciosamente.
+
+        Raises:
+            DLLInitError: DLL não inicializada (NL_NOT_INITIALIZED).
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de translate_trade.",
+            )
+
+        struct = TConnectorTrade(Version=0)
+        rc = self._translate_trade_raw(p_trade_handle, struct)
+        if rc != 0:
+            # NL_* negativo — caller agrega via counter ``translate_failures``
+            # e loga 1x no fim (cool path). Não levantar — pipeline continua
+            # processando demais trades do chunk.
+            return None
+
+        return TradeFields(
+            version=int(struct.Version),
+            timestamp_ns=_system_time_to_ns_local(struct.TradeDate),
+            trade_number=int(struct.TradeNumber),
+            price=float(struct.Price),
+            quantity=int(struct.Quantity),
+            volume=float(struct.Volume),
+            buy_agent_id=int(struct.BuyAgent),
+            sell_agent_id=int(struct.SellAgent),
+            trade_type=int(struct.TradeType),
+        )
+
+    def _translate_trade_raw(self, p_trade_handle: int, trade_struct: Any) -> int:
+        """Low-level ``TranslateTrade`` — preenche ``trade_struct`` in-place.
+
+        Helper privado para casos onde caller precisa reusar um único
+        ``TConnectorTrade`` entre chamadas (micro-optimização — evita
+        alocação por trade). Hot paths normais usam :meth:`translate_trade`
+        (API pública) que retorna :class:`TradeFields` imutável (mais
+        ergonômico, custo de alocação irrelevante na prática).
+
+        Caller é responsável por:
+
+        1. Setar ``trade_struct.Version = 0`` antes de cada chamada
+           (main.py L328 demonstra).
+        2. Copiar campos ANTES de overwriter — a DLL pode reescrever o
+           buffer apontado na próxima chamada.
+
+        Args:
+            p_trade_handle: Handle opaco do callback V2.
+            trade_struct: ``TConnectorTrade`` reutilizável.
+
+        Returns:
+            Código retornado por ``TranslateTrade`` (0 sucesso, NL_*
+            negativo em erro).
 
         Raises:
             DLLInitError: DLL não inicializada.
@@ -970,7 +1382,7 @@ class ProfitDLL:
             raise DLLInitError(
                 -2147483646,
                 "NL_NOT_INITIALIZED",
-                "Chame initialize_market_only antes de translate_trade.",
+                "Chame initialize_market_only antes de _translate_trade_raw.",
             )
         from ctypes import byref
 
@@ -981,6 +1393,44 @@ class ProfitDLL:
 # =====================================================================
 # Story 1.3 — Helpers de validação (módulo-level, reusáveis em testes)
 # =====================================================================
+
+
+def _system_time_to_ns_local(st: Any) -> int:
+    """Converte ``SystemTime`` (struct ctypes) → timestamp_ns BRT naive.
+
+    Lei R7 / Q04-E: NÃO converter para UTC. Wall clock da DLL é BRT naive
+    (sem DST desde 2019). Construir datetime naive com os campos do struct
+    e depois converter para nanos via mesmo truque do timestamp parser.
+
+    Helper local da camada DLL — duplicado intencionalmente com
+    ``orchestrator.download_primitive._system_time_to_ns`` (mesma fórmula)
+    para evitar dependência circular dll → orchestrator. Ambos seguem R7
+    e produzem o mesmo resultado para os mesmos campos.
+
+    Args:
+        st: ``data_downloader.dll.types.SystemTime`` (campos wYear, wMonth,
+            wDay, wHour, wMinute, wSecond, wMilliseconds; ignoramos
+            wDayOfWeek).
+
+    Returns:
+        Nanosegundos desde 1970-01-01 BRT naive.
+    """
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    dt_naive = _dt(
+        year=int(st.wYear),
+        month=int(st.wMonth),
+        day=int(st.wDay),
+        hour=int(st.wHour),
+        minute=int(st.wMinute),
+        second=int(st.wSecond),
+        microsecond=int(st.wMilliseconds) * 1000,
+    )
+    aware = dt_naive.replace(tzinfo=UTC)
+    delta = aware - _dt(1970, 1, 1, tzinfo=UTC)
+    total_seconds = delta.days * 86_400 + delta.seconds
+    return total_seconds * 1_000_000_000 + delta.microseconds * 1_000
 
 
 _HISTORY_DATE_FORMAT: Final[str] = "DD/MM/YYYY HH:mm:SS"

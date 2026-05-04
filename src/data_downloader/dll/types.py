@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import sys
 from ctypes import POINTER, Structure, c_long, c_size_t, c_ubyte, c_ushort
-from typing import ClassVar, Final
+from typing import ClassVar, Final, NamedTuple
 
 # ``WINFUNCTYPE`` (stdcall) só existe em Windows. Em outras plataformas
 # fazemos shim para ``CFUNCTYPE`` para permitir importação + mocks (testes
@@ -372,6 +372,46 @@ TC_IS_EDIT: Final[int] = 0x01
 TC_LAST_PACKET: Final[int] = 0x02
 """Bit 1: este é o último pacote do download histórico — sinal autoritativo
 de fim, complementar ao progress=100 (Q02-E mitigation)."""
+
+
+class TradeFields(NamedTuple):
+    """Campos extraídos de ``TConnectorTrade`` por ``ProfitDLL.translate_trade``.
+
+    Tuple imutável (~ leve / hashable / pickle-friendly) com os 9 campos do
+    struct C aplanados em tipos Python idiomáticos. Story 1.7b-followup
+    (TranslateTrade complete): consumidor (IngestorThread) recebe esta
+    namedtuple em vez de manipular o struct C diretamente — separação de
+    responsabilidades + testabilidade.
+
+    O ``timestamp_ns`` é BRT naive (lei R7) — semântica idêntica a
+    :class:`data_downloader.orchestrator.download_primitive.TradeRecord`.
+    Conversão de ``SystemTime`` → ns ocorre em
+    ``ProfitDLL.translate_trade`` (ver ``_system_time_to_ns``).
+
+    Attributes:
+        version: ``Version`` do struct (sempre 0 quando setado pelo caller
+            antes da chamada — main.py L328 demonstra).
+        timestamp_ns: ``TradeDate`` convertido para ns BRT naive.
+        trade_number: ``TradeNumber`` (trade_id curto da DLL — pode ser 0
+            se DLL não preencheu; caller decide se cai em chave longa de
+            dedup).
+        price: ``Price``.
+        quantity: ``Quantity`` (c_longlong).
+        volume: ``Volume`` (calculado pela DLL ~ price * quantity).
+        buy_agent_id: ``BuyAgent`` (broker ID — resolver via ``AgentResolver``).
+        sell_agent_id: ``SellAgent``.
+        trade_type: ``TradeType`` (c_ubyte — auction/regular/cross/etc.).
+    """
+
+    version: int
+    timestamp_ns: int
+    trade_number: int
+    price: float
+    quantity: int
+    volume: float
+    buy_agent_id: int
+    sell_agent_id: int
+    trade_type: int
 
 
 # History trade callback V2 — manual §3.2 L1912 + main.py L324 (mesmo padrão
