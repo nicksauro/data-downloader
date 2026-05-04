@@ -12,8 +12,16 @@ Hipoteses (mock-based v1):
     H3: Spawn overhead Windows e dominante em jobs curtos (< 30s) — bench
         usa job de 50k trades x 2 chunks = ~20s/job para validar crossover.
 
+Story 4.1 (COUNCIL-25 D2/D4) — modo broker pool persistente:
+    Variavel env `BENCH_MULTI_SYMBOL_MODE=broker` ativa modo broker (pool
+    persistente compartilhado). Default permanece spawn-per-job para
+    backward compat. Modo broker mede speedup esperado >= 3.2x (target V1
+    Pyro) eliminando spawn cost por job.
+
 Output:
     benchmarks/results/baselines_v1_mock/bench_multi_symbol-{date}-{git_sha}.json
+    benchmarks/results/baselines_v1_mock/bench_multi_symbol_broker-{date}-{git_sha}.json
+        (quando rodado com BENCH_MULTI_SYMBOL_MODE=broker)
 
 NOTA Pyro+Sol+Aria (COUNCIL-10):
     Usa multiprocessing.Pool (Windows spawn). Cada worker rebuild full
@@ -23,6 +31,7 @@ NOTA Pyro+Sol+Aria (COUNCIL-10):
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import shutil
 import statistics
 import tempfile
@@ -257,9 +266,92 @@ def measure_n_processes(n: int, tmp_root: Path) -> dict[str, Any]:
     }
 
 
+def measure_n_processes_broker(n: int, tmp_root: Path) -> dict[str, Any]:
+    """Roda N workers em pool persistente via :class:`MultiSymbolMaster` (Story 4.1).
+
+    Diferenças vs ``measure_n_processes``:
+
+    - Pool persistente (workers reusados) — paga spawn UMA vez por chamada
+      a esta função, não por job.
+    - Catálogo único compartilhado via broker no master process (vs N
+      catálogos isolados no modo spawn-per-job).
+    - Mock factory = ``broker._mock_worker_factory`` (1000 trades x 1 chunk).
+
+    Args:
+        n: Número de workers no pool.
+        tmp_root: Diretório raiz temporário (catalog db + parquet).
+
+    Returns:
+        Dict com mesmas chaves que ``measure_n_processes`` para
+        comparação direta.
+    """
+    from data_downloader.orchestrator.broker.master import (
+        MultiSymbolJobConfig,
+        MultiSymbolMaster,
+    )
+    from data_downloader.orchestrator.broker.pool import PoolConfig
+    from data_downloader.storage.catalog import Catalog
+
+    # Configura mock factory com tamanho similar ao spawn-per-job.
+    os.environ["MOCK_TRADES_PER_CHUNK"] = str(TRADES_PER_CHUNK)
+    os.environ["MOCK_N_CHUNKS_PER_JOB"] = str(N_CHUNKS)
+
+    symbols = SYMBOLS[:n]
+    data_dir = tmp_root / "broker_run"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "history" / "catalog.db"
+    catalog = Catalog(db_path=db_path, data_dir=data_dir, auto_reconcile=False)
+
+    pool_config = PoolConfig(
+        n_workers=n,
+        data_dir=data_dir,
+        worker_factory_module="data_downloader.orchestrator.broker._mock_worker_factory",
+        worker_factory_callable="create_orchestrator",
+        broker_timeout_s=30.0,
+    )
+
+    jobs = [
+        MultiSymbolJobConfig(
+            symbol=sym,
+            exchange="F",
+            start=datetime(2026, 3, 2, 9, 0),
+            end=datetime(2026, 3, 2, 17, 0),
+            resolve_contract=False,
+        )
+        for sym in symbols
+    ]
+
+    try:
+        t0 = time.perf_counter()
+        with MultiSymbolMaster(catalog=catalog, pool_config=pool_config) as master:
+            outcomes = master.download_multi(jobs)
+        wall_s = time.perf_counter() - t0
+
+        total_trades = sum(o.trades_persisted for o in outcomes)
+        per_worker_durations_ms = [o.duration_seconds * 1000 for o in outcomes]
+        all_ok = all(o.status in ("completed", "cache_hit") for o in outcomes)
+
+        return {
+            "n_processes": n,
+            "wall_time_s": wall_s,
+            "total_trades_persisted": total_trades,
+            "agg_throughput_trades_per_sec": (total_trades / wall_s) if wall_s > 0 else 0.0,
+            "per_worker_duration_ms_p50": statistics.median(per_worker_durations_ms)
+            if per_worker_durations_ms
+            else 0.0,
+            "all_status_completed": all_ok,
+        }
+    finally:
+        catalog.close()
+
+
 def main() -> None:
     # Required for Windows spawn
     mp.freeze_support()
+
+    mode = os.environ.get("BENCH_MULTI_SYMBOL_MODE", "spawn").lower()
+    use_broker = mode == "broker"
+    print(f"[bench_multi_symbol] mode={mode} (use_broker={use_broker})")
 
     print("[bench_multi_symbol] measuring spawn overhead...")
     spawn = measure_spawn_overhead(n_samples=5)
@@ -275,7 +367,10 @@ def main() -> None:
                 run_dir = tmp_root / f"n{n}_r{run_idx}"
                 run_dir.mkdir(parents=True, exist_ok=True)
                 print(f"\n[N={n} run={run_idx}/{RUNS_PER_N}]")
-                res = measure_n_processes(n, run_dir)
+                if use_broker:
+                    res = measure_n_processes_broker(n, run_dir)
+                else:
+                    res = measure_n_processes(n, run_dir)
                 print(
                     f"  wall={res['wall_time_s']:.2f}s  "
                     f"agg_tps={res['agg_throughput_trades_per_sec']:_.0f}/s  "
@@ -330,29 +425,39 @@ def main() -> None:
             "n_chunks_per_job": N_CHUNKS,
         }
 
+        bench_name = "bench_multi_symbol_broker" if use_broker else "bench_multi_symbol"
+        spawn_strategy_label = (
+            "MultiSymbolMaster broker (pool persistente — Story 4.1)"
+            if use_broker
+            else "multiprocessing.Pool (Windows spawn — spawn-per-job)"
+        )
         envelope = build_result_envelope(
-            "bench_multi_symbol",
+            bench_name,
             config={
                 "n_processes_list": N_PROCESSES_LIST,
                 "runs_per_n": RUNS_PER_N,
                 "trades_per_chunk": TRADES_PER_CHUNK,
                 "n_chunks_per_job": N_CHUNKS,
-                "spawn_strategy": "multiprocessing.Pool (Windows spawn)",
+                "spawn_strategy": spawn_strategy_label,
                 "target_speedup_n4": TARGET_SPEEDUP_N4,
+                "mode": mode,
             },
             scenarios=scenarios,
             summary=summary,
             notes=(
-                "Mock pipeline N processos paralelo (Windows spawn). Cada worker "
-                "tem seu DLL mock + Catalog + Writer isolados. Speedup baseline = N=1. "
-                "Baseline v1.1.0-mock — aguarda smoke real (Story 1.7b-followup)."
+                "Mock pipeline N processos paralelo. Pool persistente broker (Story 4.1)"
+                if use_broker
+                else "Mock pipeline N processos paralelo (Windows spawn)."
+                " Cada worker tem seu DLL mock + Catalog + Writer isolados."
+                " Speedup baseline = N=1. Baseline aguarda smoke real (4.1-followup)."
             ),
             dll_version="4.0.0.30-mock",
         )
         path = save_results(envelope)
         baseline_dir = path.parent / "baselines_v1_mock"
         baseline_dir.mkdir(parents=True, exist_ok=True)
-        baseline_path = baseline_dir / "bench_multi_symbol-1.1.0-mock.json"
+        baseline_filename = f"{bench_name}-1.1.0-mock.json"
+        baseline_path = baseline_dir / baseline_filename
         shutil.copy(path, baseline_path)
 
         print(f"\n[bench_multi_symbol] resultados: {path}")

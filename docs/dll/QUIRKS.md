@@ -33,6 +33,7 @@
 | [Q14-E](#q14-e) | 🔬 empirical | metadata | `GetAgentName` requer `GetAgentNameLength` PRIMEIRO |
 | [Q15-OPEN](#q15-open) | ❓ open | threading | Comportamento ConnectorThread quando `put_nowait` bloqueia (drop ou wait?) |
 | [Q16-VALIDATED](#q16-validated) | ✅ validated | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
+| [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
 
 ---
 
@@ -348,6 +349,37 @@
   - `docs/dll/HOLIDAYS_DAT_FORMAT.md` — formato byte-a-byte (Nelo authority)
   - `docs/decisions/COUNCIL-16-holidays-dat-integration.md` — sign-offs
   - `docs/qa/AUDIT_REPORTS/2.5-dll-2026-05-04.md` — esta validação
+
+---
+
+## Q17-OPEN
+
+- **ID:** Q17-OPEN
+- **Status:** ❓ open
+- **Categoria:** licença / multi-process
+- **Sintoma:** Pergunta: ao iniciar **N processos Python independentes** na **mesma máquina** com **mesma chave de licença Nelogica**, todos conseguem
+  conectar (`MARKET_CONNECTED`) e baixar histórico simultaneamente?
+  - Hipótese A: **OK** — licença é per-machine; N processos = N usos legítimos da mesma chave.
+  - Hipótese B: **NL_LICENSE_BUSY** ou similar — licença é single-session; segundo init falha.
+  - Hipótese C: **Funciona, mas com rate limit** — DLL conecta mas servidor degrada throughput por chave.
+- **Causa raiz:** desconhecida. Manual silencioso. Política comercial Nelogica + comportamento DLL não documentados oficialmente.
+- **Evidência:** nenhuma — apenas inferência. Q06-V regula thread model dentro de 1 processo, mas é silencioso sobre N processos.
+- **Workaround proposto (até probe):**
+  - Story 4.1 (broker process) **assume Hipótese A** (R20 conservador: 1 conexão por processo, N processos = N usos).
+  - Implementação completa via mock (sem licença real); smoke real bloqueado por Story 4.1-followup pending humano.
+  - Se probe revelar Hipótese B: Story 4.1 fica deprecated; novo ADR substitui (ex: 1 instância OS-wide com queue compartilhada).
+- **Probe proposto (humano + Nelo):**
+  1. Humano abre 2 terminais simultâneos.
+  2. Em cada um, roda `data-downloader contracts validate WDO WDOJ26 --sample-date 2026-04-15` com mesmas credenciais.
+  3. Observar se ambos conectam (state callback `MARKET_CONNECTED`) ou se segundo falha NL_LICENSE_BUSY.
+  4. Bonus: rodar `data-downloader download --symbol WDOJ26 --symbol WINH26 --parallel 2 --start ... --end ...` (Story 4.1 multi-symbol) com ProfitDLL real para validar end-to-end.
+- **Manual diz:** silencioso sobre licença multi-instance na mesma máquina.
+- **Data descoberta:** 2026-05-04 (Story 4.1 implementação — mini-council COUNCIL-25).
+- **Aplica a stories:** 4.1 (broker — hoje mock + WAIVER), 4.1-followup (smoke real — gating).
+- **Refs:**
+  - `docs/decisions/COUNCIL-25-multi-symbol-broker-impl.md` D5 (decisão de assumir Hipótese A pessimista)
+  - `docs/stories/4.1-followup.story.md` (probe humano em AC1.2)
+  - `docs/qa/WAIVERS/4.1-real-smoke-deferred-2026-05-04.md` (WAIVER que cobre esta open question)
 
 ---
 

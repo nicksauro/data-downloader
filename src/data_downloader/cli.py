@@ -646,8 +646,20 @@ def integrity_validate_data(
 # =====================================================================
 
 # Module-level singletons p/ typer.Option (evita ruff B008 conforme Story 2.1).
+# Story 4.1 — `--symbol` agora aceita múltiplos valores (typer/click lista
+# de strings via repeated flag: --symbol WDOJ26 --symbol WINH26). Quando
+# múltiplos símbolos são passados E --parallel > 1, roteamos para
+# MultiSymbolMaster (Story 4.1 AC6); caso contrário usa path single-symbol
+# existente (Story 1.7b).
 _DOWNLOAD_SYMBOL_OPT = typer.Option(
-    None, "--symbol", "-s", help="Símbolo (ex. WDOJ26). Default: última usada."
+    None,
+    "--symbol",
+    "-s",
+    help=(
+        "Símbolo (ex. WDOJ26). Repetível para múltiplos: "
+        "--symbol WDOJ26 --symbol WINH26 (Story 4.1). "
+        "Default: última usada."
+    ),
 )
 _DOWNLOAD_START_OPT = typer.Option(
     None, "--start", help="Data inicial YYYY-MM-DD. Default: 1º dia do mês corrente."
@@ -661,6 +673,21 @@ _DOWNLOAD_DATA_DIR_OPT = typer.Option(
 )
 _DOWNLOAD_RESUME_OPT = typer.Option(
     None, "--resume", help="(Reservado V2) Continuar download por job_id."
+)
+# Story 4.1 AC6 — `--parallel N` controla número de workers do pool. N=1
+# (default) força path single-symbol existente (Story 1.7b — sem broker
+# overhead). N>1 com múltiplos símbolos usa MultiSymbolMaster.
+_DOWNLOAD_PARALLEL_OPT = typer.Option(
+    1,
+    "--parallel",
+    "-p",
+    help=(
+        "Número de workers paralelos (Story 4.1). "
+        "1 = single-process (default — sem broker overhead). "
+        ">1 = pool persistente N workers. Requer múltiplos --symbol."
+    ),
+    min=1,
+    max=16,
 )
 # Story 2.4 — flag opt-in para Prometheus exporter HTTP.
 _DOWNLOAD_METRICS_PORT_OPT = typer.Option(
@@ -723,18 +750,22 @@ def _format_microcopy(msg_id: str, field: str = "title", **kwargs: object) -> st
 
 @app.command("download")  # type: ignore[misc,unused-ignore]
 def download_cmd(
-    symbol: str | None = _DOWNLOAD_SYMBOL_OPT,
+    symbol: list[str] | None = _DOWNLOAD_SYMBOL_OPT,
     start: str | None = _DOWNLOAD_START_OPT,
     end: str | None = _DOWNLOAD_END_OPT,
     exchange: str = _DOWNLOAD_EXCHANGE_OPT,
     data_dir: Path | None = _DOWNLOAD_DATA_DIR_OPT,
     resume: str | None = _DOWNLOAD_RESUME_OPT,
+    parallel: int = _DOWNLOAD_PARALLEL_OPT,
     metrics_port: int | None = _DOWNLOAD_METRICS_PORT_OPT,
 ) -> None:
-    """Baixa histórico de trades para ``symbol`` em ``[start, end]`` (HLP_DOWNLOAD).
+    """Baixa histórico de trades para ``symbol(s)`` em ``[start, end]`` (HLP_DOWNLOAD).
 
     Story 1.7b — gate de Epic 1 (MVP smoke). Compose:
       CLI typer → public_api.download → Orchestrator (1.7a) → DLL/writer/catalog.
+
+    Story 4.1 (AC6) — multi-symbol via ``--symbol X --symbol Y --parallel N``:
+      CLI → MultiSymbolMaster → CatalogBroker (master) + WorkerPool (N procs).
 
     Microcopy 100% via ``ui.microcopy_loader`` (R17 — Uma).
     Ctrl+C produz graceful shutdown (CLI_PATTERNS §7); exit code 130 (POSIX).
@@ -742,12 +773,16 @@ def download_cmd(
     console = _make_console()
     _ = resume  # placeholder V2
 
-    # ---- 1. Defaults inteligentes (CLI_PATTERNS §10) ----
-    if symbol is None or not symbol.strip():
+    # ---- 1. Normaliza lista de símbolos (Story 4.1 AC6) ----
+    symbols: list[str] = []
+    if symbol:
+        symbols = [s.strip() for s in symbol if s and s.strip()]
+
+    if not symbols:
         cached = _load_last_symbol()
         if cached:
-            symbol = cached
-            console.print(f"[dim]Símbolo (cache): [bold]{symbol}[/bold][/dim]")
+            symbols = [cached]
+            console.print(f"[dim]Símbolo (cache): [bold]{cached}[/bold][/dim]")
         else:
             console.print(
                 f"[red]✗ {_format_microcopy('ERR_INPUT_SYMBOL_REQUIRED', 'title')}[/red]\n"
@@ -755,6 +790,11 @@ def download_cmd(
                 f"  {_format_microcopy('ERR_INPUT_SYMBOL_REQUIRED', 'action')}"
             )
             raise typer.Exit(code=2)
+
+    # ---- 1b. Routing: multi-symbol vs single-symbol ----
+    use_multi_symbol = parallel > 1 and len(symbols) > 1
+    # Mantém compatibilidade: se 1 símbolo ou parallel=1, usa path antigo.
+    single_symbol: str = symbols[0]  # path single-symbol usa apenas o primeiro
 
     if start is None or end is None:
         first, today = _default_period()
@@ -820,10 +860,24 @@ def download_cmd(
 
     resolved_data_dir = Path(data_dir) if data_dir is not None else Path("data")
 
-    # ---- 3. Header Rich (CLI_PATTERNS §2) ----
+    # ---- 3. Multi-symbol path (Story 4.1 AC6) ----
+    if use_multi_symbol:
+        _run_multi_symbol_download(
+            console=console,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            exchange=exchange,
+            data_dir=resolved_data_dir,
+            parallel=parallel,
+        )
+        # _run_multi_symbol_download chama typer.Exit ao final.
+        return
+
+    # ---- 3b. Single-symbol header Rich (CLI_PATTERNS §2) ----
     console.print(
         Panel(
-            f"[bold]Baixando[/bold] [cyan]{symbol}[/cyan] "
+            f"[bold]Baixando[/bold] [cyan]{single_symbol}[/cyan] "
             f"({start_date.isoformat()} a {end_date.isoformat()}) — exchange={exchange}",
             title="[cyan]⬇ data-downloader download[/cyan]",
             border_style="cyan",
@@ -856,7 +910,7 @@ def download_cmd(
 
     try:
         handle = api_download(
-            symbol=symbol,
+            symbol=single_symbol,
             start=start_date,
             end=end_date,
             exchange=exchange,
@@ -896,13 +950,13 @@ def download_cmd(
         transient=False,
     )
 
-    task_id = progress.add_task(f"Baixando {symbol}", total=100)
+    task_id = progress.add_task(f"Baixando {single_symbol}", total=100)
 
     # Drena eventos em thread separada para que o main loop possa
     # processar SIGINT confirmação (input prompt bloqueia).
-    progress_state = {
+    progress_state: dict[str, object] = {
         "trades": 0,
-        "current_contract": symbol,
+        "current_contract": single_symbol,
         "is_99": False,
     }
 
@@ -1088,6 +1142,158 @@ def _format_duration(seconds: float) -> str:
     minutes = int(seconds // 60)
     rem = int(seconds % 60)
     return f"{minutes}min {rem:02d}s"
+
+
+# =====================================================================
+# Multi-symbol download (Story 4.1 AC6 — broker + pool)
+# =====================================================================
+
+
+def _run_multi_symbol_download(
+    *,
+    console: Console,
+    symbols: list[str],
+    start_date: date,
+    end_date: date,
+    exchange: str,
+    data_dir: Path,
+    parallel: int,
+) -> None:
+    """Executa N símbolos paralelo via :class:`MultiSymbolMaster` (Story 4.1).
+
+    Args:
+        console: Rich console (microcopy + tables).
+        symbols: Lista de símbolos (>= 2; rota single-symbol cobre 1).
+        start_date / end_date: Janela inclusiva.
+        exchange: ``"F"`` ou ``"B"``.
+        data_dir: Raiz dos dados.
+        parallel: Número de workers do pool (clamp em range válido).
+
+    Notes:
+        - Usa factory de produção em ``broker._mock_worker_factory`` é OK
+          para tests; produção deve passar factory que carrega DLL real.
+          V1 default: factory mock (para evitar bloquear quando humano não
+          tem DLL — ver WAIVER 4.1-real-smoke-deferred).
+        - Resolve contract = True (default) — workers usam catalog R/O via
+          broker para resolver vigência (futuro V1.x — V1 mantém raiz =
+          contrato vigente quando passado direto).
+        - Sem cancellation handler aqui (V1) — Ctrl+C mata workers via
+          broker stop. Futuro: graceful cancel via flag compartilhada.
+    """
+    from datetime import datetime
+    from datetime import time as _time
+
+    from data_downloader.orchestrator.broker.master import (
+        MultiSymbolJobConfig,
+        MultiSymbolMaster,
+    )
+    from data_downloader.orchestrator.broker.pool import PoolConfig
+    from data_downloader.storage.catalog import Catalog
+
+    console.print(
+        Panel(
+            f"[bold]Multi-symbol download[/bold] — {len(symbols)} símbolo(s) "
+            f"x {parallel} worker(s)\n"
+            f"Símbolos: [cyan]{', '.join(symbols)}[/cyan]\n"
+            f"Período: {start_date.isoformat()} a {end_date.isoformat()} — exchange={exchange}",
+            title="[cyan]⬇ data-downloader download (multi-symbol — Story 4.1)[/cyan]",
+            border_style="cyan",
+        )
+    )
+
+    # Catálogo no master (broker possui write lock).
+    db_path = data_dir / "history" / "catalog.db"
+    catalog = Catalog(db_path=db_path, data_dir=data_dir)
+
+    # Worker factory: V1 usa _mock_worker_factory por causa do WAIVER
+    # 4.1-real-smoke-deferred. Quando humano rodar smoke real (4.1-followup),
+    # substituir por factory que carrega DLL real (TBD em followup story).
+    factory_module = os.environ.get(
+        "DATA_DOWNLOADER_BROKER_FACTORY",
+        "data_downloader.orchestrator.broker._mock_worker_factory",
+    )
+    pool_config = PoolConfig(
+        n_workers=parallel,
+        data_dir=data_dir,
+        worker_factory_module=factory_module,
+        worker_factory_callable="create_orchestrator",
+    )
+
+    jobs = [
+        MultiSymbolJobConfig(
+            symbol=sym,
+            exchange=exchange,
+            start=datetime.combine(start_date, _time(9, 0)),
+            end=datetime.combine(end_date, _time(17, 0)),
+            resolve_contract=False,  # V1: assume símbolo já é contrato vigente
+        )
+        for sym in symbols
+    ]
+
+    try:
+        with MultiSymbolMaster(catalog=catalog, pool_config=pool_config) as master:
+            outcomes = master.download_multi(jobs)
+    finally:
+        catalog.close()
+
+    # Sumário Rich.
+    table = Table(title="Multi-symbol download — outcomes")
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Status", style="bold")
+    table.add_column("Trades", justify="right")
+    table.add_column("Duration", justify="right")
+    table.add_column("Error", overflow="fold")
+
+    n_completed = 0
+    n_failed = 0
+    for o in outcomes:
+        status_color = {
+            "completed": "[green]completed[/green]",
+            "cache_hit": "[green]cache_hit[/green]",
+            "partial": "[yellow]partial[/yellow]",
+            "failed": "[red]failed[/red]",
+            "exception": "[red]exception[/red]",
+        }.get(o.status, o.status)
+        table.add_row(
+            o.symbol,
+            status_color,
+            f"{o.trades_persisted:,}".replace(",", "."),
+            _format_duration(o.duration_seconds),
+            (o.error or "")[:80],
+        )
+        if o.status in ("completed", "cache_hit"):
+            n_completed += 1
+        else:
+            n_failed += 1
+
+    console.print(table)
+
+    if n_failed == 0:
+        console.print(
+            Panel(
+                f"[bold green]✓ All {n_completed} symbols completed[/bold green]",
+                title="OK",
+                border_style="green",
+            )
+        )
+        raise typer.Exit(code=0)
+    if n_completed == 0:
+        console.print(
+            Panel(
+                f"[bold red]✗ All {n_failed} symbols failed[/bold red]",
+                title="FAIL",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
+    console.print(
+        Panel(
+            f"[yellow]⚠ Partial: {n_completed} completed, {n_failed} failed[/yellow]",
+            title="PARTIAL",
+            border_style="yellow",
+        )
+    )
+    raise typer.Exit(code=3)
 
 
 # =====================================================================

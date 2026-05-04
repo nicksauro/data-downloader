@@ -1,0 +1,99 @@
+{
+  "benchmark": "bench_multi_symbol_broker",
+  "version": "1.0.0",
+  "git_sha": "e6787e5",
+  "git_dirty": true,
+  "date": "2026-05-04T13:18:11Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "4.0.0.30-mock",
+  "config": {
+    "n_processes_list": [
+      1,
+      2,
+      4
+    ],
+    "runs_per_n": 2,
+    "trades_per_chunk": 25000,
+    "n_chunks_per_job": 2,
+    "spawn_strategy": "MultiSymbolMaster broker (pool persistente \u2014 Story 4.1)",
+    "target_speedup_n4": 3.2,
+    "mode": "broker"
+  },
+  "scenarios": [
+    {
+      "n_processes": 1,
+      "wall_time_s_p50": 4.767351850008708,
+      "wall_time_s_p99": 4.832981126998493,
+      "agg_throughput_p50": 5245.036439502364,
+      "speedup_vs_n1": 1.0,
+      "efficiency_pct": 100.0,
+      "all_runs_completed": true
+    },
+    {
+      "n_processes": 2,
+      "wall_time_s_p50": 8.203635950005264,
+      "wall_time_s_p99": 9.820609637013114,
+      "agg_throughput_p50": 6351.802153473269,
+      "speedup_vs_n1": 1.1622533908286483,
+      "efficiency_pct": 58.11266954143242,
+      "all_runs_completed": true
+    },
+    {
+      "n_processes": 4,
+      "wall_time_s_p50": 7.022126700001536,
+      "wall_time_s_p99": 7.097415592001052,
+      "agg_throughput_p50": 14242.404773419426,
+      "speedup_vs_n1": 2.7156171078529048,
+      "efficiency_pct": 67.89042769632262,
+      "all_runs_completed": true
+    }
+  ],
+  "summary": {
+    "spawn_overhead_per_proc_p50_s": 0.26214879998588003,
+    "scenarios_summary": [
+      {
+        "n": 1,
+        "wall_p50_s": 4.77,
+        "speedup": 1.0,
+        "efficiency_pct": 100.0
+      },
+      {
+        "n": 2,
+        "wall_p50_s": 8.2,
+        "speedup": 1.16,
+        "efficiency_pct": 58.1
+      },
+      {
+        "n": 4,
+        "wall_p50_s": 7.02,
+        "speedup": 2.72,
+        "efficiency_pct": 67.9
+      }
+    ],
+    "n4_speedup_vs_target": {
+      "target": 3.2,
+      "measured": 2.72,
+      "verdict": "FAIL"
+    },
+    "n4_speedup": 2.7156171078529048,
+    "trades_per_chunk_mock": 25000,
+    "n_chunks_per_job": 2
+  },
+  "notes": "Mock pipeline N processos paralelo. Pool persistente broker (Story 4.1)"
+}
