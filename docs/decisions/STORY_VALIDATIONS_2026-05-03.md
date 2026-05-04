@@ -434,6 +434,132 @@ Observação: V2 deferred originalmente para Epic 4 em ADR-013 — antecipado pa
 
 ---
 
+## Story 2.6 — Retry inteligente + circuit breaker (NL_* taxonomy) (Epic 2 — escopo IN)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a orchestrator (Story 1.7a) que precisa atravessar quirks DLL... / I want policy formal de retry categorizado por tipo de erro NL_* + circuit breaker stateful por símbolo / So that download longo sobreviva a falhas transientes sem mascarar bugs lógicos nem cascatear loops infinitos" |
+| P2 | ✅ | 8 AC numeradas e testáveis (taxonomia 12+ NL_*, RetryPolicy dataclass, CircuitBreaker 3 estados, Q02-E policy, hook orchestrator não-quebrador, structured logs, suite tests, env config) |
+| P3 | ✅ | Cobre golden path (transient retry → success) + edge cases (PERMANENT fail fast, UNKNOWN fail fast, Q02-E 99% repeats não-conta, OPEN→HALF_OPEN→OPEN com janela ampliada, threading concorrente) |
+| P4 | ✅ | 7 tasks, ~21 subtasks; cada subtask < 1d (taxonomy table, retry refactor, circuit breaker state machine, Q02-E hook, logs, doc, reviews) |
+| P5 | ✅ | Refs: ADR-010 (logs), ADR-011 (CircuitOpenError hierarchy), ADR-013 (métricas), QUIRKS.md Q02-E, profitTypes.py NL_*, agents/profitdll-specialist.md (Nelo), Stories 1.7a + 2.4 |
+| P6 | ✅ | Unit (taxonomy table-driven 12+ casos + RetryPolicy + CircuitBreaker transitions ≥ 8) + Property (Hypothesis sequências aleatórias) + Integration (mock DLL 50% fail) + Smoke deferred opcional |
+| P7 | ✅ | depends_on: [1.7a, 2.4] explícito (orchestrator base + ProgressEmitter Protocol para métrica) |
+| P8 | ✅ | Owner: dev (Dex); Reviewers: profitdll-specialist (Nelo — DLL semantics), architect (Aria — fronteira orchestrator), qa (Quinn) |
+| P9 | ✅ | Foundation **MÉDIO-ALTO** declarado — toca `orchestrator/` + `dll/`. Bug = loop infinito ou abort precoce. Property test + Nelo audit + Aria audit como defesas. Sem mudança de fronteira public_api (CircuitOpenError integra hierarquia 2.11 quando essa concluir). |
+| P10 | ✅ | 2d estimativa |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: depends_on 2.4 é soft (métrica gauge `circuit_breaker_state` integra ProgressEmitter Protocol). Story 2.6 pode iniciar em paralelo com 2.4 — apenas o AC3 hook de métrica fica feature-flagged até 2.4 Done. Aria classificou esse desacoplamento como aceitável.
+
+---
+
+## Story 2.7 — Hot path tuning (HOT_PATH_RULES.md aplicado) (Epic 2 — escopo IN)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a Pyro + Aria / I want auditar todos os hot paths contra R21 + ADR-010 §hot-path-rules, remover structlog desses pontos, formalizar HOT_PATH_RULES.md / So that overhead de logging < 5% CPU em download contínuo" |
+| P2 | ✅ | 8 AC numeradas e testáveis (HOT_PATH_RULES.md NEW, audit_hot_path.py + pre-commit, structlog removido callbacks/writer/orchestrator, per-chunk logs preservados, bench re-run com flame graph, async log path condicional, suite tests, F-Q-1 cobertura --cov workaround doc) |
+| P3 | ✅ | Cobre golden path (clean hot paths → ganho de Pyro 2.2 não comido) + edge cases (negative result aceitável para AC6, F-Q-1 doc-only sem implementação) |
+| P4 | ✅ | 7 tasks bem decompostas (HOT_PATH_RULES doc, audit script + pre-commit, refactor structlog, bench, async opcional, F-Q-1 doc, reviews) |
+| P5 | ✅ | Refs: MANIFEST §R21, ADR-010 §hot-path-rules, ADR-013, Plan Review H22, QA Report 1.7a F-Q-1, agents/perf-engineer.md + architect.md, Stories 1.4.5/1.8/2.2 |
+| P6 | ✅ | Unit (audit fixture violador + limpo) + Bench (callback_to_disk) + Property (log count = chunks count) + Regression (full bench suite) + Pre-commit hook |
+| P7 | ✅ | depends_on: [1.7a, 1.8, 2.2] (orchestrator entry points + baselines + post-vectorize state) |
+| P8 | ✅ | Owner: perf-engineer (Pyro); Reviewers: architect (Aria — boundary R21), dev (Dex — refactor), qa (Quinn — regression) |
+| P9 | ✅ | Foundation **MÉDIO** — toca callbacks DLL (Nelo) + writer (Sol). Mudança cirúrgica (substituir structlog por contador). Auditoria mecânica em CI previne regressão. |
+| P10 | ✅ | 2d estimativa |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: AC8 (F-Q-1 cobertura --cov) é **doc-only** — investigação + recomendação. Implementação real do workaround (downgrade Python ou bump duckdb ou plugin custom) pode virar Story 2.X separada se complexidade > 1d. Aceito por Morgan como escopo blindado (story ≤ 2d).
+
+---
+
+## Story 2.8 — Storage perf tuning (compression matrix + row_group + PRAGMA profiles) (Epic 2 — escopo IN)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a Sol + Pyro / I want finalizar matriz tuning storage (compression Pareto, row_group ótimo, PRAGMA profiles low/medium/high) / So that queries DuckDB típicas mínima latência, dataset pareto-ótimo em disco, SQLite não estoura RAM em laptop modesto" |
+| P2 | ✅ | 8 AC numeradas e testáveis (matriz compression doc, row_group_size 4 valores, 3 PRAGMA profiles + heurística, threshold rewrite re-medido, BASELINES update, suite tests + property round-trip, Sol audit mandatory, docs canônicos) |
+| P3 | ✅ | Cobre golden path (decisão Pareto explícita) + edge cases (RAM detection heurística, override env var, fallback profile, mudança aditiva sem migração) |
+| P4 | ✅ | 7 tasks bem decompostas (bench infra, compression bench + análise, row_group, PRAGMA profiles + heurística, threshold rewrite, BASELINES + property, docs + reviews) |
+| P5 | ✅ | Refs: SCHEMA.md §Layout Parquet, QUERIES.md §Performance, BASELINES.md, TARGETS_V1.md, REGRESSION_BUDGETS.md, Plan Review H5/H6/M6, parquet_writer.py + catalog.py, Stories 1.4/1.4.5/1.5/1.8/2.2 |
+| P6 | ✅ | Unit (PRAGMA profiles 3×2=6 asserts) + Integration (row_group_size validado via metadata) + Property (round-trip por compression × 4 codecs × 100 examples) + Bench (matrix + PRAGMAs) + Regression |
+| P7 | ✅ | depends_on: [1.4.5, 1.8, 2.2] explícito (synthetic + real baselines + post-vectorize) |
+| P8 | ✅ | Owner: storage-engineer (Sol — defaults authority); Reviewers: perf-engineer (Pyro — bench numbers), dev, qa |
+| P9 | ✅ | Foundation **ALTO** — defaults novos afetam datasets criados a partir desta story. Bug PRAGMA = OOM. Bug row_group = queries lentas. Sol audit + Pyro sign-off + property test round-trip são defesas. Mudança aditiva (R4 preserved). |
+| P10 | ✅ | 2d estimativa |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: depends_on 2.2 é **constraint forte** — measure pós-vectorize para evitar tunar contra writer antigo lento (gargalo seria mascarado). Pyro confirma ordem com Sol em mini-council se necessário.
+
+---
+
+## Story 2.9 — Logging strategy ADR-010 implementada (correlation_id + redaction + JSON) (Epic 2 — escopo IN)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a Aria + Quinn + operadores / I want implementar formalmente ADR-010 (structlog + contextvars correlation_id/job_id/chunk_id/symbol + redaction NL_USERNAME/NL_PASSWORD/NL_KEY + JSON renderer) / So that logs auditáveis, seguros, machine-parseable, prep Epic 3 UI live log" |
+| P2 | ✅ | 8 AC numeradas e testáveis (logging_config.py + pipeline, contextvars audit + bind, redaction processor recursive, JSON renderer canônico + schema, CLI flag + env var + TTY detection, refactor call sites, suite tests + property + cross-thread, docs LOGGING.md) |
+| P3 | ✅ | Cobre golden path (config único no boot → todo log estruturado) + edge cases (cross-thread isolation, secret nested redaction, TTY auto-detection, backwards compat call sites) |
+| P4 | ✅ | 7 tasks pequenas (config + processors, contextvars audit, CLI integration, JSON schema, tests, refactor call sites, docs + reviews) |
+| P5 | ✅ | Refs: ADR-010 (primária), MANIFEST §R21, ADR-005 thread model, MICROCOPY_CATALOG.md (Uma), Plan Review L2, cli.py, agents/architect.md + ux-design-expert.md, Story 2.7 (gemêa) |
+| P6 | ✅ | Unit (cada processor) + Integration (CLI → JSON → schema validation) + Property (redaction preserva non-secret + masca secret × 100 examples) + Cross-thread (2 jobs concorrentes contextvars isolados) |
+| P7 | ✅ | depends_on: [1.7a] (orchestrator entry points para bind contextvars) |
+| P8 | ✅ | Owner: dev (Dex); Reviewers: architect (Aria — ADR-010 compliance), qa (Quinn — schema gate), ux-design-expert (Uma — microcopy CLI strings) |
+| P9 | ✅ | Foundation **MÉDIO** — toca cli.py + entry points orchestrator. Mudança aditiva (logs ganham fields), sem breaking. INV-credenciais defendido por property test (zero secret leak). |
+| P10 | ✅ | 1d estimativa (story menor — config + processors são bounded; refactor incremental) |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: Story complementar a 2.7 — 2.7 garante structlog NÃO no hot path; 2.9 garante structlog FORA do hot path segue ADR-010. Sem conflito de escopo (Aria confirma fronteira em mini-council se necessário).
+
+---
+
+## Story 2.10 — Test strategy ADR-014 (mock DLL fixture compartilhada + fake clock + Hypothesis core suite) (Epic 2 — escopo IN)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a Quinn + Aria + Dex/Nelo / I want formalizar estratégia testes ADR-014 com fixtures compartilhadas (mock DLL extraído + fake clock + layered fixtures + Hypothesis core suite cobrindo INV-1..12) + finalizar SMOKE_PROTOCOL.md / So that Epic 3/4 reuse fixtures consistentes, Hypothesis cresce estruturado, gate QA cobre invariantes formal, F-S-4 fechado" |
+| P2 | ✅ | 8 AC numeradas e testáveis (pacote tests/_fixtures/, MockProfitDLL configurável + meta-test, FakeClock + isolamento, Hypothesis core ≥ 6 INV × 100 examples, SMOKE_PROTOCOL §6 finalizado, layered fixtures pyramid 4 layers, COVERAGE_STATUS.md, TEST_STRATEGY.md NEW) |
+| P3 | ✅ | Cobre golden path (fixtures reusáveis + property tests INV cobrem invariantes) + edge cases (M15 session-scoped, parallelism safe fake clocks, backwards compat conftest re-export, cross-platform TTY) |
+| P4 | ✅ | 7 tasks bem decompostas (estrutura + extract mock DLL, fake clock, Hypothesis suite, SMOKE_PROTOCOL §6, layered fixtures, docs, reviews) |
+| P5 | ✅ | Refs: ADR-014 (primária), TEST_PYRAMID.md, SMOKE_PROTOCOL.md, INVARIANTS_TESTS.md, AUDIT 1.8 F-S-4, Plan Review C4/C6/M15, conftest.py Story 1.2, agents/qa.md + architect.md + profitdll-specialist.md, Stories 1.2/1.4/1.7a/2.3/2.5 |
+| P6 | ✅ | Meta-tests (mock DLL determinismo + FakeClock invariants) + Property (≥ 6 INV × 100 examples) + Integration (layered fixtures demo) + Regression (zero impact suite atual) + Smoke (real DLL fixture session-scoped) |
+| P7 | ✅ | depends_on: [1.2, 1.7a, 2.1] (mock DLL atual + orchestrator + validators) |
+| P8 | ⚠️ | Owner: qa (Quinn — auto-gate como owner). Conflito potencial documentado: escalation para Aria se Aria/Nelo audit divergir do gate decision. Reviewers: dev, architect, profitdll-specialist. Aceitável com escalation explícito. |
+| P9 | ✅ | Foundation **MÉDIO-ALTO** — toca tests/ infra (Quinn authority). Risco regressão se migração mal feita; full suite pré/pós obrigatório. Aria audit confirma ADR-014 compliance. Nelo audit confirma mock DLL fidelidade. |
+| P10 | ✅ | 2d estimativa |
+
+**Score: 9/10 → VERDICT: GO**
+
+Observação P8: aceitável com escalation explícito a Aria. Quinn não auto-aprova story se há conflito com reviewer audit. Documento `docs/qa/TEST_STRATEGY.md` consolida governança.
+
+---
+
+## Story 2.11 — Exception hierarchy ADR-011 implementada (internals → public_api → UI) (Epic 2 — escopo IN)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a Aria + Felix/Uma + Dex / I want implementar hierarquia exceptions ADR-011 (3 camadas: internals com prefixo _, public_api com hierarchy estável, UI ramifica por tipo público) + microcopy mapping NL_* + cancel() finalmente implementado / So that caller robusto, internals evoluem sem quebrar contrato R8, Felix/Uma têm mapa estável" |
+| P2 | ✅ | 8 AC numeradas e testáveis (hierarquia 12+ classes documentada, internals prefixo _ + audit mecânico, adapter pattern + from e, microcopy mapping NL_* → exception, cancel() cooperativo + state Cancelled + rollback parcial, suite tests + property no leak, Aria audit MANDATORY, docs EXCEPTIONS.md + MICROCOPY_CATALOG update) |
+| P3 | ✅ | Cobre golden path (download success + adapter handles internal) + edge cases (concurrent cancel + wait, partial chunks preservados como incomplete, Hypothesis no internal type leak, SemVer impact classificação) |
+| P4 | ✅ | 7 tasks bem decompostas (hierarchy classes, internals refactor + audit, adapter pattern, cancel() impl, microcopy mapping, tests + property, docs + reviews) |
+| P5 | ✅ | Refs: ADR-011 (primária), ADR-007a (DownloadHandle), ADR-005 amendment (state Cancelled), MICROCOPY_CATALOG.md (Uma), Plan Review H10/H11, public_api/, agents/architect.md + ux-design-expert.md, Stories 1.7a/1.7b/2.6 |
+| P6 | ✅ | Unit (cada exception class + adapter pattern) + Property (Hypothesis no internal type leak × 100 examples) + Integration (download falha → tipo público + chain) + Integration cancel (concurrent → SLA) |
+| P7 | ✅ | depends_on: [1.7a, 1.7b] (orchestrator + public_api existentes) |
+| P8 | ✅ | Owner: dev (Dex); Reviewers: architect (Aria — fronteira MANDATORY), ux-design-expert (Uma — microcopy NL_*), qa (Quinn) |
+| P9 | ✅ | Foundation **ALTO** — toca public_api/ (R8 SemVer). Bug afeta toda evolução futura. Property test no-leak + Aria audit + Uma microcopy review são as 3 defesas. Adapter pattern minimiza risco (internals podem evoluir). |
+| P10 | ✅ | 2d estimativa |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: Story 2.6 produz `CircuitOpenError` que entra na hierarquia desta story. Coordenação soft via dependência (2.6 e 2.11 podem rodar em paralelo; merge order: 2.6 → 2.11 ou contrário com hierarchy stub provisório). Aria define ordem em mini-council se conflito.
+
+---
+
 ## Story 2.5 — Calendar B3 holidays.dat Integration (Epic 2 — refino COUNCIL-10)
 
 | P | Status | Nota |
@@ -502,11 +628,18 @@ Observação: Zero alucinação (R23) — se Nelo não confirma formato via manu
 | 2.3 | **GO** | 10/10 | Validada 2026-05-03 — Schema Migration Framework (finding H16); foundation ALTO (toca storage/); Sol audit + property test obrigatórios; constraint backup + transação atômica |
 | 2.4 | **GO** | 10/10 | Validada 2026-05-03 — Prometheus Exporter V2 (ADR-013 antecipado de Epic 4); subscribe pattern via ProgressEmitter (Aria fronteira); opt-in zero overhead default |
 | 2.5 | **GO** | 10/10 | Validada 2026-05-03 — Calendar B3 holidays.dat (finding F-S-1 audit 2.1 + COUNCIL-04 caveat); Nelo reviewer obrigatório; fallback hardcoded preservado para CI |
+| 2.6 | **GO** | 10/10 | Validada 2026-05-03 — Retry inteligente + circuit breaker NL_* (escopo IN EPIC-2; QUIRKS Q02-E formalizado em policy); foundation médio-alto; Nelo + Aria reviewers; depends_on [1.7a, 2.4] |
+| 2.7 | **GO** | 10/10 | Validada 2026-05-03 — Hot path tuning HOT_PATH_RULES.md aplicado (finding H22 + R21); audit mecânico em CI; bench callback_to_disk re-run; AC8 inclui F-Q-1 cobertura --cov doc-only; depends_on [1.7a, 1.8, 2.2] |
+| 2.8 | **GO** | 10/10 | Validada 2026-05-03 — Storage perf tuning (compression Pareto matrix + row_group + PRAGMA profiles; findings H5/H6/M6); foundation alto (Sol authority); Sol audit + Pyro sign-off; depends_on [1.4.5, 1.8, 2.2] |
+| 2.9 | **GO** | 10/10 | Validada 2026-05-03 — Logging strategy ADR-010 implementada (correlation_id + redaction + JSON renderer + cross-thread isolation); finding L2; complementar à 2.7; Aria + Uma reviewers; depends_on [1.7a] |
+| 2.10 | **GO** | 9/10 | Validada 2026-05-03 — Test strategy ADR-014 (mock DLL extract + fake clock + Hypothesis core suite ≥ 6 INV + SMOKE_PROTOCOL §6 + layered fixtures); F-S-4 fechado; P8 ⚠️ aceitável com escalation Aria; depends_on [1.2, 1.7a, 2.1] |
+| 2.11 | **GO** | 10/10 | Validada 2026-05-03 — Exception hierarchy ADR-011 (3 camadas + adapter pattern + cancel() H10 + microcopy mapping); foundation alto (R8 SemVer); Aria audit MANDATORY + Uma microcopy review; depends_on [1.7a, 1.7b] |
 
-**Total avaliado:** 21 stories (13 do Epic 1 + 4 da fase 0 + Stories 2.2/2.3/2.4/2.5 Epic 2).
-**Verdict GO:** 21/21 (Story 1.2 re-validada 2026-05-03 após reescrita Nelo;
+**Total avaliado:** 27 stories (13 do Epic 1 + 4 da fase 0 + Stories 2.2/2.3/2.4/2.5/2.6/2.7/2.8/2.9/2.10/2.11 Epic 2).
+**Verdict GO:** 27/27 (Story 1.2 re-validada 2026-05-03 após reescrita Nelo;
 Story 2.2 validada 2026-05-04 pós-COUNCIL-10; Stories 2.3/2.4/2.5 validadas
-2026-05-03 pós-COUNCIL-10 refino EPIC-2).
+2026-05-03 pós-COUNCIL-10 refino EPIC-2; Stories 2.6/2.7/2.8/2.9/2.10/2.11
+validadas 2026-05-03 pós-EPIC-2 escopo IN — 6 stories Draft pendentes resolvidas).
 **Verdict NO-GO:** 0.
 
 **Próximo passo:** todas stories validadas. Wave 4 desbloqueada (Story 1.2 ‖ Story 1.4 podem iniciar em paralelo).

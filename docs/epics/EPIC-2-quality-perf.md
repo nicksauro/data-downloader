@@ -1,9 +1,9 @@
 # EPIC 2 — Quality & Performance
 
-**Status:** active (refinado em 2026-05-04 pós-COUNCIL-10 + Stories 1.7b/1.8 close Epic 1)
+**Status:** active (refinado em 2026-05-04 pós-COUNCIL-10 + Stories 1.7b/1.8 close Epic 1; em 2026-05-03 Morgan criou + validou stories 2.6-2.11 Draft → Ready)
 **Owner:** 📋 Morgan
 **Data criação:** 2026-05-03
-**Última refino:** 2026-05-04
+**Última refino:** 2026-05-03 (criação + validação 10/10 das 6 stories Draft pendentes)
 **Target:** elevar foundation a nível production-grade — observabilidade, perf
 tuning, schema migration framework, retry inteligente, calendário B3 oficial.
 Pós-Epic 1 (que fecha quando 1.7b-followup + 1.8-followup PASS humano).
@@ -78,14 +78,20 @@ construiriam em cima de fundação ainda crua.
 | 2.3 | Schema Migration Framework (finding H16) | storage-engineer + dev | 2d | **Ready (2026-05-03)** | Bumpa `schema_version` v1.0.0 → v1.1.0 sem re-baixar; scripts versionados; rollback. Morgan validated 10/10. |
 | 2.4 | Observabilidade runtime (ADR-013 Prometheus exporter V2) | architect + dev | 2d | **Ready (2026-05-03)** | `/metrics` HTTP endpoint; `dll_drops_total` + queue depths + latência. Morgan validated 10/10. |
 | 2.5 | Calendar B3 integração com holidays.dat Nelogica | storage-engineer + dev | 2d | **Ready (2026-05-03)** | Substitui tabela hardcoded Story 2.1; finding F-S-1 Sol; COUNCIL-04 caveat. Morgan validated 10/10. |
-| 2.6 | Retry inteligente + circuit breaker | dev | 2d | Draft (existente) | Categorização NL_*; retry policy por categoria |
-| 2.7 | Hot path tuning (HOT_PATH_RULES.md aplicado) | perf-engineer + dev | 2d | Draft (existente) | Remove structlog hot path; finding H22 |
-| 2.8 | Storage perf tuning (row_group, compression final) | storage-engineer + perf-engineer | 2d | Draft (existente) | Finding M6; cache PRAGMAs |
-| 2.9 | Logging strategy ADR-010 implementada | dev + architect | 1d | Draft (existente) | correlation_id global; redaction |
-| 2.10 | Test strategy ADR-014 (fixtures + Hypothesis suite) | qa + dev | 2d | Draft (existente) | Extrai mock DLL fixture (F-S-4 Sol audit 1.8); Hypothesis core suite |
-| 2.11 | Exception hierarchy ADR-011 implementada | dev + architect | 2d | Draft (existente) | Internals → public_api → UI propaga errors |
+| **2.6** | **Retry inteligente + circuit breaker** | **dev (Dex) + Nelo + Aria** | **2d** | **Ready (2026-05-03)** | Categorização NL_* taxonomy 12+ códigos; RetryPolicy dataclass; CircuitBreaker stateful por símbolo; Q02-E policy formal. Morgan validated 10/10. |
+| **2.7** | **Hot path tuning (HOT_PATH_RULES.md aplicado)** | **perf-engineer (Pyro) + dev** | **2d** | **Ready (2026-05-03)** | Remove structlog hot path; audit mecânico em CI; finding H22 + R21. AC8 inclui F-Q-1 (cobertura --cov) doc-only. Morgan validated 10/10. |
+| **2.8** | **Storage perf tuning (row_group, compression final, PRAGMA profiles)** | **storage-engineer (Sol) + perf-engineer (Pyro)** | **2d** | **Ready (2026-05-03)** | Findings H5/H6/M6; compression Pareto matrix; row_group tuning; 3 PRAGMA profiles (low/medium/high); threshold rewrite re-medido. Morgan validated 10/10. |
+| **2.9** | **Logging strategy ADR-010 implementada** | **dev (Dex) + architect (Aria)** | **1d** | **Ready (2026-05-03)** | correlation_id global via contextvars; redaction processor; JSON renderer canônico; cross-thread isolation. Complementar à 2.7. Morgan validated 10/10. |
+| **2.10** | **Test strategy ADR-014 (fixtures + Hypothesis suite)** | **qa (Quinn) + dev** | **2d** | **Ready (2026-05-03)** | Extrai mock DLL fixture compartilhada (F-S-4 Sol audit 1.8); fake clock; Hypothesis core suite ≥ 6 INV; SMOKE_PROTOCOL §6 finalizado; layered fixtures. Morgan validated 9/10 (P8 ⚠️ aceitável com escalation Aria). |
+| **2.11** | **Exception hierarchy ADR-011 implementada** | **dev (Dex) + architect (Aria) + Uma** | **2d** | **Ready (2026-05-03)** | 3 camadas: internals (_*) → public_api (hierarquia stable) → UI (microcopy mapping NL_*); adapter pattern com `from e`; **`cancel()` H10 finalmente implementado**. R8 SemVer. Morgan validated 10/10. |
 
 **Total:** ~24-26 dias estimados (preliminar — Morgan refinará Wave-by-Wave).
+
+**Status pipeline (2026-05-03):**
+- Done: 2.1 (movida Epic 1)
+- Ready: 2.2, 2.3, 2.4, 2.5, **2.6, 2.7, 2.8, 2.9, 2.10, 2.11** (todas com validate-story 9-10/10 GO)
+- Pending Human: 1.7b-followup, 1.8-followup
+- **Coverage Ready:** 10/13 stories Epic 2 (~77% planned), 12/13 com 1.7b-followup + 1.8-followup contadas como execution-pending (~92%)
 
 **Stories prioritárias P1 (bloqueiam release V1):**
 - 1.7b-followup → 1.8-followup (humano-dependent, paralelo com Pyro impl 2.2)
@@ -124,8 +130,36 @@ construiriam em cima de fundação ainda crua.
    └─ depends_on: [2.1 ✅] (substitui calendar_b3.py)
    └─ paralelo com 2.2 / 2.3 / 2.4
 
-2.6 / 2.7 / 2.8 / 2.9 / 2.10 / 2.11
-   └─ paralelos entre si após 2.2 / 2.3 / 2.4 estabilizarem
+2.6 (Retry inteligente + circuit breaker)
+   └─ depends_on: [1.7a ✅, 2.4]
+   └─ pode iniciar com 2.4 in-flight (gauge feature-flagged até 2.4 Done)
+   └─ paralelo com 2.7 / 2.8 / 2.9 / 2.10 / 2.11
+
+2.7 (Hot path tuning)
+   └─ depends_on: [1.7a ✅, 1.8 ✅, 2.2]
+   └─ INICIA APÓS 2.2 Done (medir contra writer pós-vectorize)
+   └─ paralelo com 2.6 / 2.8 / 2.9 / 2.10 / 2.11
+
+2.8 (Storage perf tuning)
+   └─ depends_on: [1.4.5 ✅, 1.8 ✅, 2.2]
+   └─ INICIA APÓS 2.2 Done (mesma constraint que 2.7)
+   └─ paralelo com 2.6 / 2.7 / 2.9 / 2.10 / 2.11
+
+2.9 (Logging strategy ADR-010)
+   └─ depends_on: [1.7a ✅]
+   └─ Complementar a 2.7 (2.7 = hot path; 2.9 = fora do hot path)
+   └─ paralelo com 2.6 / 2.7 / 2.8 / 2.10 / 2.11
+
+2.10 (Test strategy ADR-014)
+   └─ depends_on: [1.2 ✅, 1.7a ✅, 2.1 ✅]
+   └─ TODAS deps Done — pode iniciar imediatamente
+   └─ paralelo com 2.6 / 2.7 / 2.8 / 2.9 / 2.11
+
+2.11 (Exception hierarchy ADR-011)
+   └─ depends_on: [1.7a ✅, 1.7b ✅]
+   └─ TODAS deps Done — pode iniciar imediatamente
+   └─ Coordenação soft com 2.6 (CircuitOpenError entra na hierarchy)
+   └─ paralelo com 2.6 / 2.7 / 2.8 / 2.9 / 2.10
 ```
 
 ---
@@ -222,6 +256,15 @@ construiriam em cima de fundação ainda crua.
 - Handoff para Epic 3 (Felix + Uma)
 
 **Total estimado:** 6-8 semanas (com buffer para humano-dependent stories).
+
+**Atualização 2026-05-03 — Cronograma refinado pós-criação 2.6-2.11:**
+
+Stories 2.10 + 2.11 + 2.9 podem **iniciar imediatamente** (deps todas Done). Sprint 1
+ganha pista paralela de qualidade infra (test strategy + exception hierarchy + logging)
+sem bloquear Pyro em 2.2. Sprint 2 absorve 2.6 (retry + breaker) que naturalmente
+encadeia com 2.4 (observabilidade). Sprint 3 final concentra 2.7 + 2.8 (ambos
+dependem de 2.2 estabilizada). Cronograma factível em 6 semanas se squad mantém
+paralelismo (3-4 stories simultâneas em médias semanas).
 
 ---
 
