@@ -132,17 +132,69 @@ fechar F-L-4.
 
 ---
 
+## Story 1.2 — DLL wrapper: init/finalize + state callback
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/1.2.story.md`                          |
+| **commit auditado**    | `f2a766d`                                            |
+| **owner**              | Dex (dev)                                            |
+| **gatekeeper**         | Quinn (qa)                                           |
+| **report path**        | `docs/qa/QA_REPORTS/1.2-2026-05-04.md`               |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/1.2-dll-2026-05-04.md` (Nelo APPROVED) + `docs/qa/AUDIT_REPORTS/1.2-design-2026-05-04.md` (Aria APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com owner+ADR refs (manual ProfitDLL §3.1/§3.2/§4, ADR-005/007a/010/011, QUIRKS Q07-V/Q08-E/Q09-AMB/Q10-AMB/Q11-E, Sentinel §12), `__all__` explícito, `from __future__ import annotations`, type hints completos. Cross-platform shim documentado (CFUNCTYPE em não-Windows apenas para mocking). Lei R3 / INV-1 cumprida (`_state_cb` faz único `put_nowait`) |
+| 2. Unit tests        | PASS      | 47 passed + 2 skipped (esperados) em 1.78s no escopo `dll/`; 106 passed + 2 skipped em 6.09s na suíte completa. AC15 (`mock_dll.mock_calls == []`) verificada em 2 testes distintos. AC2 (`len(args) == 11` + loop `assert a is not None`) verificada. |
+| 3. Acceptance criteria | PASS    | 16/16 ACs Pass com evidência reprodutível. AC10 placeholder gated por `PROFITDLL_KEY` (smoke real em Story 1.7) — validado por @po em 2026-05-03 |
+| 4. No regressions    | PASS      | 106 passed, 2 skipped, 0 failed em `pytest tests/`. Storage tests (1.4) intactos; smoke imports (1.1) intactos. Adição `DLLInitError` em `public_api/exceptions.py` co-existe com `IntegrityError` (Sol 1.4) sem conflito |
+| 5. Performance       | PASS      | pytest dll-only 1.78s (target informal < 5s). Hot path R21 respeitado: callback NÃO loga, NÃO aloca além de tupla `(int, int)` e `put_nowait`. State changes ~unidades por sessão << maxsize=1000 |
+| 6. Security          | PASS      | `pre-commit run detect-secrets --all-files` → `Detect secrets........Passed`. Credenciais mascaradas em logger (`key_redacted/credential_redacted="***"`). COUNCIL-01 documenta workaround para falso-positivo de hook `check_no_dotenv` (kwarg `password=...` literal). Sem print/log debug residual |
+| 7. Documentation     | PASS      | File List completa (5 source + 4 test files + 1 conftest); Dev Agent Record completo (Agent Model claude-opus-4-7, Debug Log com 7 decisões técnicas, Completion Notes com métricas, Change Log datado com Nelo+Aria+Quinn entries); QUIRKS.md atualizado (Q-AMB-01, Q-AMB-02, Q11-E referenciados) |
+
+### Audits dependentes
+
+| Auditoria       | Verdict      | Justificativa                                                                                          |
+|-----------------|--------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | **APPROVED** | 16-pt `wrapper_review` checklist PASS. Manual ProfitDLL respeitado (§3.1, §3.2 L2735/L2738/L3317-3329, §4 L4382). Findings: 3 LOW/INFO (wording, reuso constante, quirk pendente smoke). Path: `docs/qa/AUDIT_REPORTS/1.2-dll-2026-05-04.md` |
+| Sol (storage)   | N/A          | Story 1.2 não toca `storage/`                                                                          |
+| Aria (design)   | **APPROVED** | 11-pt `design_review` checklist PASS. ADR-005 (thread model + INV-1) preservado, ADR-011 (exception hierarchy) implementado, ADR-010 (R21 hot-path) respeitado, fronteira `dll/` → `public_api/exceptions` correta. Findings: 3 INFO (INV-11/12 aplicam-se em 1.7a; api_version pre-release). Path: `docs/qa/AUDIT_REPORTS/1.2-design-2026-05-04.md` |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 5     | F-L-1 (wording "11 callback slots") / F-L-2 (reuso `MARKET_WAITING=2` em alias `(ROTEAMENTO, 2)`) / F-L-3 (Q09-AMB pendente smoke real) / F-L-4 (cobertura `pytest-cov` formal deferida 1.4.5) / F-L-5 (smoke E2E em 1.7) — todos com tracking |
+
+### Verdict
+
+**PASS** — Story 1.2 fechada. Status `Ready for Review` → `Done`.
+
+**Próximo passo desbloqueado:** **Wave 5** — Story 1.3 (Dex + Nelo: history
+callbacks via `SetHistoryTradeCallbackV2` + `TranslateTrade`) consome o
+wrapper em estado conectado. Story 1.5 (Sol + Dex: catálogo SQLite + recovery
+boot) também pode rodar em paralelo (não depende de 1.2).
+
+---
+
 ## Resumo consolidado (gates 2026-05-04)
 
 | Story | Owner | Commit  | Verdict | LOW | MED | HIGH | CRIT | Report |
 |-------|-------|---------|---------|-----|-----|------|------|--------|
 | 1.1   | Dex   | 95c7acf | PASS    | 3   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.1-2026-05-04.md` |
 | 1.4   | Dex   | 3d447bb | PASS    | 4   | 2   | 0    | 0    | `docs/qa/QA_REPORTS/1.4-2026-05-04.md` |
+| 1.2   | Dex   | f2a766d | PASS    | 5   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.2-2026-05-04.md` |
 
-**Total:** 2 stories passadas pelo gate em 2026-05-04. 2 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
+**Total:** 3 stories passadas pelo gate em 2026-05-04. 3 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
 
-**Total findings acumulados:** 7 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
-com tracking documentado em stories futuras (1.4.5, 1.5, 1.7, 2.1, 2.X).
+**Total findings acumulados:** 12 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
+com tracking documentado em stories futuras (1.3, 1.4.5, 1.5, 1.7, 2.1, 2.X).
 
 ---
 
