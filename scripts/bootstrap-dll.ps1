@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Bootstrap script para popular profitdll/DLLs/Win64/ com binários ProfitDLL.
 
@@ -132,7 +132,7 @@ function Copy-FileWithCheck {
 
     if (-not (Test-Path $src)) {
         Write-Host "  [FALTA] $SourceName ($Category)" -ForegroundColor Red
-        $script:Errors += "$Category: $SourceName nao encontrado em $ProfitChartPath"
+        $script:Errors += "${Category}: $SourceName nao encontrado em $ProfitChartPath"
         return
     }
 
@@ -149,7 +149,7 @@ function Copy-FileWithCheck {
     }
     catch {
         Write-Host "  [ERRO]  $SourceName -> $_" -ForegroundColor Red
-        $script:Errors += "$Category: $SourceName falhou: $_"
+        $script:Errors += "${Category}: $SourceName falhou: $_"
     }
 }
 
