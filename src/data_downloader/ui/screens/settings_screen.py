@@ -1,8 +1,8 @@
-"""data_downloader.ui.screens.settings_screen — Tela Configurações (Story 3.2).
+"""data_downloader.ui.screens.settings_screen — Tela Configurações (Story 3.2 + 4.4).
 
 Owner: Felix (frontend-dev) | Design: Uma (ux-design-expert).
 
-Tela de configurações do app. Quatro seções principais (cada uma em
+Tela de configurações do app. Cinco seções principais (cada uma em
 ``QGroupBox`` dentro de ``QScrollArea``).
 
 Componentes:
@@ -13,6 +13,9 @@ Componentes:
       ações MUDAR PASTA / ABRIR EXPLORER / VERIFICAR INTEGRIDADE / RECONCILIAR.
     - **Performance** (read-only) — display de defaults DLL queue size,
       storage queue size, chunk size, max retries, SQLite profile.
+    - **Updates** (Story 4.4) — versão atual, botão verificar atualizações,
+      status (up-to-date / outdated / error). V1.0: notify-only;
+      auto-apply tufup full chega V1.1 (Story 4.4-followup).
     - **About** — versão app, versão DLL, schema version, links docs/bugs,
       lista de agentes (10 emojis).
 
@@ -103,6 +106,10 @@ class SettingsScreen(QWidget):
     state_changed = Signal(str)
     dll_status_changed = Signal(str)
     data_dir_changed = Signal(str)
+    # Story 4.4 — emitted após check_for_updates() completar.
+    # Payload: status string (UpdateStatus value: "up_to_date" | "outdated"
+    # | "error" | "unchecked").
+    update_status_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -135,6 +142,10 @@ class SettingsScreen(QWidget):
         # Seção Performance.
         self._perf_section = self._build_performance_section()
         scroll_layout.addWidget(self._perf_section)
+
+        # Seção Updates (Story 4.4 — auto-updater stub V1.0).
+        self._updates_section = self._build_updates_section()
+        scroll_layout.addWidget(self._updates_section)
 
         # Seção About.
         self._about_section = self._build_about_section()
@@ -349,6 +360,63 @@ class SettingsScreen(QWidget):
 
         return section
 
+    def _build_updates_section(self) -> QGroupBox:
+        """Seção Updates — Story 4.4 (UpdaterStub notify-only V1.0).
+
+        Layout vertical:
+
+            [Versão atual: vX.Y.Z]
+            [Status — clique para verificar / outdated vN.M.K / up-to-date]
+            [Aviso V1.0 manual]
+            [Verificar atualizações] [Baixar manualmente — visível só se outdated]
+        """
+        section = QGroupBox(format_msg("LBL_SETTINGS_SECTION_UPDATES"), self)
+
+        layout = QVBoxLayout(section)
+        layout.setSpacing(6)
+
+        # Versão atual (resolvida em _load_initial_values via UpdaterStub).
+        self._update_current_version_label = QLabel(
+            format_msg("LBL_UPDATE_CURRENT_VERSION", version="—"), section
+        )
+        self._update_current_version_label.setObjectName("updateCurrentVersionLabel")
+        layout.addWidget(self._update_current_version_label)
+
+        # Status (dinâmico).
+        self._update_status_label = QLabel(format_msg("LBL_UPDATE_STATUS_UNCHECKED"), section)
+        self._update_status_label.setObjectName("updateStatusLabel")
+        self._update_status_label.setProperty("status", "unchecked")
+        layout.addWidget(self._update_status_label)
+
+        # Aviso V1.0 manual + link para INSTALL.md.
+        notice = QLabel(format_msg("LBL_UPDATE_NOTICE_MANUAL_V1"), section)
+        notice.setProperty("role", "muted")
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+
+        # Botões.
+        actions = QHBoxLayout()
+        self._check_updates_btn = QPushButton(format_msg("BTN_CHECK_FOR_UPDATES"), section)
+        self._check_updates_btn.setObjectName("checkUpdatesBtn")
+        self._check_updates_btn.clicked.connect(self._on_check_updates_clicked)
+        actions.addWidget(self._check_updates_btn)
+
+        self._download_update_btn = QPushButton(format_msg("BTN_DOWNLOAD_UPDATE_MANUAL"), section)
+        self._download_update_btn.setObjectName("downloadUpdateBtn")
+        self._download_update_btn.clicked.connect(self._on_download_update_manual_clicked)
+        self._download_update_btn.setVisible(False)  # só aparece se outdated
+        actions.addWidget(self._download_update_btn)
+
+        actions.addStretch(1)
+        actions_widget = QWidget(section)
+        actions_widget.setLayout(actions)
+        layout.addWidget(actions_widget)
+
+        # Cache do release_url para botão "Baixar manualmente".
+        self._pending_release_url: str = ""
+
+        return section
+
     def _build_about_section(self) -> QGroupBox:
         section = QGroupBox(format_msg("LBL_SETTINGS_SECTION_ABOUT"), self)
         layout = QVBoxLayout(section)
@@ -460,6 +528,19 @@ class SettingsScreen(QWidget):
         data_dir = os.environ.get("DATA_DOWNLOADER_DATA_DIR") or str(Path.cwd() / "data")
         self._data_dir_edit.setText(data_dir)
         self._refresh_storage_status(Path(data_dir))
+
+        # Updates section — popula versão atual (sem checagem de rede).
+        # Story 4.4: check só acontece em click explícito do usuário
+        # para evitar I/O em initial load (R11 + privacidade).
+        try:
+            from data_downloader._updater import UpdaterStub
+
+            current_version = UpdaterStub().current_version
+        except ImportError:
+            current_version = "—"
+        self._update_current_version_label.setText(
+            format_msg("LBL_UPDATE_CURRENT_VERSION", version=current_version)
+        )
 
         self._dirty = False
 
@@ -633,6 +714,84 @@ class SettingsScreen(QWidget):
     def _set_state(self, state: str) -> None:
         self._current_state = state
         self.state_changed.emit(state)
+
+    # ------------------------------------------------------------------
+    # Updates section handlers (Story 4.4 — UpdaterStub V1.0)
+    # ------------------------------------------------------------------
+
+    def _on_check_updates_clicked(self) -> None:
+        """Verifica updates via UpdaterStub. Slot síncrono curto (HTTP timeout 5s).
+
+        Para evitar bloqueio MainThread > 16ms (R11), defer para próximo
+        evento via QTimer.singleShot — UI atualiza spinner antes de
+        chamar I/O HTTP.
+        """
+        self._check_updates_btn.setEnabled(False)
+        self._update_status_label.setText(format_msg("LBL_UPDATE_STATUS_UNCHECKED"))
+        self._update_status_label.setProperty("status", "checking")
+        self._update_status_label.style().unpolish(self._update_status_label)
+        self._update_status_label.style().polish(self._update_status_label)
+        QTimer.singleShot(50, self._do_check_updates)
+
+    def _do_check_updates(self) -> None:
+        """Executa check via UpdaterStub e atualiza UI."""
+        try:
+            from data_downloader._updater import UpdaterStub, UpdateStatus
+        except ImportError:
+            self._update_status_label.setText(format_msg("LBL_UPDATE_STATUS_ERROR"))
+            self._update_status_label.setProperty("status", "error")
+            self._check_updates_btn.setEnabled(True)
+            self.update_status_changed.emit("error")
+            return
+
+        updater = UpdaterStub()
+        # Atualiza label de versão atual (sempre).
+        self._update_current_version_label.setText(
+            format_msg("LBL_UPDATE_CURRENT_VERSION", version=updater.current_version)
+        )
+
+        info = updater.check_for_updates()
+        status = updater.last_status
+
+        if status == UpdateStatus.UP_TO_DATE:
+            self._update_status_label.setText(format_msg("LBL_UPDATE_STATUS_UP_TO_DATE"))
+            self._update_status_label.setProperty("status", "up_to_date")
+            self._download_update_btn.setVisible(False)
+            self._pending_release_url = ""
+        elif status == UpdateStatus.OUTDATED and info is not None:
+            self._update_status_label.setText(
+                format_msg("LBL_UPDATE_STATUS_OUTDATED", version=info.latest_version)
+            )
+            self._update_status_label.setProperty("status", "outdated")
+            self._download_update_btn.setVisible(True)
+            self._pending_release_url = info.release_url
+        else:
+            # ERROR ou UNCHECKED inesperado.
+            self._update_status_label.setText(format_msg("LBL_UPDATE_STATUS_ERROR"))
+            self._update_status_label.setProperty("status", "error")
+            self._download_update_btn.setVisible(False)
+            self._pending_release_url = ""
+
+        self._update_status_label.style().unpolish(self._update_status_label)
+        self._update_status_label.style().polish(self._update_status_label)
+        self._check_updates_btn.setEnabled(True)
+        self.update_status_changed.emit(status.value)
+
+    def _on_download_update_manual_clicked(self) -> None:
+        """Abre URL da release page no browser do usuário.
+
+        V1.0: notify-only — usuário baixa zip da página GitHub
+        manualmente. V1.1+: tufup auto-download + apply via signed bundle.
+        """
+        if not self._pending_release_url:
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl(self._pending_release_url))
+        except Exception:
+            pass
 
     def _set_dll_status(self, status: str, version: str = "") -> None:
         """status: connected | disconnected | testing | not_configured."""

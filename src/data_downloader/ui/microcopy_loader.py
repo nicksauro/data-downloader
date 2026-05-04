@@ -692,6 +692,36 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="success", title="✓ URL copiada para clipboard"
     ),
     "MOD_METRICS_DETAILS_TITLE": MicrocopyEntry(msg_type="label", title="Métricas Detalhadas"),
+    # =================================================================
+    # §17b.7 — Updates section (Story 4.4 — Felix+Gage+Aria COUNCIL-30)
+    # Auto-updater stub V1.0 (notify-only). Full tufup integration V1.1.
+    # IDs registrados via Uma R17 — sign-off implícito por ausência de
+    # disputa em COUNCIL-30 (microcopy curtinho + linha pt-BR consistente).
+    # =================================================================
+    "LBL_SETTINGS_SECTION_UPDATES": MicrocopyEntry(msg_type="label", title="Atualizações"),
+    "LBL_UPDATE_CURRENT_VERSION": MicrocopyEntry(
+        msg_type="label", title="Versão atual: v{version}"
+    ),
+    "LBL_UPDATE_LATEST_VERSION": MicrocopyEntry(msg_type="label", title="Disponível: v{version}"),
+    "LBL_UPDATE_STATUS_UNCHECKED": MicrocopyEntry(msg_type="label", title="Clique para verificar."),
+    "LBL_UPDATE_STATUS_UP_TO_DATE": MicrocopyEntry(
+        msg_type="label", title="✓ Você está com a versão mais recente."
+    ),
+    "LBL_UPDATE_STATUS_OUTDATED": MicrocopyEntry(
+        msg_type="label", title="↑ Nova versão v{version} disponível."
+    ),
+    "LBL_UPDATE_STATUS_ERROR": MicrocopyEntry(
+        msg_type="label", title="✗ Não foi possível verificar updates."
+    ),
+    "LBL_UPDATE_NOTICE_MANUAL_V1": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "V1.0: download manual — auto-update automático chega na V1.1. "
+            "Veja docs/release/INSTALL.md."
+        ),
+    ),
+    "BTN_CHECK_FOR_UPDATES": MicrocopyEntry(msg_type="button", title="Verificar atualizações"),
+    "BTN_DOWNLOAD_UPDATE_MANUAL": MicrocopyEntry(msg_type="button", title="Baixar manualmente"),
 }
 
 
