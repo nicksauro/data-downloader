@@ -1323,4 +1323,82 @@ inspeção pós-cancel sem disparar `OperationCancelled`. `cancelled()` /
 
 ---
 
+## Story 2.6 — Retry inteligente + circuit breaker (categorização NL_*)
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.6.story.md`                          |
+| **commit auditado**    | `f9086aa`                                            |
+| **owner**              | Dex (dev) + Nelo (DLL) + Aria (architect) — modo autônomo mini-council via COUNCIL-20 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Nelo+Aria+Dex) |
+| **report path**        | `docs/qa/QA_REPORTS/2.6-2026-05-04.md`               |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/2.6-dll-2026-05-04.md` (Nelo APPROVED — taxonomia NL_*) + `docs/qa/AUDIT_REPORTS/2.6-design-2026-05-04.md` (Aria APPROVED — RetryPolicy + CircuitBreaker) |
+| **council**            | `docs/decisions/COUNCIL-20-retry-circuit-breaker.md` (Nelo+Dex+Aria sign-offs) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota |
+|----------------------|-----------|------|
+| 1. Code review       | PASS      | 3 source files novos (`dll/error_taxonomy.py` 394 linhas — `ErrorCategory` StrEnum + `NL_CATEGORY_MAP` 39 entradas com justificativa em prosa + `categorize_nl` + `is_retryable`; `orchestrator/retry_policy.py` 388 linhas — `@dataclass(frozen=True) RetryPolicy` + `classify_exception` + `should_retry` + `__call__` decorator + `default_retry_policy` + `policy_from_env` 7 env vars; `orchestrator/circuit_breaker.py` 503 linhas — `BreakerState` StrEnum + `CircuitBreaker` state machine 3-state + `with_circuit_breaker` decorator + `CircuitOpenError(DataDownloaderError)`). Edits aditivos em `orchestrator/retry.py` (param `policy=` delega para policy quando passado) + `orchestrator/orchestrator.py` (lazy `_get_breaker` per (symbol, exchange) + `_process_chunk` chama `breaker.call(_do_download)` dentro de `with_retry(..., policy=...)` + `CircuitOpenError` capturado separadamente como `failed_chunk`) + `orchestrator/__init__.py` (re-exports). Type hints + docstrings completos com refs ADR-005, ADR-007a, ADR-010, ADR-011, ADR-013, COUNCIL-05 §D5, COUNCIL-20. |
+| 2. Unit tests        | PASS      | **107 PASS em 13.47s (Story 2.6 scope, isolation):** 47 unit `test_nl_categorization.py` (table-driven 39 NL_* + edge cases UNKNOWN) + 26 unit `test_retry_policy.py` (dataclass frozen, classify, should_retry, decorator, env vars com fallback graceful) + 19 unit `test_circuit_breaker.py` (state transitions + cooldown amplificado capped × 8 + sliding window eviction + 2 thread-safety tests) + 8 property `test_retry_invariants.py` (Hypothesis: max_attempts bounded TRANSIENT/AMBIGUOUS, total sleep bounded, fail-fast PERMANENT/UNKNOWN, breaker opens iff threshold reached) + 7 integration `test_orchestrator_with_retry.py` (default policy, fail fast NL PERMANENT, retry then success, exhausted marks failed, CB blocks after threshold, **Q02-E sintético — 100 callbacks 99% → CLOSED**). Coverage: `error_taxonomy.py` ~100%, `retry_policy.py` ~95-98%, `circuit_breaker.py` ~95-98%. Lint ruff + mypy strict limpos nos 3 source files novos. |
+| 3. Acceptance criteria | PASS    | **8/8 ACs PASS** (1 com tracking informal F-Q-1 LOW sobre doc autônoma `RETRY_POLICY.md` deferred — equivalente em COUNCIL-20 §D2 + docstrings ricos). AC1 taxonomia 39 codes (12+ obrigatórios todos presentes), AC2 RetryPolicy default + backwards-compat, AC3 CircuitBreaker 3-state per symbol, AC4 Q02-E formalizado em 2 layers, AC5 integração orchestrator não-quebradora, AC6 logging estruturado 5 eventos novos, AC7 suite 107 tests, AC8 7 env vars + fallback. |
+| 4. No regressions    | PASS      | Story 2.6 scope 107 PASS em isolation; tests 1.7a (orchestrator) + 1.4 (storage) + 2.4 (observability) + 2.10 (test strategy) + 2.11 (exception hierarchy) PASSAM em isolation pós-Story 2.6 — zero regressão atribuível. **31 falhas baseline pré-existentes em suite full** relacionadas a structlog/capsys/daemon threads test order pollution — mesma classe de F-Q-2 Story 2.11; tracking Story 2.7 test infra hardening (não-bloqueante). |
+| 5. Performance       | PASS      | Overhead per-call de retry/breaker é trivial (lock + dict lookup + deque eviction — sub-microsecond). Fora do hot path R21 (per-call, não per-trade). Cooldown amplificado capped × 8 anti-DoS contra operador. |
+| 6. Security          | PASS      | `pre-commit run detect-secrets` passes. Sem credenciais em código novo. Sem print/log debug residual. `CircuitOpenError.message` formatado sanitizadamente (sem secrets). Env vars override gracefully degraded em valor inválido (não trava sistema). |
+| 7. Documentation     | PASS      | COUNCIL-20 (~210 linhas, Nelo+Dex+Aria sign-offs); File List atualizada na story; Dev Agent Record completo (Agent Model, Debug Log, Completion Notes, Change Log datado 2026-05-03 + 2026-05-04). Q02-E em `QUIRKS.md` `validated` com workaround formalizado em 2 layers + ref Story 2.6 + COUNCIL-20. Docstrings ricos cobrem troubleshooting (`policy_from_env` warning, `breaker.reset()`). Doc autônoma `RETRY_POLICY.md` deferred (F-Q-1 LOW). |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa |
+|-----------------|------------------|---------------|
+| Nelo (DLL)      | **APPROVED**     | `docs/qa/AUDIT_REPORTS/2.6-dll-2026-05-04.md` — 22 itens checklist `nl_taxonomy_review` (custom Nelo): 39 codes catalogados (33 canônicos `profit.h` L217-222 + 5 legacy Story 1.2 + 1 sentinela), justificativa em prosa por entry, classificação semanticamente correta (TRANSIENT internos + waiting_server, PERMANENT auth/ticker/lifecycle/series-bounds, AMBIGUOUS not_found/asset_no_data, UNKNOWN R7 conservadora), Q02-E `validated` em QUIRKS.md, separação NL_* vs estado de fluxo (Q02-E não está na tabela). 0 CRITICAL/HIGH/MEDIUM/LOW + 4 INFO. |
+| Sol (storage)   | N/A              | Story 2.6 não toca `storage/`. |
+| Aria (design)   | **APPROVED**     | `docs/qa/AUDIT_REPORTS/2.6-design-2026-05-04.md` — 4 checklists: `design_review` canônico + `thread_safety_review` (8 itens) + `retry_policy_review` (8 itens) + `boundary_preservation_review` (6 itens). State machine canônica 3-state Fowler 2014; thread-safety com fn FORA do lock (anti-deadlock); cooldown capped × 8 anti-DoS; RetryPolicy frozen dataclass + 7 env vars; fronteira `public_api/` preservada (CircuitOpenError pré-existente em ADR-011); SemVer impact NONE; backward-compat com `with_retry(fn)` legacy; lazy `_get_breaker` per (symbol, exchange) prepara multi-symbol Epic 3. 0 CRITICAL/HIGH/MEDIUM + 1 LOW pré-existente (UP047 PEP 695 type params em `retry.py` — Story 1.7a) + 4 INFO. |
+| Uma (microcopy) | N/A              | Story 2.6 não introduz microcopy nova (logging técnico não-UX). |
+
+### Findings
+
+| Severity  | Count | Detalhes |
+|-----------|-------|----------|
+| CRITICAL  | 0     | -        |
+| HIGH      | 0     | -        |
+| MEDIUM    | 0     | -        |
+| LOW       | 3     | F-Q-1 (`docs/dev/RETRY_POLICY.md` autônoma deferred — equivalente em COUNCIL-20 §D2 + docstrings; aceitar) / F-Q-2 (`retry.py:85` UP047 PEP 695 type params — pré-existente Story 1.7a, NÃO regressão; tracking housekeeping) / F-Q-3 (31 falhas baseline pré-existentes em suite full — structlog/capsys/daemon threads test order pollution; mesma classe Story 2.11 F-Q-2; tracking Story 2.7) |
+| INFO      | 2     | F-Q-4 (smoke real DLL deferred per AC7 spec — não bloqueante) / F-Q-5 (métrica `circuit_breaker_state{symbol}` candidata ADR-013 — implementação concreta em prometheus_exporter deferred) |
+
+### Verdict
+
+**PASS** — Story 2.6 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — uma das condições era "retry
+  inteligente + categorização NL_*"; **satisfeita**.
+- **Q02-E close em `QUIRKS.md`** — workaround formalizado em policy
+  implementada (status `validated` confirmado).
+- **Multi-symbol futuro (Epic 3)** — lazy `_get_breaker(symbol, exchange)`
+  prepara isolation por par; sem contenção entre símbolos.
+
+**Highlight design:** State machine canônica 3-state (Fowler 2014)
+com sliding-window deque + thread-safety rigoroso (fn FORA do lock
+anti-deadlock + lazy state transition + cooldown amplificado capped
+× 8 anti-DoS). RetryPolicy frozen dataclass + 7 env vars com fallback
+graceful (env malformada loga warning, sistema NÃO para — best-effort
+robustez). Fronteira `public_api/` preservada; CircuitOpenError
+pré-existente em ADR-011 hierarchy.
+
+**Highlight implementação:** R10 (minimal deps) honrado — implementação
+dependency-free (deque + threading.Lock + time.monotonic + StrEnum;
+trade-off `pybreaker` rejeitado em COUNCIL-20 §D3). R7 (fail fast)
+honrado — PERMANENT/UNKNOWN raise imediato. R21 (cool path) honrado —
+eventos per-call (chunk-level), nunca per-trade. Backward-compat
+preservado: `with_retry(fn)` sem `policy=` mantém path Story 1.7a;
+`Orchestrator.__init__` aceita `retry_policy` + `circuit_breaker`
+opcionais via DI. Q02-E tratado em layer correto (download_primitive
+Story 1.3 timeout duro + breaker NÃO conta progress=99% como falha
+porque NÃO é error code — `is` estado de fluxo). Test sintético
+`test_circuit_breaker_does_not_count_q02e_progress_99_as_failure`
+valida.
+
+---
+
 — Quinn, no portão
