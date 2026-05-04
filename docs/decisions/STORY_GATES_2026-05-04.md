@@ -300,6 +300,59 @@ recomendações não-vinculantes (sign-off oficial).
 
 ---
 
+## Story 1.3 — History download primitive: 1 símbolo / 1 chunk
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/1.3.story.md`                          |
+| **commit auditado**    | `beac226`                                            |
+| **owner**              | Dex (dev) + COUNCIL-03 (Dex+Nelo+Sol mental)         |
+| **gatekeeper**         | Quinn (qa)                                           |
+| **report path**        | `docs/qa/QA_REPORTS/1.3-2026-05-04.md`               |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/1.3-dll-2026-05-04.md` (Nelo APPROVED) + `docs/qa/AUDIT_REPORTS/1.3-design-2026-05-04.md` (Aria APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com owner+ADR refs (manual ProfitDLL §3.1/§3.2/§4, COUNCIL-03, ADR-005/007a/010/011, QUIRKS Q01-V/Q02-E/Q03-AMB/Q04-E/Q05-V/Q06-V/Q07-V/Q11-E/Q13-V), `__all__` explícito, `from __future__ import annotations`, type hints completos. Lei R3 / INV-1 cumprida (callbacks `_history_cb` e `_progress_cb` fazem único `put_nowait` em `with contextlib.suppress(Full)`). TranslateTrade chamado em `_IngestorThread._process_trade` (FORA do callback). 4 threads físicas com nomes únicos. Constantes nomeadas para tunables (TRADE_QUEUE_MAXSIZE=100_000 — finding Pyro 1.4.5; PROGRESS_QUEUE_MAXSIZE=1000; DEFAULT_TIMEOUT_SECONDS=1800). Validação exchange em 2 fronteiras |
+| 2. Unit tests        | PASS      | **218 passed + 1 skipped em 18.33s** em `pytest tests/ -v --ignore=tests/smoke`. Por suite Story 1.3: 31 testes wrapper history + 23 timestamp parser (2 Hypothesis) + 16 integration download_primitive + ~140 LoC novos em test_dll_callbacks (V2 history+progress + INV-1 assertions). Lei R3 / INV-1 validada via `test_history_callback_does_not_invoke_translate_trade_inv1` (mock_dll.mock_calls == [] E TranslateTrade.called == False) |
+| 3. Acceptance criteria | PASS    | **10/10 ACs Pass** com evidência reprodutível. AC1 (V2 callback registrados, decisão COUNCIL-03 documentada); AC2 (`download_chunk` API completa); AC3 (ChunkResult frozen 13 campos); AC4 (TradeRecord 17 campos schema v1.0.0); AC5 (callback APENAS put_nowait — R3); AC6 (timeout 1800s + Q02-E tolerado); AC7 (datas formato manual §3.1 L1750); AC8 (bolsa letra única); AC9 (BRT naive R7 + Q03-AMB dual-format); AC10 (smoke gated por env, real em Story 1.7) |
+| 4. No regressions    | PASS      | 218 passed + 1 skipped, 0 failed em `pytest tests/`. Adições aditivas (V2 callbacks novos, novos métodos no wrapper, novo módulo orchestrator/) sem quebrar dll/types, dll/callbacks, dll/wrapper (state callback, init/finalize), storage/, public_api/, benchmarks. **+72 testes** ao total |
+| 5. Performance       | PASS      | **Cobertura 95.32%** (target 80%+) em escopo dll + orchestrator (531 stmts, 20 miss, 88 branches, 9 partials). Por arquivo: types.py 100%, errors.py 100%, callbacks.py 97%, wrapper.py 93%, orchestrator/__init__.py 100%, timestamp.py 100%, download_primitive.py 96%. Hot path R21 respeitado: callback zero alloc além de tuple; struct reusado em IngestorThread. Pyro 1.4.5 baselines validam queue 100k (COUNCIL-02 + ADR-005 amendment) |
+| 6. Security          | PASS      | `pre-commit run detect-secrets --all-files` -> `Detect secrets........Passed`. Sem credenciais em código novo. Smoke gated por env vars (PROFITDLL_KEY/USER/PASSWORD). Callback NÃO loga args (R3 + ADR-010). Sem print/log debug residual em hot path |
+| 7. Documentation     | PASS      | File List completa (4 source novos + 4 test files novos + 5 source estendidos). Dev Agent Record completo (Agent Model Dex claude-opus-4-7; Debug Log com 5 issues; Completion Notes com métricas; Change Log datado 2026-05-03 + 2026-05-04 com Nelo+Aria+Quinn entries). COUNCIL-03 documenta decisão V2 com justificativa + concordância mental Nelo + Sol. QUIRKS.md referenciado (Q01-V/Q02-E/Q03-AMB/Q04-E/Q05-V/Q06-V/Q11-E/Q13-V). Manual ProfitDLL referenciado nos snippets críticos |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | **APPROVED**     | 22-pt `wrapper_review` checklist PASS. Manual ProfitDLL respeitado (§3.1/§3.2/§4). COUNCIL-03 endossado (V2 callback + TranslateTrade fora do callback). Q01-V/Q02-E/Q03-AMB/Q04-E/Q05-V/Q06-V/Q07-V/Q11-E/Q13-V endereçados. **Lei R3 / INV-1 verificada em teste** (mock_dll.mock_calls == [] E TranslateTrade.called == False). 3 findings LOW/INFO (dupla validação exchange, TC_LAST_PACKET=0x02 convenção pendente smoke 1.7, parse_brt_timestamp não-exercitado por V2). Path: `docs/qa/AUDIT_REPORTS/1.3-dll-2026-05-04.md` |
+| Sol (storage)   | APPROVED implícito | COUNCIL-03 mental: source_callback="history_v2", sequence_within_ns preenchido mesmo com trade_id, schema 17 campos exatos. Storage layer não tocado em 1.3 (writer chamado em Story 1.7) |
+| Aria (design)   | **APPROVED**     | 11-pt `design_review` checklist PASS. ADR-005 (thread model + R3) com **separação física** real de 4 threads. ADR-005 amendment (queue 100k Pyro 1.4.5) aplicado. ADR-007a (public_api facade diferida 1.7a/b). ADR-010 + R21 hot-path. ADR-011 hierarquia 4-level. INV-1/INV-3/INV-11/INV-12 preservados (parcialmente para INV-12 — commit catalog em 1.7a). 4 findings INFO (queue overflow silencioso 2.1, dupla validação 2.X, public API 1.7a/b, timeout per-chunk 1.7). Path: `docs/qa/AUDIT_REPORTS/1.3-design-2026-05-04.md` |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 7     | F-N-1 (dupla validação exchange — DRY refactor 2.X) / F-N-2 (TC_LAST_PACKET=0x02 convenção — smoke 1.7 valida) / F-N-3 (parse_brt_timestamp não-exercitado por V2 — Story 1.5 V1) / F-A-1 (queue overflow silencioso — Story 2.1 metric) / F-A-2 (idem F-N-1 — DRY 2.X) / F-A-3 (public API surface diferida — Story 1.7a/b) / F-A-4 (timeout per-chunk — Story 1.7 design) — todos com tracking |
+
+### Verdict
+
+**PASS** — Story 1.3 fechada. Status `Ready for Review` -> **Done**.
+
+**Próximo passo desbloqueado:**
+- **Story 1.7a (orchestrator chunking + retry)** — consome `download_chunk`
+  primitiva; estende para multi-chunk com catalog SQLite (Story 1.5) e
+  writer Parquet (Story 1.4) end-to-end.
+- **Story 1.6 (rollover table)** — resolve alias WDOFUT → contrato vigente
+  (Q01-V) — pré-requisito para 1.7a/b.
+
+---
+
 ## Resumo consolidado (gates 2026-05-04)
 
 | Story | Owner | Commit  | Verdict | LOW | MED | HIGH | CRIT | Report |
@@ -309,17 +362,24 @@ recomendações não-vinculantes (sign-off oficial).
 | 1.2   | Dex   | f2a766d | PASS    | 5   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.2-2026-05-04.md` |
 | 1.5   | Dex+Sol | d1fb2e0 | PASS    | 7   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.5-2026-05-04.md` |
 | 1.4.5 | Pyro  | 550ea2c | PASS    | 6   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.4.5-2026-05-04.md` |
+| 1.3   | Dex+COUNCIL-03 | beac226 | PASS    | 7   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.3-2026-05-04.md` |
 
-**Total:** 5 stories passadas pelo gate em 2026-05-04. 5 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
+**Total:** 6 stories passadas pelo gate em 2026-05-04. 6 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
 
-**Total findings acumulados:** 25 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
-com tracking documentado em stories futuras (1.3, 1.7, 1.8, 2.1, 2.X, DevOps).
+**Total findings acumulados:** 32 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
+com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.1, 2.X, DevOps).
 
 **Story 1.5 fecha F-M-1 da Story 1.4** (catálogo SQLite ausente). F-M-2
 (`sha256_self` no metadata Parquet) permanece deferred para Story 2.X.
 
 **COUNCIL-02 ratificado oficialmente** (Pyro+Aria) — Story 2.1
 perf-write-optimization a ser criada por Morgan (PM).
+
+**COUNCIL-03 ratificado em 1.3** (Dex+Nelo+Sol mental) — V2 callback
++ TranslateTrade fora do callback escolhidos com justificativa formal
+(R10/Q13-V + trade_id real + TC_LAST_PACKET autoritativo). Primeira
+fronteira `orchestrator/` ↔ `dll/` desenhada e validada — desbloqueia
+Story 1.7a (orchestrator multi-chunk).
 
 ---
 
