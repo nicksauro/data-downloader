@@ -75,9 +75,9 @@ construiriam em cima de fundação ainda crua.
 | 1.8-followup | Real baselines (humano roda smoke + Pyro re-baseline v1.0.0-real) | humano + perf-engineer | 2h | Pending Human | Depends 1.7b-followup; bloqueia merge final 2.2 |
 | 2.1 | Data integrity validators como código (subpacote validation/) | storage-engineer + qa | 2d | **Done (2026-05-04)** | Movida para Epic 1 conforme finding C4 — registrada aqui para rastreabilidade |
 | **2.2** | **Perf Write Optimization (vectorize ParquetWriter)** | **perf-engineer** | **3d** | **Ready (2026-05-04)** | **Criada via COUNCIL-10; Aria APPROVED design; Morgan validated 10/10** |
-| 2.3 | Schema Migration Framework (finding H16) | storage-engineer + dev | 3d | Draft (a criar) | Bumpa `schema_version` v1.0.0 → v1.0.1 sem re-baixar; scripts versionados; rollback |
-| 2.4 | Observabilidade runtime (ADR-013 Prometheus exporter V2) | dev + architect | 2d | Draft (a criar) | `/metrics` HTTP endpoint; `dll_drops_total` + queue depths + latência |
-| 2.5 | Calendar B3 integração com holidays.dat Nelogica | storage-engineer + dev | 2d | Draft (a criar) | Substitui tabela hardcoded Story 2.1; finding F-S-1 Sol; COUNCIL-04 caveat |
+| 2.3 | Schema Migration Framework (finding H16) | storage-engineer + dev | 2d | **Ready (2026-05-03)** | Bumpa `schema_version` v1.0.0 → v1.1.0 sem re-baixar; scripts versionados; rollback. Morgan validated 10/10. |
+| 2.4 | Observabilidade runtime (ADR-013 Prometheus exporter V2) | architect + dev | 2d | **Ready (2026-05-03)** | `/metrics` HTTP endpoint; `dll_drops_total` + queue depths + latência. Morgan validated 10/10. |
+| 2.5 | Calendar B3 integração com holidays.dat Nelogica | storage-engineer + dev | 2d | **Ready (2026-05-03)** | Substitui tabela hardcoded Story 2.1; finding F-S-1 Sol; COUNCIL-04 caveat. Morgan validated 10/10. |
 | 2.6 | Retry inteligente + circuit breaker | dev | 2d | Draft (existente) | Categorização NL_*; retry policy por categoria |
 | 2.7 | Hot path tuning (HOT_PATH_RULES.md aplicado) | perf-engineer + dev | 2d | Draft (existente) | Remove structlog hot path; finding H22 |
 | 2.8 | Storage perf tuning (row_group, compression final) | storage-engineer + perf-engineer | 2d | Draft (existente) | Finding M6; cache PRAGMAs |

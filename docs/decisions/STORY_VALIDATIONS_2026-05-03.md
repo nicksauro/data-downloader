@@ -392,6 +392,69 @@ Observações:
 
 ---
 
+## Story 2.3 — Schema Migration Framework (Epic 2 — refino COUNCIL-10)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a squad / I want framework migrar schema_version / So that R4 (schema contrato perpétuo) sem re-baixar histórico" |
+| P2 | ✅ | 10 AC numeradas e testáveis (estrutura pacote, ABC, CLI, dry-run, checkpoint, catalog update, rollback, migration exemplo v1.0.0→v1.1.0, suite tests, docs) |
+| P3 | ✅ | Cobre golden path (migrate aditiva) + edge cases (resume após crash, rollback, dry-run, pre-conditions duras, migration sem rollback_supported) |
+| P4 | ✅ | 8 tasks decompostas; cada subtask < 1 dia (pacote scaffold, log SQLite, CLI, backup/rollback, migration exemplo, tests, docs, reviews) |
+| P5 | ✅ | Refs: MIGRATIONS.md (esqueleto), SCHEMA.md §6 política, INTEGRITY.md INV-2/INV-7, ADR-002, ADR-004, finding H16, agents/storage-engineer.md, Stories 1.4 + 1.5 |
+| P6 | ✅ | Unit + Integration (resume após crash) + Property (Hypothesis preserve campos comuns) + Smoke (dataset real opcional) |
+| P7 | ✅ | depends_on: [1.4] explícito |
+| P8 | ✅ | Owner: storage-engineer; Reviewers: architect, qa, dev |
+| P9 | ✅ | Foundation **ALTO** — toca storage/, base de toda evolução de schema. Sol audit obrigatório + Aria revisa CLI integration. Property test obrigatório como gate. |
+| P10 | ✅ | 2d estimativa (dentro do limite 3d) |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: Story implementa esqueleto Sol (MIGRATIONS.md SCAFFOLD) em código real. Migration aditiva v1.0.0→v1.1.0 (campo `liquidity_classification`) serve de teste end-to-end + referência para futuras. Constraint forte de backup obrigatório + transação atômica catálogo+arquivo.
+
+---
+
+## Story 2.4 — Prometheus Observability Exporter V2 (Epic 2 — refino COUNCIL-10)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a operadores+Pyro+Aria / I want exportar métricas via /metrics HTTP / So that Grafana/Alertmanager scraping em vez de parsing logs JSON" |
+| P2 | ✅ | 8 AC numeradas e testáveis (dep, pacote, métricas conforme ADR-013, HTTP exporter porta configurável, hook orchestrator via Protocol, CLI flag, suite tests, docs ops) |
+| P3 | ✅ | Cobre golden path (start exporter + scrape) + edge cases (porta ocupada, opt-in default, REGISTRY singleton testes, cardinality LRU símbolos, format compliance Prometheus exposition) |
+| P4 | ✅ | 9 tasks decompostas; cada subtask < 1 dia (setup dep, métricas, HTTP, hook orchestrator, CLI, tests, bench, docs, reviews) |
+| P5 | ✅ | Refs: ADR-013 (fonte primária), COUNCIL-05 D3 (ProgressEmitter Protocol), ADR-005 thread model, ADR-010 R21, MANIFEST §R21, finding H22, agents/architect.md + perf-engineer.md, Stories 1.7a + 1.7b |
+| P6 | ✅ | Unit (cada métrica + emitter) + Integration (HTTP server porta efêmera + format compliance via parser) + Bench (overhead) + Smoke (gated env) |
+| P7 | ✅ | depends_on: [1.7a] explícito (orchestrator emite eventos via Protocol) |
+| P8 | ✅ | Owner: architect (Aria — fronteira); Reviewers: perf-engineer, dev, devops |
+| P9 | ✅ | Foundation **MÉDIO** — módulo novo sem dependentes; hook via Protocol (subscribe), sem refactor de orchestrator. Bug afeta ops/dashboard, não integridade dados. |
+| P10 | ✅ | 2d estimativa |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: V2 deferred originalmente para Epic 4 em ADR-013 — antecipado para Epic 2 porque release readiness V1 exige métricas live. Constraint chave: NÃO refactorar orchestrator (fronteira Aria); usar subscribe pattern via ProgressEmitter Protocol. Opt-in (zero overhead default).
+
+---
+
+## Story 2.5 — Calendar B3 holidays.dat Integration (Epic 2 — refino COUNCIL-10)
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a sistema (DataValidator+IntegrityChecker) / I want ler holidays.dat oficial Nelogica / So that fonte autoritativa substitui hardcoded 2025-2026" |
+| P2 | ✅ | 8 AC numeradas e testáveis (investigação formato, parser dedicado, integração transparente, cobertura 2020-2030, refresh mtime, ground truth tests, doc HOLIDAYS_DAT_FORMAT, graceful fallback) |
+| P3 | ✅ | Cobre golden path (parse + uso) + edge cases (arquivo ausente, malformado, mtime mudou, cobertura insuficiente, CI sem ProfitDLL) |
+| P4 | ✅ | 6 tasks decompostas; cada subtask < 1 dia (Nelo investigação, parser, integração calendar_b3, tests, doc, reviews) |
+| P5 | ✅ | Refs: calendar_b3.py docstring TODO, finding F-S-1 audit 2.1, COUNCIL-04 caveat, CONTRACTS.md §0 validation_source, INTEGRITY.md M17 DST, agents/profitdll-specialist.md + storage-engineer.md, Story 2.1 |
+| P6 | ✅ | Unit + Integration (parser + fallback) + Property (Hypothesis parser vs hardcoded equivalência 2025-2026) + Smoke (dev box ProfitDLL) |
+| P7 | ✅ | depends_on: [2.1] explícito (substitui calendar_b3 nascido em 2.1) |
+| P8 | ✅ | Owner: storage-engineer; Reviewers: profitdll-specialist (Nelo — DLL authority), qa, dev |
+| P9 | ✅ | Foundation **MÉDIO** — substituição de fonte transparente. API pública estável. Bug = falsos positivos gap detection (não-fatal). Nelo audit + property test são defesas. |
+| P10 | ✅ | 2d estimativa (Task 1 investigação pode escalar se formato é proprietário sem doc — mini-council Sol+Nelo+Aria já previsto como escalation path) |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observação: Zero alucinação (R23) — se Nelo não confirma formato via manual oficial, marca `validation_source: reverse_engineered` + lista hipóteses. Fallback hardcoded preservado para CI sem ProfitDLL. API pública INTACTA — apenas fonte interna troca.
+
+---
+
 ## Stories Done (2026-05-03) — encerradas pela Fase A
 
 ### Story 0.0 — DONE
@@ -436,10 +499,14 @@ Observações:
 | 1.8 | **GO** | 10/10 | — |
 | 2.1 | **GO** | 10/10 | — |
 | 2.2 | **GO** | 10/10 | Validada 2026-05-04 — refactor interno ParquetWriter (vectorize); sign-off Aria via COUNCIL-10; constraint forte "sem mudança fronteira public_api / SCHEMA" |
+| 2.3 | **GO** | 10/10 | Validada 2026-05-03 — Schema Migration Framework (finding H16); foundation ALTO (toca storage/); Sol audit + property test obrigatórios; constraint backup + transação atômica |
+| 2.4 | **GO** | 10/10 | Validada 2026-05-03 — Prometheus Exporter V2 (ADR-013 antecipado de Epic 4); subscribe pattern via ProgressEmitter (Aria fronteira); opt-in zero overhead default |
+| 2.5 | **GO** | 10/10 | Validada 2026-05-03 — Calendar B3 holidays.dat (finding F-S-1 audit 2.1 + COUNCIL-04 caveat); Nelo reviewer obrigatório; fallback hardcoded preservado para CI |
 
-**Total avaliado:** 18 stories (13 do Epic 1 + 4 da fase 0 + Story 2.2 Epic 2).
-**Verdict GO:** 18/18 (Story 1.2 re-validada 2026-05-03 após reescrita Nelo;
-Story 2.2 validada 2026-05-04 pós-COUNCIL-10).
+**Total avaliado:** 21 stories (13 do Epic 1 + 4 da fase 0 + Stories 2.2/2.3/2.4/2.5 Epic 2).
+**Verdict GO:** 21/21 (Story 1.2 re-validada 2026-05-03 após reescrita Nelo;
+Story 2.2 validada 2026-05-04 pós-COUNCIL-10; Stories 2.3/2.4/2.5 validadas
+2026-05-03 pós-COUNCIL-10 refino EPIC-2).
 **Verdict NO-GO:** 0.
 
 **Próximo passo:** todas stories validadas. Wave 4 desbloqueada (Story 1.2 ‖ Story 1.4 podem iniciar em paralelo).
