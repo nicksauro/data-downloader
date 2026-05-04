@@ -36,7 +36,7 @@
 | [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
 | [Q18-OPEN](#q18-open) | ❓ open | history / contract calendar | Vigência exata WIN H/M/U/Z conforme regra B3 oficial (5º dia útil mês X-3 → quarta mais próxima 15/X)? |
 | [Q-DRIFT-01](#q-drift-01) | 🔬 empirical | api drift | `SetProgressCallback` e `GetDLLVersion` **NÃO exportadas** pela DLL real |
-| [Q-DRIFT-02](#q-drift-02) | 🔬 empirical | lifecycle | `wait_market_connected` precisa >60s — default elevado para 300s + heartbeat 30s |
+| [Q-DRIFT-02](#q-drift-02) | ⚠️ LIKELY ProfitChart prerequisite | lifecycle | `wait_market_connected` trava em (2,1) >5min — provável dependência de ProfitChart concorrente |
 | [Q-DRIFT-03](#q-drift-03) | ✅ validated | config | Env vars do código divergiam de `.env.example` — padronizado em `PROFITDLL_*` |
 | [Q-DRIFT-04](#q-drift-04) | 🔬 empirical | tooling / encoding | Rich Panel emoji crash em Windows cp1252 — CLI força `PYTHONIOENCODING=utf-8` |
 
@@ -491,29 +491,60 @@
 ## Q-DRIFT-02
 
 - **ID:** Q-DRIFT-02
-- **Status:** 🔬 empirical
+- **Status:** ⚠️ **LIKELY ProfitChart prerequisite** (atualizado 2026-05-04 após 2ª tentativa smoke)
 - **Categoria:** lifecycle / handshake
-- **Sintoma:** `wait_market_connected(timeout=60)` retornava `False` (timeout) em ambientes
-  reais sem ProfitChart concorrente — DLL inicializa e autentica OK, mas o handshake
-  `MARKET_DATA` leva mais de 60 segundos para chegar a `(2, 4)`/`(2, 2)`.
-- **Causa raiz:** desconhecida. Hipóteses:
-  - (a) DLL espera ProfitChart estar rodando para usar suas conexões.
-  - (b) Servidor de market data faz throttle/handshake demorado fora de horário pregão.
-  - (c) Sequência state callbacks tem etapas extras não documentadas (LOGIN → ROTEAMENTO →
-    sync → MARKET_LOGIN → MARKET_DATA).
-- **Evidência:** smoke executor (commit `153cf43`) — `connect trava em MARKET_DATA/1 >60s`.
-  Estado intermediário `MARKET_DATA/1` (provavelmente "connecting") nunca evolui para 2/4.
-- **Workaround:**
-  - Default timeout `wait_market_connected` elevado de 60s → **300s** (5 min).
-  - Heartbeat a cada 30s no logger (`dll.waiting_market_data` + `elapsed_seconds`) para que
-    operador veja que não está travado.
-- **Manual diz:** silencioso sobre tempo típico de handshake.
-- **Investigação aberta:** validar com humano (a) se ProfitChart precisa estar aberto para
-  MARKET_DATA conectar, (b) qual estado intermediário `MARKET_DATA/1` representa.
-- **Data descoberta:** 2026-05-04 (smoke executor, hotfix B3).
-- **Aplica a stories:** 1.2 (wait_market_connected), 1.6 (probe), 1.7b (CLI download), todas
-  smoke tests.
-- **Refs:** `src/data_downloader/dll/wrapper.py:wait_market_connected`.
+- **Sintoma:** `wait_market_connected` retornava `False` (timeout) — DLL inicializa e
+  autentica OK, mas o handshake `MARKET_DATA` **fica em estado intermediário `(2, 1)` por
+  mais de 5 minutos** sem evoluir para `(2, 4)`/`(2, 2)`.
+- **Causa raiz (hipótese atual):** ⚠️ **LIKELY** — ProfitDLL exige que **ProfitChart
+  esteja rodando concorrentemente e logado com a mesma chave de licença Nelogica** para
+  que o canal MARKET_DATA conecte. Hipótese formulada com base em 2 tentativas de smoke
+  consecutivas onde MARKET_DATA travou em (2,1).
+  - Hipótese (a) — **LIKELY**: ProfitChart precisa estar aberto/logado.
+  - Hipótese (b) — secundária: throttle/handshake demorado fora de pregão.
+  - Hipótese (c) — secundária: sequência state callbacks tem etapas extras (LOGIN →
+    ROTEAMENTO → sync → MARKET_LOGIN → MARKET_DATA).
+- **Evidência (atualizada):**
+  - Smoke #1 (commit `153cf43`, 2026-05-04 manhã): `connect trava em MARKET_DATA/1 >60s`.
+  - Smoke #2 (commit `4412d48`, 2026-05-04 tarde): `connect trava em MARKET_DATA/1 >5min`
+    mesmo após default timeout elevado para 300s.
+  - **Inferência:** ambientes nas duas tentativas provavelmente NÃO tinham ProfitChart
+    aberto concorrentemente. Hipótese (a) é a explicação mais parcimoniosa para a
+    persistência do state `(2, 1)` indefinidamente.
+  - Manual silencioso. Manual.py oficial Nelogica (`profitdll/Exemplo Python/main.py`)
+    não menciona pré-requisito ProfitChart, mas o exemplo é interativo via CLI e provavelmente
+    foi testado em máquina dev com ProfitChart instalado.
+- **Mitigação V1.0 (proposta — INSTALL.md §2.4):**
+  - **Pré-requisito documentado**: usuário abre ProfitChart e faz login com a mesma chave
+    Nelogica configurada em `.env` ANTES de rodar data-downloader. Aguarda ProfitChart
+    conectar a market data, depois roda CLI/UI.
+  - Default timeout `wait_market_connected` mantido em **300s** (5 min) — Q-DRIFT-02
+    persiste em ambientes sem ProfitChart, então timeout elevado por si só não basta.
+  - Heartbeat a cada 30s no logger (`dll.waiting_market_data` + `elapsed_seconds` +
+    `quirk="Q-DRIFT-02"`) para visibilidade.
+  - Mensagem de timeout (`ERR_DLL_MARKET_TIMEOUT` em MICROCOPY_CATALOG §5) inclui hint
+    explícito sobre ProfitChart como pré-requisito.
+- **Investigação aberta (V1.1 deve resolver se confirmado):**
+  - **Probe humano necessário:** rodar smoke com ProfitChart aberto + logado e medir
+    se MARKET_DATA chega a `(2, 2)`/`(2, 4)` em < 60s. Se sim → hipótese (a) confirmada
+    → V1.0 documenta pré-requisito; V1.1 investiga API alternativa que não dependa de
+    ProfitChart (ou abre ticket Nelogica).
+  - Se NÃO (timeout persiste com ProfitChart aberto) → hipóteses (b)/(c) reabertas;
+    Nelo abre ticket suporte Nelogica.
+- **Status code mapping:**
+  - `(2, 1)` = MARKET_DATA / 1 (provavelmente "connecting" / aguardando handshake)
+  - `(2, 2)` = MARKET_WAITING (Q10-AMB)
+  - `(2, 4)` = MARKET_CONNECTED (Q10-AMB)
+- **Data descoberta:** 2026-05-04 (smoke executor #1, hotfix B3).
+- **Data status atualizado:** 2026-05-04 (smoke executor #2 — hotfix B2-B4 follow-up;
+  hipótese ProfitChart formalizada).
+- **Aplica a stories:** 1.2 (wait_market_connected), 1.6 (probe), 1.7b (CLI download),
+  4.4 (INSTALL.md V1.0 pré-requisito), todas smoke tests.
+- **Refs:**
+  - `src/data_downloader/dll/wrapper.py:wait_market_connected`
+  - `src/data_downloader/public_api/download.py:_build_real_dll`
+  - `docs/release/INSTALL.md` §2.4 (pré-requisito ProfitChart V1.0)
+  - `docs/ux/MICROCOPY_CATALOG.md` §5 `ERR_DLL_MARKET_TIMEOUT`
 
 ---
 

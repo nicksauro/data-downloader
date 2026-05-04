@@ -144,10 +144,15 @@ def test_mvp_gate_full_smoke(tmp_path: Path) -> None:
     ]
 
     # ---- 1. First run ----
+    # F-H-5: encoding="utf-8" + errors="replace" evita UnicodeDecodeError
+    # em Windows onde subprocess.run(text=True) cai em cp1252 e o stdout
+    # do CLI emite microcopy com emojis/box-drawing.
     first = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(repo_root),
         timeout=1800,  # 30 min hard cap (SMOKE_PROTOCOL.md FAIL-8)
         check=False,
@@ -185,6 +190,8 @@ def test_mvp_gate_full_smoke(tmp_path: Path) -> None:
         cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(repo_root),
         timeout=300,
         check=False,
@@ -225,6 +232,8 @@ def test_mvp_gate_full_smoke(tmp_path: Path) -> None:
         integrity_cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(repo_root),
         timeout=120,
         check=False,

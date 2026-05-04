@@ -61,6 +61,59 @@ Para uso como biblioteca Python (importar `data_downloader.public_api`):
 - `pip install data-downloader` (quando publicado em PyPI — V1.1+) ou
   instalação local via `pip install -e .` no clone do repo.
 
+### 2.4 Pré-requisito atual (V1.0) — ProfitChart aberto concorrentemente
+
+> **⚠️ Pré-requisito V1.0 (Q-DRIFT-02 — investigação em andamento):**
+>
+> Antes de rodar `data-downloader`, **abra o ProfitChart e faça login**
+> com a **mesma chave de licença Nelogica** configurada em `.env`
+> (a chave que vai em `PROFITDLL_KEY`).
+>
+> **Aguarde o ProfitChart conectar ao market data** (status na barra
+> inferior do ProfitChart deve mostrar conectado / cotações chegando).
+>
+> Em seguida, rode `data_downloader.exe` (CLI ou UI) **sem fechar o ProfitChart**.
+
+**Por que esse pré-requisito:** em duas tentativas consecutivas de
+smoke real (commits `153cf43` e `4412d48`, 2026-05-04), o
+handshake `MARKET_DATA` da ProfitDLL travou em estado intermediário
+`(2, 1)` por mais de 5 minutos quando o ProfitChart **não estava
+rodando concorrentemente**. A hipótese mais parcimoniosa
+(`Q-DRIFT-02 LIKELY` em [`docs/dll/QUIRKS.md`](../dll/QUIRKS.md#q-drift-02))
+é que a ProfitDLL precisa do canal MARKET_DATA já estabelecido pelo
+ProfitChart concorrente.
+
+**O que esperar se o pré-requisito não for atendido:** após ~5 minutos
+o data-downloader emite o erro:
+
+> Não conectei ao Market Data — MARKET_DATA não conectou após 300s.
+> Abra ProfitChart e faça login com a mesma chave de licença Nelogica
+> configurada em `.env` (pré-requisito V1.0 — Q-DRIFT-02).
+
+(Microcopy ID `ERR_DLL_MARKET_TIMEOUT` — pt-BR.)
+
+**Configurar timeout custom (uso avançado):** se preferir um timeout
+maior ou menor (ex.: testes de CI), defina a env var
+`DATA_DOWNLOADER_DLL_CONNECT_TIMEOUT` em segundos:
+
+```powershell
+$env:DATA_DOWNLOADER_DLL_CONNECT_TIMEOUT = "600"
+.\data_downloader.exe download --symbol WDOJ26 --start 2026-04-15 --end 2026-04-15
+```
+
+**Roadmap V1.1:** investigação Q-DRIFT-02 em andamento. Se o probe humano
+(rodar smoke com ProfitChart aberto e medir se MARKET_DATA conecta em
+<60s) confirmar a hipótese, V1.1 vai:
+
+- (a) Documentar oficialmente o pré-requisito (sem mudança técnica), ou
+- (b) Investigar API alternativa Nelogica que não dependa de ProfitChart
+  concorrente (ticket suporte Nelogica), ou
+- (c) Embedir um modo "headless ProfitChart" no próprio `.exe` (escopo
+  ainda não definido).
+
+Se Q-DRIFT-02 for refutado (timeout persistir com ProfitChart aberto),
+Nelo abre ticket suporte Nelogica.
+
 ---
 
 ## 3. Download e verificação

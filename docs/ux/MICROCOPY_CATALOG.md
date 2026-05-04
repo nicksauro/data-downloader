@@ -146,6 +146,7 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `ERR_DLL_DISCONNECTED` | NL_DISCONNECTED | Conexão caiu | A DLL perdeu conexão com a corretora. | Reconectando automaticamente — aguarde 30s. |
 | `ERR_DLL_VERSION_MISMATCH` | NL_VERSION_MISMATCH | Versão da DLL incompatível | A DLL instalada não bate com a versão esperada pelo app. | Atualize ProfitDLL ou rode `data-downloader doctor`. |
 | `ERR_DLL_GENERIC` | (catch-all) | Erro não documentado da ProfitDLL | Código {code}: {message}. | Use `--verbose` para detalhes. Reporte em github issues. |
+| `ERR_DLL_MARKET_TIMEOUT` | (Q-DRIFT-02) | Não conectei ao Market Data | MARKET_DATA não conectou após {timeout}s. | Abra ProfitChart e faça login com a mesma chave de licença Nelogica configurada em `.env` (pré-requisito V1.0 — Q-DRIFT-02). |
 
 ---
 

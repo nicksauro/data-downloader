@@ -479,8 +479,14 @@ def _looks_like_root(symbol: str) -> bool:
 def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     """Constrói e inicializa uma instância real de :class:`ProfitDLL`.
 
-    Lê credenciais de env (``PROFITDLL_KEY``, ``PROFIT_USER``, ``PROFIT_PASS``).
-    Levanta :class:`DLLInitError` se ausentes ou se a inicialização falha.
+    Lê credenciais de env (``PROFITDLL_KEY``, ``PROFITDLL_USER``,
+    ``PROFITDLL_PASS``) — naming canônico alinhado com ``.env.example``
+    (Q-DRIFT-03).
+
+    O timeout do handshake ``MARKET_DATA`` é configurável via
+    ``DATA_DOWNLOADER_DLL_CONNECT_TIMEOUT`` (default 300s) — Q-DRIFT-02
+    documenta que o handshake pode levar minutos quando o ProfitChart
+    não está aberto concorrentemente.
 
     Args:
         events_queue: usado para emitir progresso "starting DLL" antes do
@@ -493,8 +499,8 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     from data_downloader.public_api.exceptions import DLLInitError
 
     key = os.getenv("PROFITDLL_KEY")
-    user = os.getenv("PROFIT_USER")
-    password = os.getenv("PROFIT_PASS")
+    user = os.getenv("PROFITDLL_USER")
+    password = os.getenv("PROFITDLL_PASS")
     if not (key and user and password):
         raise DLLInitError(
             -1,
@@ -513,11 +519,16 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     )
     dll = ProfitDLL()
     dll.initialize_market_only(key, user, password)
-    if not dll.wait_market_connected(timeout=60):
+    connect_timeout = int(os.getenv("DATA_DOWNLOADER_DLL_CONNECT_TIMEOUT", "300"))
+    if not dll.wait_market_connected(timeout=connect_timeout):
         raise DLLInitError(
             -1,
             "NL_WAITING_SERVER",
-            "DLL did not connect within 60s",
+            (
+                f"MARKET_DATA não conectou após {connect_timeout}s. "
+                "Verifique se ProfitChart está aberto e logado com a mesma "
+                "chave de licença Nelogica (Q-DRIFT-02)."
+            ),
         )
     _emit(
         events_queue,

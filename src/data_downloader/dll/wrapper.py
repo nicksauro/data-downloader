@@ -415,7 +415,20 @@ class ProfitDLL:
             now = time.monotonic()
             remaining = deadline - now
             if remaining <= 0:
-                log.warning("dll.connected_timeout", timeout=timeout)
+                # Q-DRIFT-02: log inclui hint para o operador. Se este timeout
+                # disparar com frequência, ProfitChart provavelmente precisa
+                # estar aberto e logado com a mesma chave (pré-requisito V1.0
+                # documentado em INSTALL.md §2.4 e QUIRKS.md Q-DRIFT-02).
+                log.warning(
+                    "dll.connected_timeout",
+                    timeout=timeout,
+                    quirk="Q-DRIFT-02",
+                    microcopy_id="ERR_DLL_MARKET_TIMEOUT",
+                    hint=(
+                        "MARKET_DATA não conectou — abra ProfitChart e faça "
+                        "login com a mesma chave de licença Nelogica."
+                    ),
+                )
                 return False
 
             # Heartbeat — emite log se passou ``heartbeat_interval`` sem state
