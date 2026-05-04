@@ -753,4 +753,74 @@ tarefa que exige humano = correto). Documento completo em
 
 ---
 
+## Story 1.8 — Pyro baselines reais + regression budgets
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/1.8.story.md`                          |
+| **commit auditado**    | `4b44d33`                                            |
+| **owner**              | Pyro (perf-engineer) — modo autônomo mini-council Pyro+Sol+Aria via COUNCIL-10 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Aria+Sol+Morgan implícito) |
+| **report path**        | `docs/qa/QA_REPORTS/1.8-2026-05-04.md`               |
+| **waiver**             | `docs/qa/WAIVERS/1.8-real-baselines-deferred-2026-05-04.md` |
+| **story-followup**     | `docs/stories/1.8-followup.story.md`                 |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/1.8-storage-2026-05-04.md` (Sol APPROVED) + `docs/qa/AUDIT_REPORTS/1.8-design-2026-05-04.md` (Aria APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Story 1.8 não toca `src/`. Bench `bench_chunking.py` + `bench_multi_symbol.py` implementados como pipelines E2E mock funcionais (eram esqueletos). Docstrings ricos + refs COUNCIL-10/COUNCIL-02. |
+| 2. Unit tests        | PASS      | Suite funcional inalterada (416 passed + 1 skipped vs HEAD pré-1.8). Bench rodadas: 3 benchs × 3 runs = 9 runs OK; 0 crashes. |
+| 3. Acceptance criteria | PASS via WAIVER | 6/10 ACs PASS literal/PARTIAL (AC4, AC7, AC8 PASS; AC2, AC3, AC6 PARTIAL com alternativa documentada via COUNCIL-10) + 4 DEFERRED via WAIVER (AC1, AC5, AC9, AC10) — mesma política COUNCIL-09 estendida. |
+| 4. No regressions    | PASS      | Suite 416 passed inalterada. Mock baselines `v1.1.0-mock` co-existem com `v1.0.0-synthetic` em BASELINES.md sem conflito. |
+| 5. Performance       | PASS (baselines registrados) | 3 benchs novos em BASELINES.md §"Resumo Story 1.8 — Status final por target": chunking (4_594 trades/s p50, gap 1mês +700%), multi_symbol (N=4 = 2.88x, gap -10%), callback re-run (chunk p99 1_510ms, gap +1410%). 4 ❌ + 4 ✅ — todos tracking Story 2.2. |
+| 6. Security          | PASS      | `pre-commit run detect-secrets --all-files` → `Detect secrets........Passed`. Sem credenciais novas. |
+| 7. Documentation     | PASS      | `BASELINES.md` v1.1.0-mock + `TARGETS_V1.md` gap-tracked-by-2.2 + `REGRESSION_BUDGETS.md` override 30% chunking + COUNCIL-10 + Story 2.2 Draft criada. File List completo. Dev Agent Record completo com todas as decisões mini-council. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | N/A              | Story 1.8 não toca `dll/`. Mock DLL inline (fixture local; Nelo authority preservada).                |
+| Sol (storage)   | **APPROVED**     | Audit em `docs/qa/AUDIT_REPORTS/1.8-storage-2026-05-04.md`. Schema v1.0.0 preservado byte-a-byte; ingestion_ts_ns + chunk_id confirmados nos Parquets gerados pelo pipeline E2E mock (AC8 PASS). 1 LOW + 3 INFO. |
+| Aria (design)   | **APPROVED**     | Audit em `docs/qa/AUDIT_REPORTS/1.8-design-2026-05-04.md`. COUNCIL-10 endossado integralmente (6 itens APPROVED); Story 2.2 design APPROVED — refactor interno, fronteira public_api preservada, sem ADR amendment necessário. 1 LOW + 3 INFO. |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0 literal + 1 deferred-by-protocol via WAIVER | F-H-1 (real baselines aguardam smoke real Story 1.7b-followup; downgrade a deferred per `WAIVERS/README.md` §2) |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 2     | F-L-1 (BASELINES.md confusão entre legacy 2_244ms e mock 1_510ms — nota cruzada) / F-L-2 (Story 2.2 falta fallback se 1.8-followup demora) — não-bloqueantes |
+| INFO      | 6     | F-I-1..F-I-6 (refinements Sol + Aria — todos tracking Story 2.2/2.X)                                  |
+
+### Verdict
+
+**CONCERNS deferred-real-baselines** — Story 1.8 fechada. Status `Ready for Review` → **Done** (asterisco: real baselines deferred via WAIVER).
+
+**Esta gate desbloqueia:**
+- **Epic 2 inteiro** — Story 2.2 (perf-write-optimization) Ready para Pyro implementar.
+- **Story 1.8-followup** placeholder criada (humano + Pyro pós smoke real).
+- **Stories 2.3 / 2.4 / 2.5** — Morgan refinou EPIC-2 com 3 stories adicionais (Schema Migration Framework, Observability Prometheus V2, Calendar B3 holidays.dat).
+
+**Gate Epic 1 close** — encadeado em **1.7b-followup PASS + 1.8-followup PASS** (humano dependente). Bloqueia release V1.
+
+---
+
+**COUNCIL-10 ratificada em 1.8** (Pyro+Sol+Aria mini-council mental) —
+finding crítico de performance consolidado: gap de **-72%** vs target V1
+(production writer 27_638 trades/s vs 100k target). Decisão de criar
+**Story 2.2 (Perf Write Optimization)** em vez de inflar Story 1.8 preserva:
+(a) trilha de auditoria Story 1.4 (gate APPROVED Sol não re-aberto),
+(b) property tests Hypothesis dedicados (Aria recomendação 7 COUNCIL-02),
+(c) regression budget canônico (vectorização vira *melhora* via PR
+`perf-baseline-update`, não baseline shift implícito). Sign-off Pyro
+(perf authority) + Sol (schema preserved) + Aria (sem ADR amendment —
+fronteira preservada). Documento completo em
+`docs/decisions/COUNCIL-10-perf-optimization-roadmap.md`.
+
+---
+
 — Quinn, no portão

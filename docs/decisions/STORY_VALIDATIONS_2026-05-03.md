@@ -342,6 +342,37 @@ Observações:
 
 ---
 
+## Story 2.2 — Perf Write Optimization (vectorize ParquetWriter) — validada em 2026-05-04
+
+| P | Status | Nota |
+|---|--------|------|
+| P1 | ✅ | "As a Pyro responsável por throughput sustentado / I want vectorizar hot path interno do `ParquetWriter` (`_trades_to_table`, `validate_record`, `dedup`, `_sha256_file`) usando `pa.compute` + `pa.array` direto + `hashlib` streaming / So that o gap de **-72%** medido em Story 1.4.5 / re-confirmado em Story 1.8 (production writer 27_638 trades/s vs target 100k/s) seja eliminado, atingindo >= 100k trades/s sustained sem alterar contrato externo nem schema canônico Parquet." |
+| P2 | ✅ | 8 AC numeradas e testáveis (todas com critério verificável: AC1 throughput numérico, AC2-AC5 vectorização específica + flag legacy, AC6 property tests, AC7 regression suite, AC8 diff vazio fronteira) |
+| P3 | ✅ | Cobre golden path (vectorize + property test + regression) E edge cases (flag legacy fallback, dedup variantes pareto-ótimo, RSS peak SHA256 streaming). Constraints documentam casos limítrofes ("se complexidade > 30%, escalonar Aria") |
+| P4 | ✅ | 8 tasks, 19 subtasks — cada subtask < 1 dia (Task 1 baseline 0.25d, Task 2 vectorize table_builder 0.5d, Task 3 vectorize validate 0.5d, Task 4 vectorize dedup com 2 variantes 1d, Task 5 SHA256 0.25d, Task 6 Hypothesis suite 0.5d, Task 7 regression 0.25d, Task 8 reviews 0.25d) |
+| P5 | ✅ | Refs ricos: COUNCIL-02 (causa raiz original 1.4.5), COUNCIL-10 (decisão de criar 1.8), BASELINES.md v1.0.0-synthetic + v1.1.0-mock, TARGETS_V1.md (gap-tracked-by-2.2), INTEGRITY.md INV-2/3/7, agents/perf-engineer.md (Pyro), agents/storage-engineer.md (Sol) |
+| P6 | ✅ | Testing detalhado: Unit (equivalência outputs vectorized vs loop legacy), Property (Hypothesis cobre INV-2/3/7 + classificação valid/invalid + 100 examples mín), Integration (test_parquet_writer.py re-rodado), Bench (AC1 numérico), Regression (suite completa < 10% gap em 6 benchs) |
+| P7 | ✅ | depends_on: [1.4] explícito (canonical ParquetWriter Story 1.4 Done APPROVED Sol) |
+| P8 | ✅ | Owner: perf-engineer (Pyro); Reviewers: storage-engineer (Sol — schema authority), architect (Aria — fronteira), qa (Quinn — regression gate) |
+| P9 | ✅ | Foundation impact alto declarado: vectorização do writer afeta todo Epic 2/3/4 downstream. Constraint forte: NÃO mudar SCHEMA.md, NÃO mudar public_api. Aria + Sol endossaram via COUNCIL-10. |
+| P10 | ✅ | 3d (no teto Morgan, justificado por 4 vectorizações + suite Hypothesis dedicada + 2 variantes dedup com benchmark comparativo) |
+
+**Score: 10/10 → VERDICT: GO**
+
+Observações:
+- Story criada via mini-council Pyro+Sol+Aria em COUNCIL-10 — sign-off arquitetural
+  já presente (Aria *review-design APPROVED em `docs/qa/AUDIT_REPORTS/1.8-design-2026-05-04.md`).
+- Re-baseline contra v1.0.0-real é **constraint declarada** (per COUNCIL-10 §6 — Aria
+  endorsement). Story 1.8-followup encadeia.
+- Constraint "se complexidade > 30%, escalonar Aria" cria gate adicional para evitar
+  refactor rebote — disciplina forte para story de perf optimization.
+- Property tests Hypothesis OBRIGATÓRIOS (Aria recomendação 7 COUNCIL-02) — gate
+  apropriado para refactor de risco. Pyro implementa com defesa em profundidade.
+- Status **`Draft` → `Ready`** em 2026-05-04 (este registro). Pyro desbloqueado
+  para iniciar implementação após Morgan dar GO formal em `*plan` semanal.
+
+---
+
 ## Story 2.1 — Data integrity validators como código (movida para Epic 1)
 
 | P | Status | Nota |
@@ -404,9 +435,11 @@ Observações:
 | 1.7b | **GO** | 10/10 | — |
 | 1.8 | **GO** | 10/10 | — |
 | 2.1 | **GO** | 10/10 | — |
+| 2.2 | **GO** | 10/10 | Validada 2026-05-04 — refactor interno ParquetWriter (vectorize); sign-off Aria via COUNCIL-10; constraint forte "sem mudança fronteira public_api / SCHEMA" |
 
-**Total avaliado:** 17 stories (13 do Epic 1 + 4 da fase 0).
-**Verdict GO:** 17/17 (Story 1.2 re-validada 2026-05-03 após reescrita Nelo).
+**Total avaliado:** 18 stories (13 do Epic 1 + 4 da fase 0 + Story 2.2 Epic 2).
+**Verdict GO:** 18/18 (Story 1.2 re-validada 2026-05-03 após reescrita Nelo;
+Story 2.2 validada 2026-05-04 pós-COUNCIL-10).
 **Verdict NO-GO:** 0.
 
 **Próximo passo:** todas stories validadas. Wave 4 desbloqueada (Story 1.2 ‖ Story 1.4 podem iniciar em paralelo).
