@@ -300,7 +300,16 @@ def test_public_api_read_invalid_exchange_raises(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_public_api_api_version_exposed() -> None:
-    """``__api_version__`` está exposto na fronteira (Story 1.7b: 0.3.0)."""
+    """``__api_version__`` está exposto na fronteira.
+
+    Story 1.7b → "0.3.0"; Story 2.11 → "0.4.0"; Story 4.3 → "1.0.0" (V1.0
+    stable release). Versão exata é validada em
+    ``test_public_api_semver_regression.py`` — aqui apenas verifica
+    presença e formato SemVer.
+    """
     from data_downloader.public_api import __api_version__
 
-    assert __api_version__ == "0.3.0"
+    assert isinstance(__api_version__, str)
+    assert len(__api_version__.split(".")) == 3
+    # V1.0+ a partir de Story 4.3
+    assert int(__api_version__.split(".")[0]) >= 1

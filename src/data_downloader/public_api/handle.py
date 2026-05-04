@@ -70,18 +70,48 @@ _EVENTS_DONE: Final[object] = object()
 
 @dataclass(frozen=True)
 class DownloadProgress:
-    """Evento de progresso emitido pelo worker (M16 — telemetria UI).
+    """Evento imutável de progresso emitido pelo worker (M16 — telemetria UI).
 
-    Atributos:
-        total: Total de chunks planejados (``-1`` se ainda desconhecido).
-        done: Chunks concluídos até este evento.
-        message: Mensagem humana (microcopy ID resolvido por chamador).
-        trades_received: Soma acumulada de trades recebidos.
-        current_contract: Contrato sendo baixado (resolvido) — útil quando
-            ``download(symbol_root)`` resolve automaticamente.
-        is_99_reconnect: ``True`` quando estamos no quirk Q11-99 (download
-            travado em ~99% reconectando). UI deve renderizar amarelo
-            com microcopy ``WAR_99_RECONNECT``.
+    Produzido pelo worker thread em :func:`download` e disponível via
+    iteração sobre :meth:`DownloadHandle.events`. Cada evento captura um
+    snapshot do estado: chunks concluídos, trades acumulados, contrato
+    sendo baixado e flag de reconexão. Frozen por design — eventos nunca
+    são mutados após emissão (R6 — thread-safety por imutabilidade).
+
+    Attributes:
+        total: Total de chunks planejados para o job. ``-1`` quando ainda
+            desconhecido (eventos de "starting" antes do plano consolidar).
+        done: Chunks concluídos até este evento. Estritamente monotônico
+            crescente entre eventos do mesmo job.
+        message: Mensagem humana ou microcopy ID (UPPER_SNAKE_CASE prefixado
+            ``INF_*``/``WAR_*``/``ERR_*``/``SUC_*``). Caller (CLI/Qt UI)
+            resolve via ``data_downloader.ui.microcopy_loader.format_msg``.
+            Esta camada não materializa texto.
+        trades_received: Soma acumulada de trades recebidos da DLL desde
+            o início do job. Inclui trades ainda não persistidos.
+        current_contract: Contrato sendo baixado neste momento (resolvido
+            via catalog). Útil em rollover quando ``download_continuous``
+            (V1.x futura) muda o ``symbol`` no meio. ``None`` em jobs
+            single-contract antes da resolução.
+        is_99_reconnect: ``True`` quando o quirk Q11-99 (download travado em
+            ~99% por DLL reconectando) está ativo. UI deve renderizar
+            amarelo com microcopy ``WAR_99_RECONNECT`` em vez de "stuck".
+
+    Examples:
+        Update de UI a cada evento::
+
+            for event in handle.events():
+                if event.is_99_reconnect:
+                    show_warning("Reconectando à corretora...")
+                else:
+                    pct = (event.done / event.total) if event.total > 0 else 0.0
+                    progress_bar.set(pct)
+
+    Notes:
+        - Events ordering: emitidos em ordem chronological pelo worker.
+          Drenados via fila bloqueante (FIFO).
+        - Telemetria é best-effort: queue full = evento descartado
+          silenciosamente (R21 — observability não bloqueia hot path).
     """
 
     total: int
@@ -96,23 +126,62 @@ class DownloadProgress:
 class DownloadResult:
     """Resultado final imutável de um download.
 
-    Espelha o :class:`JobResult` interno do orchestrator + campos de UI
-    (duration_seconds em segundos float, status estendido com ``cancelled``).
-    Bumpa ``__api_version__`` 0.2.0 → 0.3.0 (minor aditivo) — ADR-007a §3.
+    Produzido pelo worker quando o job termina (qualquer status). Retornado
+    por :meth:`DownloadHandle.result` (exceto quando status=cancelled, que
+    levanta :class:`OperationCancelled` — use :meth:`DownloadHandle.peek_result`
+    para inspecionar sem raise). Espelha :class:`JobResult` interno do
+    orchestrator + campos de UI.
 
-    Atributos:
-        job_id: UUID do job no catalog (correlation_id em logs).
-        symbol: Contrato resolvido (ex. ``"WDOJ26"``).
-        exchange: Bolsa (``"F"`` ou ``"B"``).
-        actual_start: Início real do range coberto.
-        actual_end: Fim real do range coberto.
-        trades_count: Total de trades persistidos.
-        partitions: Tuple imutável de paths Parquet escritos (vazia se
-            cache_hit ou cancelled antes do 1º write).
-        duration_seconds: Tempo total do worker (float, segundos).
-        status: ``DownloadStatus``.
+    Frozen por design (R6 — thread-safety por imutabilidade).
+
+    Attributes:
+        job_id: UUID do job no catalog. Usado como ``correlation_id`` em
+            logs estruturados (structlog) e como chave de inspeção via
+            ``catalog.get_job(job_id)``. Vazio (``""``) se job não chegou
+            a iniciar (e.g. cancelled antes de start).
+        symbol: Contrato resolvido (ex. ``"WDOJ26"``). Diferente do
+            ``symbol`` passado a :func:`download` se este foi raiz
+            (``"WDO"``) e foi resolvido via catalog.
+        exchange: Bolsa onde o contrato foi baixado: ``"F"`` (BMF) ou
+            ``"B"`` (Bovespa).
+        actual_start: Início REAL do range coberto (primeiro trade
+            efetivamente baixado). ``None`` se cache_hit ou cancelled
+            antes do 1º trade. Pode ser > ``start`` passado a
+            :func:`download` quando há gap inicial sem trades.
+        actual_end: Fim REAL do range coberto. ``None`` em mesmas condições
+            que ``actual_start``.
+        trades_count: Total de trades persistidos no Parquet (após dedup).
+            Pode ser ``0`` se cache_hit (range já presente) ou cancelled
+            antes do 1º write.
+        partitions: Tuple imutável (frozen) de :class:`Path` Parquet
+            escritos durante este job. Vazia se cache_hit ou cancelled
+            antes do 1º commit. Caller pode usar para read-back imediato.
+        duration_seconds: Tempo total do worker em segundos (float, com
+            precisão de microsegundos). Inclui startup DLL + chunking +
+            writes. Útil para telemetria e dashboards.
+        status: :data:`DownloadStatus` final. Veja semântica de cada valor
+            no type alias.
         error_message: Mensagem humana se ``status == "failed"``; ``None``
-            caso contrário. Vem do humanize_nl_error quando aplicável.
+            caso contrário. Para erros DLL, formato é
+            ``"NL_<NAME>: <message>"`` (Uma microcopy ID + raw NL message).
+
+    Examples:
+        Tratamento idiomático pós-download::
+
+            result = handle.result()
+            match result.status:
+                case "completed":
+                    logger.info("ok", trades=result.trades_count, duration=result.duration_seconds)
+                case "partial":
+                    logger.warning("partial", trades=result.trades_count)
+                case "cache_hit":
+                    logger.info("cache_hit_skipped")
+                case "failed":
+                    logger.error("failed", message=result.error_message)
+                case "cancelled":
+                    # nota: result() levanta OperationCancelled neste caso —
+                    # use peek_result() se quiser inspecionar sem raise
+                    pass
     """
 
     job_id: str
@@ -319,13 +388,32 @@ class DownloadHandle:
             return self._result
 
     def events(self) -> Iterator[DownloadProgress]:
-        """Iterador sobre eventos de progresso emitidos pelo worker.
+        """Iterador sobre eventos :class:`DownloadProgress` emitidos pelo worker.
 
-        Termina (StopIteration) quando o worker conclui (ou é cancelado).
-        Bloqueante por design — caller controla cadência.
+        Termina (``StopIteration``) quando o worker conclui (qualquer
+        status final, incluindo ``cancelled`` e ``failed``). **Bloqueante
+        por design** — caller controla cadência via velocidade de drain.
 
         Yields:
-            :class:`DownloadProgress` por evento.
+            :class:`DownloadProgress` por evento. Ordem cronológica.
+
+        Examples:
+            UI Qt update via signal::
+
+                for event in handle.events():
+                    self.progress_changed.emit(event)
+                # eventos terminaram → worker pronto:
+                result = handle.result()
+
+        Notes:
+            - Deve ser drenado por UMA SÓ thread (queue semantics — a
+              fila interna é :class:`queue.Queue` que perde ordem se
+              consumido por múltiplos consumers).
+            - Ignorar este iterator é OK: worker continua emitindo (até
+              fila encher → eventos descartados silenciosamente, mas
+              :meth:`result` ainda funciona).
+            - Não levanta exceções: erros do worker viram
+              ``DownloadResult.status='failed'``.
         """
         while True:
             item = self._events_queue.get()

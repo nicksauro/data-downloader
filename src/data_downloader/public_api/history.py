@@ -81,6 +81,37 @@ def read(
 
     Raises:
         ValueError: ``exchange`` fora de ``{"F", "B"}`` ou ``start > end``.
+
+    Examples:
+        Lê 1 dia de WDOJ26 e converte para pandas::
+
+            from datetime import datetime
+            from data_downloader.public_api import read
+
+            table = read(
+                "WDOJ26",
+                start=datetime(2026, 4, 15, 9, 0, 0),
+                end=datetime(2026, 4, 15, 17, 30, 0),
+            )
+            df = table.to_pandas()
+            # df.shape, df["price"].mean() disponíveis para análise
+
+        Lê só colunas específicas (otimização I/O futura)::
+
+            table = read(
+                "WDOJ26",
+                start=...,
+                end=...,
+                columns=["timestamp_ns", "price", "quantity"],
+            )
+
+    Notes:
+        - **BRT naive** (R7): ``start``/``end`` SEM ``tzinfo``. Aware
+          datetimes não suportados (raise via DuckDBReader).
+        - **Sem duplicatas** (R5): writer dedupa por chave canônica
+          ``(timestamp_ns, trade_id, sequence_within_ns)``.
+        - **Range vazio retorna table vazia** (não levanta) — caller
+          checa via ``len(table) == 0`` ou ``table.num_rows``.
     """
     if exchange not in ("F", "B"):
         raise ValueError(f"exchange must be 'F' (BMF) or 'B' (Bovespa); got {exchange!r}")
@@ -161,6 +192,38 @@ def read_continuous(
 
     Raises:
         ValueError: ``exchange`` fora de ``{"F", "B"}`` ou ``start > end``.
+        InvalidContract: Nenhum contrato vigente cobre alguma porção do
+            range para ``symbol_root`` (caller deve adicionar contratos
+            via ``data-downloader contracts add``).
+
+    Examples:
+        Série contínua WDO últimos 6 meses para backtest::
+
+            from datetime import datetime
+            from data_downloader.public_api import read_continuous
+            from data_downloader.storage.catalog import Catalog
+
+            catalog = Catalog(db_path="data/history/catalog.db", data_dir="data")
+            try:
+                table = read_continuous(
+                    "WDO",
+                    start=datetime(2025, 11, 1),
+                    end=datetime(2026, 4, 30, 23, 59, 59),
+                    catalog=catalog,
+                )
+                df = table.to_pandas()
+                rollovers = df[df["_rollover_event"]]
+                # len(rollovers) = número de boundaries de rollover na série
+            finally:
+                catalog.close()
+
+    Notes:
+        - **Sem duplicatas em rollover** (R5): cut-off ``+1ns`` aplicado
+          no boundary de troca de contrato (Story 1.5b property test).
+        - **Coluna `_contract_code`**: indica origem por trade — útil
+          para debugging "qual contrato gerou este preço outlier".
+        - **Coluna `_rollover_event`**: ``True`` no PRIMEIRO trade pós-
+          rollover (boundary marker). UI pode renderizar separador.
     """
     # Deferred import — evita circular import via public_api.__init__.
     from data_downloader.storage.continuous_reader import (
@@ -202,6 +265,29 @@ def vigent_contract(
     Raises:
         InvalidContract: Nenhum contrato vigente em ``on_date``.
         ValueError: ``exchange`` fora de ``{"F", "B"}``.
+
+    Examples:
+        Resolve contrato vigente para download::
+
+            from datetime import date
+            from data_downloader.public_api import vigent_contract, download
+            from data_downloader.storage.catalog import Catalog
+
+            catalog = Catalog(db_path="data/history/catalog.db", data_dir="data")
+            try:
+                code = vigent_contract("WDO", on_date=date(2026, 4, 15), catalog=catalog)
+                # code == "WDOJ26"
+                handle = download(code, start=date(2026, 4, 15), end=date(2026, 4, 15))
+                handle.result()
+            finally:
+                catalog.close()
+
+    Notes:
+        - Equity tickers (e.g. ``"PETR4"``) são tratados como root com 1
+          vigência infinita — retorna o próprio ticker.
+        - Determinístico: mesma combinação ``(symbol_root, on_date,
+          exchange)`` retorna sempre o mesmo ``contract_code`` (regras
+          de vigência são SQL-deterministic).
     """
     # Deferred import — evita circular import via public_api.__init__.
     from data_downloader.orchestrator.contracts import (

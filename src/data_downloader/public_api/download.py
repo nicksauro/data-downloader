@@ -109,11 +109,57 @@ def download(
             responsabilidade do caller.
 
     Returns:
-        :class:`DownloadHandle` — async handle.
+        :class:`DownloadHandle` — async handle. Use ``handle.events()`` para
+        progress, ``handle.result()`` para resultado final, ``handle.cancel()``
+        para abortar (graceful drain).
 
     Raises:
         ValueError: ``exchange`` fora de ``{"F", "B"}`` ou ``end < start``.
             (Validado SÍNCRONAMENTE antes de spawnar worker.)
+
+    Examples:
+        Download síncrono (bloqueia até completar)::
+
+            from datetime import date
+            from data_downloader.public_api import download
+
+            handle = download("WDOJ26", start=date(2026, 4, 1), end=date(2026, 4, 30))
+            result = handle.result()
+            # result.trades_count, result.partitions disponíveis para uso
+
+        Download com progress UI (caller wires logging/UI update)::
+
+            handle = download("WDOJ26", start=..., end=...)
+            for event in handle.events():
+                logger.info("progress", done=event.done, total=event.total, msg=event.message)
+            result = handle.result()
+
+        Cancelamento cooperativo::
+
+            handle = download("WDOJ26", start=..., end=...)
+            # ... em outra thread / após sigint:
+            handle.cancel(timeout=30.0)
+            try:
+                handle.result()
+            except OperationCancelled as exc:
+                preserved = exc.details["trades_preserved"]
+                logger.warning("cancelled", trades_preserved=preserved)
+
+    Notes:
+        - **Async** (R6): retorna handle imediatamente. Worker thread é
+          daemon — se o processo morre, thread morre junto. Para cleanup
+          determinístico, caller usa ``handle.result()`` (join).
+        - **Idempotente** (R5): re-runs com mesmo ``(symbol, start, end,
+          exchange)`` deduplicate via writer canonical key. Re-runs após
+          crash são seguros.
+        - **BRT naive** (R7): ``start``/``end`` são convertidos para
+          datetime naive (00:00:00 e 23:59:59.999999 se ``date`` puro).
+          ``datetime`` aware tem ``tzinfo`` removido silenciosamente.
+        - **Cancel graceful**: ``handle.cancel()`` checa Event entre
+          chunks; drena writer + commita parcial; marca job como
+          ``cancelled`` no catalog. Status final ``"cancelled"``.
+        - Componentes (DLL/catalog/writer) são instanciados DENTRO do
+          worker — owner semantics claras (worker dono do lifecycle).
     """
     # Validação síncrona de inputs (falha cedo antes do thread).
     if exchange not in ("F", "B"):
