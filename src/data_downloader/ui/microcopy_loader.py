@@ -307,6 +307,62 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="label",
         title="Baixar histórico de um símbolo.",
     ),
+    # §17 — migration framework (Story 2.3 — Sol+Uma mini-council)
+    "migration.plan.title": MicrocopyEntry(
+        msg_type="info",
+        title="Plano de migração: {from_v} -> {to_v}",
+        detail="Partições afetadas: {n_partitions} | Bytes (read/write est.): "
+        "{bytes_read}/{bytes_write} | ETA: {eta}s",
+    ),
+    "migration.plan.empty": MicrocopyEntry(
+        msg_type="empty",
+        title="Nenhuma partição afetada",
+        detail="Não há partições registradas em schema_version={from_v}.",
+        action="Verifique versões com: `data-downloader integrity check`.",
+    ),
+    "migration.plan.steps": MicrocopyEntry(
+        msg_type="info",
+        title="Steps a aplicar:",
+        detail="{from_v} -> {to_v}: {description} (breaking={breaking}, rollback={rollback})",
+    ),
+    "migration.confirm": MicrocopyEntry(
+        msg_type="prompt",
+        title="Confirmar execução? Backup .bak será criado por partição. [s/N]",
+    ),
+    "migration.success": MicrocopyEntry(
+        msg_type="success",
+        title="Migração concluída: {from_v} -> {to_v}",
+        detail="{n_migrated} partições migradas, {n_failed} falharam, "
+        "{n_skipped} skipped — duração: {duration}s.",
+        action="Verifique: `data-downloader integrity check`.",
+    ),
+    "migration.dry_run": MicrocopyEntry(
+        msg_type="info",
+        title="DRY-RUN — nenhuma escrita realizada",
+        detail="Use `--execute` (sem `--dry-run`) para aplicar.",
+    ),
+    "migration.error.no_path": MicrocopyEntry(
+        msg_type="error",
+        title="Sem migration disponível",
+        detail="Não há path de {from_v} para {to_v}.",
+        action="Liste migrations: `data-downloader migrate plan --help`.",
+    ),
+    "migration.error.partition_failed": MicrocopyEntry(
+        msg_type="error",
+        title="Falha em partição: {partition}",
+        detail="{error}",
+        action="Backup .bak preservado para inspeção manual.",
+    ),
+    "migration.rollback.success": MicrocopyEntry(
+        msg_type="success",
+        title="Rollback concluído (run_id: {run_id})",
+        detail="{n_rolled_back} partições revertidas a partir de .bak.",
+    ),
+    "migration.cleanup.success": MicrocopyEntry(
+        msg_type="success",
+        title="Cleanup de backups concluído",
+        detail="{n_removed} arquivos .bak removidos (idade > {days} dias).",
+    ),
 }
 
 

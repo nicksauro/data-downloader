@@ -61,7 +61,8 @@ from data_downloader.storage.partition import PartitionKey
 _LOG = logging.getLogger(__name__)
 
 # Versão do catálogo SQLite (independente do schema Parquet).
-CATALOG_VERSION: str = "1.0.0"
+# v1.1.0 (Story 2.3): adiciona `_migration_log` para framework de migrations.
+CATALOG_VERSION: str = "1.1.0"
 
 # PRAGMAs (SCHEMA.md §5 — finding M6, defaults reduzidos).
 _PRAGMAS: tuple[str, ...] = (
@@ -180,10 +181,37 @@ _DDL_V1_0_0: tuple[str, ...] = (
 )
 
 
+# DDL delta v1.0.0 → v1.1.0 — adiciona `_migration_log` (Story 2.3 AC2/AC5).
+# Schema migration framework (parquet) usa esta tabela como checkpoint
+# resumível de execução. Espelhada em
+# `migrations/catalog/v1_0_0_to_v1_1_0.sql` — fonte de verdade aqui é
+# Python (compatibilidade com testes); SQL é referência documental.
+_DDL_V1_1_0_DELTAS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS _migration_log (
+        run_id            TEXT NOT NULL,
+        partition_path    TEXT NOT NULL,
+        from_version      TEXT NOT NULL,
+        to_version        TEXT NOT NULL,
+        status            TEXT NOT NULL CHECK(status IN
+                              ('pending','migrated','rolled_back','failed')),
+        started_at        TIMESTAMP,
+        completed_at      TIMESTAMP,
+        error             TEXT,
+        PRIMARY KEY (run_id, partition_path)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_migration_log_run ON _migration_log(run_id, status)",
+)
+
+
 # Registry de migrações ordenadas por versão.
 # Cada entry = (versao_destino, lista de DDL statements).
-# Para aplicar uma nova versão (ex: 1.1.0), adicione ``("1.1.0", _DDL_V1_1_0_DELTAS)``.
-MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (("1.0.0", _DDL_V1_0_0),)
+# Para aplicar uma nova versão (ex: 1.2.0), adicione ``("1.2.0", _DDL_V1_2_0_DELTAS)``.
+MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("1.0.0", _DDL_V1_0_0),
+    ("1.1.0", _DDL_V1_1_0_DELTAS),
+)
 
 
 # Idade mínima (segundos) para considerar um arquivo .tmp.* órfão (AC7).

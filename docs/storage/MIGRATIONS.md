@@ -251,9 +251,45 @@ Toda migration nova deve trazer 4 testes em `tests/storage/migrations/`:
 
 > Atualizar esta seção a cada nova migration adicionada.
 
-| From    | To      | Tipo       | Rollback | PR / ADR | Estado     |
-|---------|---------|------------|----------|----------|------------|
-| —       | 1.0.0   | (initial)  | —        | Story 0.0| Em uso     |
+| From    | To      | Tipo       | Rollback | PR / ADR  | Estado       |
+|---------|---------|------------|----------|-----------|--------------|
+| —       | 1.0.0   | (initial)  | —        | Story 0.0 | Em uso       |
+| 1.0.0   | 1.1.0   | aditivo    | sim      | Story 2.3 | Disponível   |
+
+### v1.0.0 → v1.1.0 — aditivo (Story 2.3)
+
+- **Mudança:** adiciona campo `liquidity_classification` (uint8 nullable, todos NULL).
+- **Rationale:** placeholder para Epic 4 multi-asset. NULL preserva R4
+  (leitor v1.0.0 lendo arquivo v1.1.0 ignora a coluna nova).
+- **Implementação:**
+  `src/data_downloader/storage/migrations/parquet/v1_0_0_to_v1_1_0.py`
+  (`V100ToV110` — herda `ParquetMigration`).
+- **Catálogo:** DDL adicional `_migration_log` aplicada via
+  `Catalog._apply_migrations` (CATALOG_VERSION=1.1.0).
+- **Testes:** `tests/unit/test_migration_base.py`,
+  `tests/unit/test_migration_runner.py` (round-trip + rollback +
+  resume), `tests/property/test_migration_aditive.py` (Hypothesis 100
+  examples — INV-9), `tests/integration/test_migrate_cli.py` (CLI).
+- **CLI:**
+
+  ```bash
+  data-downloader migrate plan --from 1.0.0 --to 1.1.0
+  data-downloader migrate execute --from 1.0.0 --to 1.1.0 --yes
+  data-downloader migrate rollback --run-id <id>
+  data-downloader migrate cleanup --older-than 30
+  ```
+
+### Como adicionar uma nova migration
+
+1. Crie `src/data_downloader/storage/migrations/parquet/v{X}_{Y}_{Z}_to_v{A}_{B}_{C}.py`
+   herdando `ParquetMigration` (implementar apenas `transform`).
+2. Para mudanças no catálogo, adicione entry em `Catalog.MIGRATIONS`
+   (Python — fonte de verdade) + arquivo `.sql` referência em
+   `migrations/catalog/`.
+3. Adicione testes obrigatórios (round-trip / idempotent / rollback /
+   dry-run + property test) — ver §5 e este §6 como template.
+4. Atualize esta tabela + CHANGELOG `SCHEMA.md` §7.
+5. Sol audit obrigatório antes de merge.
 
 ---
 
