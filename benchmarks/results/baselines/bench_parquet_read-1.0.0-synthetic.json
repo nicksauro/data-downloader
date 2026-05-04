@@ -1,0 +1,243 @@
+{
+  "benchmark": "bench_parquet_read",
+  "version": "1.0.0",
+  "git_sha": "d1fb2e0",
+  "git_dirty": true,
+  "date": "2026-05-04T04:11:08Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "mock-1.0",
+  "config": {
+    "n_trades_total": 1000000,
+    "n_files": 10,
+    "n_runs_per_scenario": 5,
+    "duckdb_threads": 1
+  },
+  "scenarios": [
+    {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "scenario": "full_scan",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 60022568.485750645,
+      "trades_per_sec_min": 59592624.81675268,
+      "p50_ms": 16.6604,
+      "p95_ms": 16.75708,
+      "p99_ms": 16.775896,
+      "n_returned_p50": 1000000,
+      "selectivity_actual_p50": 1.0
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "scenario": "filtered_1pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 26427899.404843707,
+      "trades_per_sec_min": 24797220.727500863,
+      "p50_ms": 37.8388,
+      "p95_ms": 39.85526,
+      "p99_ms": 40.232732,
+      "n_returned_p50": 13621,
+      "selectivity_actual_p50": 0.013621
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "scenario": "filtered_10pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 48168628.735477164,
+      "trades_per_sec_min": 43866960.28285416,
+      "p50_ms": 20.7604,
+      "p95_ms": 22.570919999999997,
+      "p99_ms": 22.751144,
+      "n_returned_p50": 28744,
+      "selectivity_actual_p50": 0.028744
+    },
+    {
+      "row_group_size": 250000,
+      "compression": "snappy",
+      "scenario": "full_scan",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 60581093.8522306,
+      "trades_per_sec_min": 57248849.29812911,
+      "p50_ms": 16.5068,
+      "p95_ms": 17.276500000000002,
+      "p99_ms": 17.429380000000002,
+      "n_returned_p50": 1000000,
+      "selectivity_actual_p50": 1.0
+    },
+    {
+      "row_group_size": 250000,
+      "compression": "snappy",
+      "scenario": "filtered_1pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 25615869.54349959,
+      "trades_per_sec_min": 25050351.205923907,
+      "p50_ms": 39.0383,
+      "p95_ms": 39.89612,
+      "p99_ms": 39.914904,
+      "n_returned_p50": 13517,
+      "selectivity_actual_p50": 0.013517
+    },
+    {
+      "row_group_size": 250000,
+      "compression": "snappy",
+      "scenario": "filtered_10pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 45711360.18723373,
+      "trades_per_sec_min": 43739174.55429781,
+      "p50_ms": 21.8764,
+      "p95_ms": 22.67322,
+      "p99_ms": 22.824884,
+      "n_returned_p50": 30723,
+      "selectivity_actual_p50": 0.030723
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 1,
+      "scenario": "full_scan",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 56549891.14145955,
+      "trades_per_sec_min": 50600373.43075591,
+      "p50_ms": 17.6835,
+      "p95_ms": 19.35154,
+      "p99_ms": 19.680467999999998,
+      "n_returned_p50": 1000000,
+      "selectivity_actual_p50": 1.0
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 1,
+      "scenario": "filtered_1pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 21480108.345666498,
+      "trades_per_sec_min": 18509949.09763998,
+      "p50_ms": 46.5547,
+      "p95_ms": 52.5646,
+      "p99_ms": 53.73292,
+      "n_returned_p50": 13970,
+      "selectivity_actual_p50": 0.01397
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 1,
+      "scenario": "filtered_10pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 41093413.54767658,
+      "trades_per_sec_min": 40834993.95642089,
+      "p50_ms": 24.3348,
+      "p95_ms": 24.459300000000002,
+      "p99_ms": 24.4829,
+      "n_returned_p50": 31755,
+      "selectivity_actual_p50": 0.031755
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "none",
+      "scenario": "full_scan",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 61381325.34557686,
+      "trades_per_sec_min": 61265875.51999411,
+      "p50_ms": 16.2916,
+      "p95_ms": 16.31836,
+      "p99_ms": 16.321512,
+      "n_returned_p50": 1000000,
+      "selectivity_actual_p50": 1.0
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "none",
+      "scenario": "filtered_1pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 35781119.73436097,
+      "trades_per_sec_min": 34693672.22112359,
+      "p50_ms": 27.9477,
+      "p95_ms": 28.782519999999998,
+      "p99_ms": 28.815464,
+      "n_returned_p50": 13464,
+      "selectivity_actual_p50": 0.013464
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "none",
+      "scenario": "filtered_10pct",
+      "n_files": 10,
+      "n_trades_per_file": 100000,
+      "n_runs": 5,
+      "trades_per_sec_p50": 59374666.01750365,
+      "trades_per_sec_min": 55481887.93768275,
+      "p50_ms": 16.8422,
+      "p95_ms": 17.857680000000002,
+      "p99_ms": 17.990656,
+      "n_returned_p50": 30672,
+      "selectivity_actual_p50": 0.030672
+    }
+  ],
+  "summary": {
+    "full_scan_winner": {
+      "row_group_size": 100000,
+      "compression": "none",
+      "trades_per_sec_p50": 61381325.34557686
+    },
+    "filtered_1pct_winner": {
+      "row_group_size": 100000,
+      "compression": "none",
+      "trades_per_sec_p50": 35781119.73436097,
+      "selectivity_actual": 0.013464
+    },
+    "vs_target_full_scan": {
+      "target_value": 1000000,
+      "measured_value": 61381325.34557686,
+      "delta_pct": 6038.132534557686,
+      "verdict": "PASS"
+    },
+    "vs_target_filtered_1pct": {
+      "target_value": 5000000,
+      "measured_value": 35781119.73436097,
+      "delta_pct": 615.6223946872194,
+      "verdict": "PASS"
+    },
+    "verdict": "PASS"
+  },
+  "notes": "Single-thread DuckDB; 1 warmup query descartado por scenario."
+}

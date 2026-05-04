@@ -5,51 +5,53 @@ Objetivo:
     WDO (mini dólar) na B3, para benchmarks rodarem SEM ProfitDLL real.
 
 Características modeladas:
-    - Preço: random walk em torno de 5000 (preço típico WDO), volatility ~0.1%
-      por tick, com clusters de movimento (não passeio aleatório puro).
-    - Quantidade: distribuição skewed, mediana ~5, p99 ~100, outliers até 500.
-    - Timestamp: monotonic increasing com jitter (rate ~1kHz médio, picos
-      ~4kHz na abertura).
-    - trade_id: monotonic increasing (mas com gaps simulando reconnect).
-    - sequence_within_ns: 0-N para trades no mesmo ns (modela H2 finding —
-      múltiplos trades no mesmo timestamp_ns).
+    - Preço: random walk em torno de 5000 (preço típico WDO), variação ±2%
+      total em janelas curtas, com tick mínimo 0.5.
+    - Quantidade: distribuição long-tail; maioria 1-5, p99 ~50, máx 100.
+    - Timestamp: monotônico crescente com jitter (média ~1ms entre trades).
+    - trade_id: monotônico crescente; 10% NULL (Quirk Q01-V — força chave longa).
+    - 1% trades duplicados intencionalmente (testa dedup).
+    - sequence_within_ns: 0 inicial — writer/dedup atribui via
+      assign_sequence_within_ns. Aqui yieldamos 0 default.
 
-Schema produzido (alinhar com Sol Story 0.0):
-    {
-        "trade_id": int | None,         # None se Quirk DLL trade_id NULL
-        "timestamp_ns": int,            # ns since epoch
-        "sequence_within_ns": int,      # 0..N para mesma ts
-        "symbol": str,
-        "price": float,
-        "quantity": int,
-        "side": str | None,             # "buy"|"sell"|None
-        "ingestion_ts_ns": int,         # ns when generated (mock = same as ts)
-        "chunk_id": str | None,         # populado pelo writer
-        "dll_version": str,             # mock value
-    }
+Schema produzido: dict-shape compatível com
+``data_downloader.storage.schema.TradeRecord`` (17 campos) — ver
+:func:`pyarrow_schema()`.
 
 Uso:
     from benchmarks.fixtures.synthetic_trades import generate
-    for trade in generate(n=10_000_000, symbol="WDOJ26"):
-        process(trade)
+    trades = list(generate(1_000_000, symbol="WDOJ26"))
+    # ou em lote vectorizado:
+    table = generate_batch_arrow(1_000_000, symbol="WDOJ26")
 """
 
 from __future__ import annotations
 
-import random  # noqa: F401  # used by commented-out skeleton body
-import time  # noqa: F401  # used by commented-out skeleton body
-from typing import TYPE_CHECKING, Iterator
+import random
+import time
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
 
-# TODO: alinhar schema final com Sol Story 0.0 — campos podem mudar
+# Defaults realistas para WDO (mini dólar B3).
 DEFAULT_PRICE_BASE = 5000.0
-DEFAULT_VOLATILITY_PER_TICK = 0.0001  # 0.01% por tick (random walk)
-DEFAULT_MEAN_RATE_HZ = 1000.0
-DEFAULT_PEAK_RATE_HZ = 4000.0
+DEFAULT_TICK_SIZE = 0.5  # WDO tick mínimo
+DEFAULT_VOLATILITY_PER_TICK = 0.0001  # 0.01% por trade (random walk)
+DEFAULT_INTERVAL_NS = 1_000_000  # 1ms médio entre trades
 MOCK_DLL_VERSION = "4.0.0.30-mock"
+
+# Default Quirk Q01-V (callback V1 — sem trade_id).
+DEFAULT_NULL_TRADE_ID_PCT = 0.10
+# Default duplicates intencional para validar dedup.
+DEFAULT_DUPLICATE_PCT = 0.01
+
+
+def _round_to_tick(price: float, tick: float = DEFAULT_TICK_SIZE) -> float:
+    """Arredonda preço para múltiplo do tick (WDO = 0.5)."""
+    return round(price / tick) * tick
 
 
 def generate(
@@ -59,93 +61,130 @@ def generate(
     *,
     seed: int | None = 42,
     price_base: float = DEFAULT_PRICE_BASE,
-    rate_profile: str = "constant",  # "constant" | "realistic_b3"
-    null_trade_id_pct: float = 0.0,  # simular Quirk DLL
-    multi_trade_per_ns_pct: float = 0.05,  # 5% dos trades partilham ns
+    null_trade_id_pct: float = DEFAULT_NULL_TRADE_ID_PCT,
+    duplicate_pct: float = DEFAULT_DUPLICATE_PCT,
+    exchange: str = "F",
 ) -> Iterator[dict]:
     """Gera N trades sintéticos.
 
     Args:
         n: número de trades a gerar.
-        symbol: ticker.
-        start_ts_ns: timestamp inicial (default: now).
-        seed: random seed (None = não-determinístico).
+        symbol: ticker (default WDOJ26).
+        start_ts_ns: timestamp inicial (default: ``time.time_ns()``).
+        seed: random seed (None = não-determinístico). Default 42 para
+            reproducibility.
         price_base: preço inicial.
-        rate_profile: "constant" (taxa fixa) ou "realistic_b3" (rampup
-            abertura, plateau, queda fechamento).
-        null_trade_id_pct: 0.0-1.0 — fração com trade_id=None (testa Quirk).
-        multi_trade_per_ns_pct: fração de trades com sequence_within_ns > 0.
+        null_trade_id_pct: 0.0-1.0 — fração com ``trade_id=None``
+            (Quirk Q01-V força chave canônica longa).
+        duplicate_pct: 0.0-1.0 — fração de trades duplicados (mesma chave
+            canônica) intercalados na sequência.
+        exchange: "F" (BMF, default) ou "B" (Bovespa).
 
     Yields:
-        dict no schema canônico (ver docstring do módulo).
+        ``dict`` no schema canônico v1.0.0 (17 campos compatíveis com
+        ``TradeRecord``).
     """
-    # TODO: implementar quando schema final estiver definido por Sol
-    # rng = random.Random(seed)
-    # if start_ts_ns is None:
-    #     start_ts_ns = time.time_ns()
-    #
-    # current_price = price_base
-    # current_ts = start_ts_ns
-    # last_ts = current_ts
-    # seq_in_ns = 0
-    #
-    # for trade_id_seq in range(n):
-    #     # Random walk price
-    #     change_pct = rng.gauss(0, DEFAULT_VOLATILITY_PER_TICK)
-    #     current_price *= (1 + change_pct)
-    #     # Round para tick mínimo 0.5 (WDO)
-    #     current_price = round(current_price * 2) / 2
-    #
-    #     # Quantity skewed
-    #     quantity = max(1, int(rng.lognormvariate(1.5, 1.0)))
-    #     quantity = min(quantity, 500)
-    #
-    #     # Timestamp jitter
-    #     if rate_profile == "constant":
-    #         interval_ns = int(1e9 / DEFAULT_MEAN_RATE_HZ)
-    #     else:  # realistic_b3
-    #         # rate varia conforme posição em janela 9h-17h
-    #         pos = trade_id_seq / n
-    #         if pos < 0.05:  # rampup
-    #             rate = DEFAULT_MEAN_RATE_HZ + (DEFAULT_PEAK_RATE_HZ - DEFAULT_MEAN_RATE_HZ) * (pos / 0.05)
-    #         elif pos > 0.95:  # queda fechamento
-    #             rate = DEFAULT_MEAN_RATE_HZ * (1 - (pos - 0.95) / 0.05)
-    #         else:
-    #             rate = DEFAULT_MEAN_RATE_HZ
-    #         interval_ns = int(1e9 / max(rate, 1))
-    #
-    #     # Multi trade per ns
-    #     if rng.random() < multi_trade_per_ns_pct:
-    #         current_ts = last_ts  # mesmo ns
-    #         seq_in_ns += 1
-    #     else:
-    #         current_ts += interval_ns
-    #         last_ts = current_ts
-    #         seq_in_ns = 0
-    #
-    #     trade_id = None if rng.random() < null_trade_id_pct else trade_id_seq
-    #     side = rng.choice(["buy", "sell"]) if rng.random() > 0.05 else None
-    #
-    #     yield {
-    #         "trade_id": trade_id,
-    #         "timestamp_ns": current_ts,
-    #         "sequence_within_ns": seq_in_ns,
-    #         "symbol": symbol,
-    #         "price": current_price,
-    #         "quantity": quantity,
-    #         "side": side,
-    #         "ingestion_ts_ns": current_ts,
-    #         "chunk_id": None,
-    #         "dll_version": MOCK_DLL_VERSION,
-    #     }
-    raise NotImplementedError(
-        "synthetic_trades.generate aguarda confirmação de schema final "
-        "por Sol (Story 0.0). Esqueleto pronto, código comentado acima."
-    )
+    rng = random.Random(seed)
+    if start_ts_ns is None:
+        start_ts_ns = time.time_ns()
+
+    current_price = price_base
+    current_ts = start_ts_ns
+    trade_id_seq = 0
+    yielded = 0
+
+    # Buffer pequeno para reinjetar duplicatas (~1%).
+    recent: list[dict] = []
+    recent_window = 100
+
+    while yielded < n:
+        # Decidir se emite duplicata (re-yield de um trade recente).
+        if recent and rng.random() < duplicate_pct:
+            dup = dict(recent[rng.randrange(len(recent))])
+            yield dup
+            yielded += 1
+            continue
+
+        # Random walk price (volatility ~0.01% por tick).
+        change_pct = rng.gauss(0, DEFAULT_VOLATILITY_PER_TICK)
+        current_price *= 1 + change_pct
+        # Clamp ±2% do base para não derivar muito longe.
+        upper = price_base * 1.02
+        lower = price_base * 0.98
+        current_price = max(lower, min(upper, current_price))
+        price_rounded = _round_to_tick(current_price)
+
+        # Quantidade long-tail: maioria 1-5, p99 ~50, máx 100.
+        # Usar exponencial deslocada — barato e bem-comportado.
+        qty_raw = int(rng.expovariate(1 / 4.0)) + 1  # média ~5
+        quantity = min(qty_raw, 100)
+
+        # Timestamp jitter: ~1ms ± 50%.
+        interval = max(1, int(DEFAULT_INTERVAL_NS * (0.5 + rng.random())))
+        current_ts += interval
+
+        trade_id: int | None
+        if rng.random() < null_trade_id_pct:
+            trade_id = None  # Quirk Q01-V — chave longa
+        else:
+            trade_id_seq += 1
+            trade_id = trade_id_seq
+
+        # side: 0/1/None (tristate). Schema usa uint8 nullable.
+        side_roll = rng.random()
+        if side_roll < 0.475:
+            side: int | None = 0  # buy
+        elif side_roll < 0.95:
+            side = 1  # sell
+        else:
+            side = None  # cross / desconhecido
+
+        trade = {
+            "symbol": symbol,
+            "exchange": exchange,
+            "timestamp_ns": current_ts,
+            "timestamp_str": str(current_ts),  # placeholder formatável
+            "price": price_rounded,
+            "quantity": quantity,
+            "trade_id": trade_id,
+            "trade_type": 1,  # regular
+            "buy_agent_id": rng.randint(1, 999) if rng.random() > 0.1 else None,
+            "sell_agent_id": rng.randint(1, 999) if rng.random() > 0.1 else None,
+            "flags": 0,
+            "source_callback": "history",
+            "side": side,
+            "ingestion_ts_ns": current_ts,
+            "chunk_id": None,
+            "dll_version": MOCK_DLL_VERSION,
+            "sequence_within_ns": 0,  # writer/dedup atribui
+        }
+
+        # Atualiza buffer de duplicatas (sliding window).
+        if len(recent) >= recent_window:
+            recent.pop(0)
+        recent.append(trade)
+
+        yield trade
+        yielded += 1
 
 
-def generate_batch_arrow(n: int, **kwargs) -> "pa.Table":  # type: ignore
-    """Versão batch otimizada que retorna pa.Table direto (sem pylist intermediário)."""
-    # TODO: implementar versão vectorized via numpy + pa.array para
-    # benchmarks que precisam de 10M+ trades sem overhead de pyloop
-    raise NotImplementedError("Versão arrow-batch — implementar quando necessária")
+def generate_batch_arrow(n: int, **kwargs) -> pa.Table:  # type: ignore
+    """Versão batch — gera lista, converte para ``pa.Table``.
+
+    Implementação simples (sem vetorização numpy): para benchmarks de
+    write o overhead da geração não é o foco; ParquetWriter recebe
+    ``list[TradeRecord]`` mesmo. Esta função é conveniência para
+    benchmarks de read que precisam de ``pa.Table`` direto.
+    """
+    import pyarrow as pa
+
+    from data_downloader.storage.schema import pyarrow_schema
+
+    trades = list(generate(n, **kwargs))
+    schema = pyarrow_schema()
+    columns: dict[str, list[object]] = {f.name: [] for f in schema}
+    for trade in trades:
+        for f in schema:
+            columns[f.name].append(trade.get(f.name))
+    arrays = [pa.array(columns[f.name], type=f.type) for f in schema]
+    return pa.Table.from_arrays(arrays, schema=schema)

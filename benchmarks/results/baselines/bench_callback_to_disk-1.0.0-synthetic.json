@@ -1,0 +1,174 @@
+{
+  "benchmark": "bench_callback_to_disk",
+  "version": "1.0.0",
+  "git_sha": "d1fb2e0",
+  "git_dirty": true,
+  "date": "2026-05-04T04:13:51Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "mock-1.0",
+  "config": {
+    "n_callbacks_per_scenario": 50000,
+    "sample_rate": 0.05,
+    "writer_batch_max": 10000,
+    "writer_batch_max_wait_ms": 50.0,
+    "queue_put_timeout_s": 0.01
+  },
+  "scenarios": [
+    {
+      "writer_pause_ms": 0,
+      "queue_size": 10000,
+      "rate_per_sec": 100000,
+      "drain_strategy": "stream",
+      "n_callbacks": 50000,
+      "n_drops": 108,
+      "drop_pct": 0.216,
+      "n_visible": 2495,
+      "p50_ms": 2325.4049,
+      "p95_ms": 4443.34823,
+      "p99_ms": 4449.195304,
+      "max_ms": 4450.8459,
+      "queue_max_depth": 10000,
+      "actual_rate_per_sec": 13700.658960594028,
+      "write_errors_count": 0,
+      "back_pressure_observed": "drop"
+    },
+    {
+      "writer_pause_ms": 100,
+      "queue_size": 10000,
+      "rate_per_sec": 100000,
+      "drain_strategy": "stream",
+      "n_callbacks": 50000,
+      "n_drops": 87,
+      "drop_pct": 0.174,
+      "n_visible": 2495,
+      "p50_ms": 2580.6436,
+      "p95_ms": 4744.64648,
+      "p99_ms": 4750.400938,
+      "max_ms": 4751.8342,
+      "queue_max_depth": 10000,
+      "actual_rate_per_sec": 15074.967208931328,
+      "write_errors_count": 0,
+      "back_pressure_observed": "drop"
+    },
+    {
+      "writer_pause_ms": 500,
+      "queue_size": 10000,
+      "rate_per_sec": 100000,
+      "drain_strategy": "stream",
+      "n_callbacks": 50000,
+      "n_drops": 199,
+      "drop_pct": 0.398,
+      "n_visible": 2490,
+      "p50_ms": 3571.4883,
+      "p95_ms": 5728.110049999999,
+      "p99_ms": 5734.276236000001,
+      "max_ms": 5735.7564,
+      "queue_max_depth": 10000,
+      "actual_rate_per_sec": 9432.306093575344,
+      "write_errors_count": 0,
+      "back_pressure_observed": "drop"
+    },
+    {
+      "writer_pause_ms": 2000,
+      "queue_size": 10000,
+      "rate_per_sec": 100000,
+      "drain_strategy": "stream",
+      "n_callbacks": 50000,
+      "n_drops": 585,
+      "drop_pct": 1.17,
+      "n_visible": 2471,
+      "p50_ms": 6618.4551,
+      "p95_ms": 8636.72485,
+      "p99_ms": 8643.73322,
+      "max_ms": 8645.1711,
+      "queue_max_depth": 10000,
+      "actual_rate_per_sec": 4401.328599135187,
+      "write_errors_count": 0,
+      "back_pressure_observed": "drop"
+    },
+    {
+      "writer_pause_ms": 500,
+      "queue_size": 100000,
+      "rate_per_sec": 100000,
+      "drain_strategy": "stream",
+      "n_callbacks": 50000,
+      "n_drops": 0,
+      "drop_pct": 0.0,
+      "n_visible": 2500,
+      "p50_ms": 4782.1077000000005,
+      "p95_ms": 10151.807095,
+      "p99_ms": 10171.799101,
+      "max_ms": 10176.7972,
+      "queue_max_depth": 48841,
+      "actual_rate_per_sec": 99999.7000009,
+      "write_errors_count": 0,
+      "back_pressure_observed": "block_or_absorb"
+    },
+    {
+      "writer_pause_ms": 0,
+      "queue_size": 100000,
+      "rate_per_sec": 100000,
+      "drain_strategy": "chunk",
+      "n_callbacks": 50000,
+      "n_drops": 0,
+      "drop_pct": 0.0,
+      "n_visible": 2500,
+      "p50_ms": 1999.5414,
+      "p95_ms": 2224.4514,
+      "p99_ms": 2244.443499,
+      "max_ms": 2249.4384,
+      "queue_max_depth": 3205,
+      "actual_rate_per_sec": 98907.03767092124,
+      "write_errors_count": 0,
+      "back_pressure_observed": "block_or_absorb"
+    }
+  ],
+  "summary": {
+    "primary_baseline (chunk-mode)": {
+      "drain_strategy": "chunk",
+      "writer_pause_ms": 0,
+      "queue_size": 100000,
+      "rate_per_sec": 100000,
+      "p99_ms": 2244.443499,
+      "p50_ms": 1999.5414,
+      "drops": 0
+    },
+    "stream_baseline (informational)": {
+      "writer_pause_ms": 0,
+      "queue_size": 10000,
+      "p99_ms": 4449.195304,
+      "p50_ms": 2325.4049,
+      "note": "stream-mode mostra overhead do merge per-batch (ParquetWriter rewrite full)"
+    },
+    "vs_target_p99 (chunk-mode primary)": {
+      "target_value_ms": 100.0,
+      "measured_value_ms": 2244.443499,
+      "delta_pct": 2144.443499
+    },
+    "verdict": "FAIL",
+    "h4_hypothesis": {
+      "scenario": "writer_pause_2000ms",
+      "drops": 585,
+      "drops_pct": 1.17,
+      "verdict": "H4 CONFIRMED \u2014 drops inevit\u00e1veis sem queue gigante / back-pressure precisa de alarme",
+      "back_pressure_behavior": "drop"
+    }
+  },
+  "notes": "Latency callback->disk via mock pipeline (queue + writer thread + ParquetWriter). queue.put timeout=10ms simula drop se DLL fosse non-blocking; produ\u00e7\u00e3o (ProfitDLL) bloqueia no thread DLL (Q-FLOW Nelo). Scenario writer_pause_ms=2000 valida finding H4."
+}
