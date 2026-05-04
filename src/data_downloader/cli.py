@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import sys
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -60,6 +61,74 @@ app = typer.Typer(
     help="Downloader de histórico de ativos via ProfitDLL.",
     no_args_is_help=True,
 )
+
+
+# Story 2.9 — flags globais de logging (ADR-010 / AC5).
+_LOG_LEVEL_OPT = typer.Option(
+    None,
+    "--log-level",
+    help=(
+        "Nível de log: DEBUG | INFO | WARNING | ERROR | CRITICAL. "
+        "Default: INFO. Override via env DATA_DOWNLOADER_LOG_LEVEL."
+    ),
+)
+_LOG_FORMAT_OPT = typer.Option(
+    None,
+    "--log-format",
+    help=(
+        "Formato de log: 'json' (production) ou 'console' (dev — colorido). "
+        "Default: heurística TTY (console se interactive, json se pipe). "
+        "Override via env DATA_DOWNLOADER_LOG_FORMAT."
+    ),
+)
+
+
+def _resolve_default_format() -> str:
+    """Heurística TTY-aware (ADR-010 / Story 2.9 AC5):
+
+    - ``stderr`` é TTY (interactive shell) → ``"console"`` (humano-readable).
+    - ``stderr`` não-TTY (pipe, redirect, CI) → ``"json"`` (machine-parseable).
+    """
+    try:
+        if sys.stderr.isatty():
+            return "console"
+    except (AttributeError, ValueError):  # pragma: no cover defensive
+        pass
+    return "json"
+
+
+@app.callback()  # type: ignore[misc]
+def _global_callback(
+    log_level: str | None = _LOG_LEVEL_OPT,
+    log_format: str | None = _LOG_FORMAT_OPT,
+) -> None:
+    """Boot global do CLI — configura logging UMA vez (Story 2.9 / ADR-010).
+
+    Resolve precedência (CLI flag > env var > default):
+
+    - ``--log-level`` > ``DATA_DOWNLOADER_LOG_LEVEL`` > ``"INFO"``
+    - ``--log-format`` > ``DATA_DOWNLOADER_LOG_FORMAT`` > heurística TTY
+    """
+    from data_downloader.observability.logging_config import (
+        configure_logging,
+        resolve_format_from_env,
+        resolve_level_from_env,
+    )
+
+    level = (log_level or resolve_level_from_env("INFO")).upper()
+    fmt: str
+    if log_format is not None:
+        fmt = log_format.lower()
+    else:
+        # env var default → resolve com fallback p/ heurística TTY.
+        fmt_env = os.environ.get("DATA_DOWNLOADER_LOG_FORMAT")
+        if fmt_env:
+            fmt = resolve_format_from_env(_resolve_default_format())  # type: ignore[arg-type]
+        else:
+            fmt = _resolve_default_format()
+
+    json_output = fmt == "json"
+    configure_logging(level=level, json_output=json_output, redact=True)
 
 
 # =====================================================================

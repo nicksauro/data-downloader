@@ -37,6 +37,7 @@ LEIS RESPEITADAS:
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 import uuid
@@ -230,6 +231,11 @@ class _IngestorThread(threading.Thread):
         self._dll_version = dll_version
         self._stop_event = stop_event
 
+        # Story 2.9 — captura snapshot de contextvars do thread chamador
+        # (orchestrator) para propagar logs com job_id/correlation_id/symbol.
+        # Aplica via ctx.run no início de run().
+        self._parent_ctx = contextvars.copy_context()
+
         # Saídas (acessadas após join via .trades / .last_packet_seen):
         self.trades: list[TradeRecord] = []
         self.last_packet_seen: bool = False
@@ -244,7 +250,16 @@ class _IngestorThread(threading.Thread):
         self._struct: TConnectorTrade = TConnectorTrade(Version=0)
 
     def run(self) -> None:
-        """Drena trades até stop_event setado."""
+        """Drena trades até stop_event setado.
+
+        Story 2.9 — executa o loop dentro do snapshot de contextvars
+        capturado no ``__init__`` (parent thread). Garante que logs aqui
+        carreguem ``job_id``/``correlation_id``/``symbol`` do orchestrator.
+        """
+        self._parent_ctx.run(self._run_inner)
+
+    def _run_inner(self) -> None:
+        """Loop interno (com contextvars do parent já aplicados)."""
         while not self._stop_event.is_set():
             try:
                 handle, flags = self._trade_queue.get(timeout=_INGESTOR_GET_TIMEOUT)
@@ -349,6 +364,10 @@ class _ProgressMonitor(threading.Thread):
         self._chunk_id = chunk_id
         self._stop_event = stop_event
 
+        # Story 2.9 — captura snapshot de contextvars do parent thread
+        # (orchestrator) p/ propagar logs com job_id/correlation_id/symbol.
+        self._parent_ctx = contextvars.copy_context()
+
         # Saídas:
         self.progress_history: list[int] = []
         self.completed: bool = False  # True se progresso=100 chegou
@@ -356,7 +375,15 @@ class _ProgressMonitor(threading.Thread):
         self.reconnect_99_detected: bool = False
 
     def run(self) -> None:
-        """Drena progresso até stop_event setado."""
+        """Drena progresso até stop_event setado.
+
+        Story 2.9 — executa o loop dentro do snapshot de contextvars
+        capturado no ``__init__`` (parent thread).
+        """
+        self._parent_ctx.run(self._run_inner)
+
+    def _run_inner(self) -> None:
+        """Loop interno (com contextvars do parent já aplicados)."""
         while not self._stop_event.is_set():
             try:
                 p = self._progress_queue.get(timeout=_PROGRESS_GET_TIMEOUT)
@@ -455,6 +482,15 @@ def download_chunk(
 
     chunk_id = uuid.uuid4().hex
     resolved_dll_version = dll_version if dll_version is not None else dll.dll_version
+
+    # Story 2.9 — bind chunk_id REAL (uuid) em contextvars (sobrescreve o
+    # placeholder range-based bound pelo orchestrator). Logs do download +
+    # ingestor + monitor + DLL agora carregam ``chunk_id`` automático.
+    # Best-effort: se logging_config não foi inicializado, structlog ignora
+    # bind silenciosamente (degradação benigna).
+    from data_downloader.observability.logging_config import bind_context
+
+    bind_context(chunk_id=chunk_id)
 
     trade_queue: Queue[tuple[int, int]] = Queue(maxsize=TRADE_QUEUE_MAXSIZE)
     progress_queue: Queue[int] = Queue(maxsize=PROGRESS_QUEUE_MAXSIZE)

@@ -42,6 +42,19 @@ LEIS RESPEITADAS:
 from __future__ import annotations
 
 from data_downloader.contracts.observability import MetricsEmitter, NullMetricsEmitter
+from data_downloader.observability.logging_config import (
+    REDACTED_VALUE,
+    SENSITIVE_KEY_SUBSTRINGS,
+    bind_context,
+    bound_context,
+    clear_context,
+    configure_logging,
+    copy_context_to_thread,
+    get_logger,
+    redact_secrets,
+    setup_logging,
+    unbind_context,
+)
 from data_downloader.observability.prometheus_exporter import (
     CANONICAL_COUNTERS,
     CANONICAL_GAUGES,
@@ -58,8 +71,19 @@ __all__ = [
     "CANONICAL_HISTOGRAMS",
     "DEFAULT_METRICS_PORT",
     "METRIC_PREFIX",
+    "REDACTED_VALUE",
+    "SENSITIVE_KEY_SUBSTRINGS",
     "MetricsEmitter",
     "MultiTargetEmitter",
     "NullMetricsEmitter",
     "PrometheusExporter",
+    "bind_context",
+    "bound_context",
+    "clear_context",
+    "configure_logging",
+    "copy_context_to_thread",
+    "get_logger",
+    "redact_secrets",
+    "setup_logging",
+    "unbind_context",
 ]

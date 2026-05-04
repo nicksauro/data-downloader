@@ -1,11 +1,39 @@
 # ADR-010 — Logging strategy: structlog + contextvars + redaction + hot-path rules
 
-**Status:** accepted
+**Status:** accepted (implemented in Story 2.9)
 **Aceito em:** 2026-05-03 — Aria
+**Implementado em:** 2026-05-04 — Story 2.9 (Dex+Aria+Pyro — COUNCIL-19)
 **Data:** 2026-05-03
+**Última emenda:** 2026-05-04 — implementação V1 + COUNCIL-19 sign-off
 **Autor:** 🏛️ Aria
 **Consultados:** ⚡ Pyro, 🧪 Quinn, 🎨 Uma
 **Related:** ADR-005 (thread model), ADR-013 (observability), MANIFEST §R21 (nova lei), PLAN_REVIEW H22, L2
+
+---
+
+## Implementation Status (Amendment 2026-05-04)
+
+V1 implementado em `src/data_downloader/observability/logging_config.py`
+(Story 2.9 / COUNCIL-19). Componentes entregues:
+
+- `configure_logging(level, json_output, redact)` + alias `setup_logging(level, format, redact_secrets)`.
+- `bind_context()` / `clear_context()` / `unbind_context()` / `bound_context()` CM.
+- `redact_secrets()` recursivo (substring match case-insensitive + allow-list).
+- `copy_context_to_thread()` para propagation cross-thread (ADR-005).
+- CLI flag `--log-level` / `--log-format` global (`@app.callback`) + env vars
+  `DATA_DOWNLOADER_LOG_LEVEL` / `DATA_DOWNLOADER_LOG_FORMAT`.
+- Heurística TTY default (console se interactive, json se pipe).
+- Integrado em: `orchestrator.run` (job_id/correlation_id/symbol/exchange),
+  `_process_chunk` (chunk_id placeholder), `download_chunk` (chunk_id real
+  uuid), `IngestorThread`/`ProgressMonitor` (cross-thread propagation),
+  `public_api/download.py` worker thread.
+
+Testes: 21 setup unit + 53 redaction unit (incl. 100-example Hypothesis
+property) + 4 cross-thread integration = 78 testes PASS.
+
+**Item deferred V2:** `redact_userprofile` processor (mascara
+`%USERPROFILE%` em tracebacks) — não-crítico V1; Quinn escala se aparecer
+em audit forense.
 
 ---
 
@@ -312,7 +340,7 @@ CLI flags:
 - [ ] Pyro bench: `bench_callback_to_disk` com R21 respeitado: <100ms p99 (Story 2.2)
 - [ ] Pyro bench: comparar com R21 violado (logging per-trade) — esperado: 5-10x pior, prova R21
 - [ ] Quinn checklist em `*qa-gate`: nenhum `log.*` em corpo de `Trade*Callback` (Story 1.2 + 1.3)
-- [ ] Quinn property test: redaction processor remove valores de chaves sensíveis (Story 1.7b)
+- [x] Quinn property test: redaction processor remove valores de chaves sensíveis (Story 2.9 / COUNCIL-19 — `tests/unit/test_logging_redaction.py::test_property_redaction_complete_for_sensitive_keys` 100 examples)
 - [ ] Aria amenda MANIFEST.md adicionando R21 (após Morgan validar)
 - [ ] Uma valida console renderer em dev (Story 1.7b)
-- [ ] Documentação em `docs/dev/LOGGING.md` (Dex)
+- [ ] Documentação em `docs/dev/LOGGING.md` (Dex — Story 2.9 Task 7.1 deferred — TODO)
