@@ -27,7 +27,7 @@ compatível para mocking — execução real só ocorre em Win64).
 from __future__ import annotations
 
 import sys
-from ctypes import Structure, c_size_t, c_ubyte, c_ushort
+from ctypes import POINTER, Structure, c_long, c_size_t, c_ubyte, c_ushort
 from typing import ClassVar, Final
 
 # ``WINFUNCTYPE`` (stdcall) só existe em Windows. Em outras plataformas
@@ -111,19 +111,44 @@ CONN_TYPE_NAME: Final[dict[int, str]] = {
 # ``Set*Callback`` posteriores (NÃO durante init).
 #
 # Signatures derivadas de profitTypes.py (Nelogica) e manual §3.2.
+#
+# CORREÇÃO Q-DRIFT-05 (Story 1.7b-followup, Nelo): o exemplo oficial
+# Nelogica (``profitdll/Exemplo Python/main.py``) passa ``TAssetID``
+# (struct de 3 fields) POR VALOR no PRIMEIRO arg dos callbacks V1
+# (newDailyCallback L346, tinyBookCallBack L336, progressCallBack L243,
+# tradeCallback live L324). EXPANDIR o struct em ``(c_wchar_p, c_wchar_p,
+# c_int)`` desalinha o stack frame stdcall e causa silent corruption na
+# ConnectorThread (smoke 2026-05-04 root-cause). Por isso ``class TAssetID``
+# é declarada AQUI, antes das signatures, para que cada signature use
+# exatamente o tipo struct conforme o exemplo.
 # =====================================================================
 
-# State callback — manual §3.2 L2738 — assinatura EXATA.
+
+class TAssetID(Structure):
+    """V1 asset identifier — mirror de ``profitTypes.py`` L293-296.
+
+    Usado em signatures de callbacks V1 (assetList*, daily, tinyBook,
+    progress, trade live, offerBook, etc.). Passado POR VALOR — JAMAIS
+    expandir em ``(c_wchar_p, c_wchar_p, c_int)`` no WINFUNCTYPE
+    (Q-DRIFT-05).
+    """
+
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("ticker", c_wchar_p),
+        ("bolsa", c_wchar_p),
+        ("feed", c_int),
+    ]
+
+
+# State callback — manual §3.2 L2738 — assinatura EXATA (sem TAssetID).
 TStateCallback = WINFUNCTYPE(None, c_int, c_int)
 """``(nConnStateType: int, nResult: int) -> None`` — manual §3.2 L2738."""
 
-# Trade callback (V1) — TNewTradeCallback fields desempacotados.
-# Manual §3.2 L2740, L3331. Assinatura compatível com slot 5 do init.
+# Trade callback (V1) — slot 5 do init. Mirror de TNewTradeCallback
+# (profitTypes.py L325-335). TAssetID por valor no 1º arg (Q-DRIFT-05).
 TTradeCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,  # ticker (TAssetID.ticker)
-    c_wchar_p,  # bolsa (TAssetID.bolsa)
-    c_int,  # feed (TAssetID.feed)
+    TAssetID,  # assetId (passado por valor — NÃO expandir)
     c_wchar_p,  # date
     c_uint,  # tradeNumber
     c_double,  # price
@@ -135,105 +160,99 @@ TTradeCallback = WINFUNCTYPE(
     c_int,  # bIsEdit
 )
 
-# Daily callback — TNewDailyCallback (19 fields). Assinatura defensiva
-# usando varargs-like (ctypes não tem; expandimos os campos básicos).
-# Para Noop, signature exata não importa (no-op consome qualquer args via
-# *args), mas WINFUNCTYPE precisa de tipo concreto.
+# Daily callback — slot 6 do init. Mirror de @WINFUNCTYPE em main.py L346
+# (TAssetID + 18 args primitivos).
 TDailyCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,
-    c_wchar_p,
-    c_int,
-    c_wchar_p,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_double,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
+    TAssetID,  # assetID (passado por valor)
+    c_wchar_p,  # date
+    c_double,  # sOpen
+    c_double,  # sHigh
+    c_double,  # sLow
+    c_double,  # sClose
+    c_double,  # sVol
+    c_double,  # sAjuste
+    c_double,  # sMaxLimit
+    c_double,  # sMinLimit
+    c_double,  # sVolBuyer
+    c_double,  # sVolSeller
+    c_int,  # nQtd
+    c_int,  # nNegocios
+    c_int,  # nContratosOpen
+    c_int,  # nQtdBuyer
+    c_int,  # nQtdSeller
+    c_int,  # nNegBuyer
+    c_int,  # nNegSeller
 )
 
 # Price book callback (DEPRECIADA pelo manual mas mantida no slot do init).
+# Mirror de TPriceBookCallback (profitTypes.py L391-400) com TAssetID por valor.
 TPriceBookCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,
-    c_wchar_p,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_double,
+    TAssetID,
+    c_int,  # nAction
+    c_int,  # nPosition
+    c_int,  # side
+    c_int,  # nQtd
+    c_int,  # ncount
+    c_double,  # sprice
+    POINTER(c_int),  # pArraySell
+    POINTER(c_int),  # pArrayBuy
 )
 
-# Offer book callback — TOfferBookCallback (16 fields). Slot do init.
+# Offer book callback — slot 8 do init. Mirror de TOfferBookCallback
+# (profitTypes.py L404-420) com TAssetID por valor.
 TOfferBookCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,
-    c_wchar_p,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int64,
-    c_double,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
-    c_wchar_p,
+    TAssetID,
+    c_int,  # nAction
+    c_int,  # nPosition
+    c_int,  # side
+    c_int,  # nQtd
+    c_int,  # nAgent
+    c_longlong,  # nOfferID
+    c_double,  # sPrice
+    c_int,  # bHasPrice
+    c_int,  # bHasQtd
+    c_int,  # bHasDate
+    c_int,  # bHasOfferId
+    c_int,  # bHasAgent
+    c_wchar_p,  # date
+    POINTER(c_int),  # pArraySell
+    POINTER(c_int),  # pArrayBuy
 )
 
-# History trade callback (V1) — mesma signature do TNewTradeCallback sem
-# ``bIsEdit`` (manual §3.2 L3002, L3730).
+# History trade callback (V1) — slot 9 do init. Mesma signature de
+# TNewTradeCallback sem ``bIsEdit`` (TNewHistoryCallback L365-374).
 THistoryTradeCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,
-    c_wchar_p,
-    c_int,
-    c_wchar_p,
-    c_uint,
-    c_double,
-    c_double,
-    c_int,
-    c_int,
-    c_int,
-    c_int,
+    TAssetID,
+    c_wchar_p,  # date
+    c_uint,  # tradeNumber
+    c_double,  # price
+    c_double,  # vol
+    c_int,  # qtd
+    c_int,  # buyAgent
+    c_int,  # sellAgent
+    c_int,  # tradeType
 )
 
-# Progress callback — manual §3.2 L2739, L3750.
+# Progress callback — slot 10 do init. main.py L243
+# ``@WINFUNCTYPE(None, TAssetID, c_int)``.
 TProgressCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,  # ticker
-    c_wchar_p,  # bolsa
-    c_int,  # feed
+    TAssetID,
     c_int,  # nProgress (1..100)
 )
 
-# Tiny book callback — TNewTinyBookCallBack (manual §3.2 L3022, L3759).
+# Tiny book callback — slot 11 do init. main.py L336
+# ``@WINFUNCTYPE(None, TAssetID, c_double, c_int, c_int)``.
 TTinyBookCallback = WINFUNCTYPE(
     None,
-    c_wchar_p,
-    c_wchar_p,
-    c_int,
-    c_double,
-    c_int,
-    c_int,
+    TAssetID,
+    c_double,  # price
+    c_int,  # qtd
+    c_int,  # side
 )
 
 # Lista canônica das signatures dos 7 slots NÃO-state (em ordem do
@@ -255,6 +274,10 @@ de credencial (key, user, password) = 11 args totais conforme manual §3.1.
 Story 1.2 substitui CADA UM destes slots por NoopCallback (Q11-E / AC2 —
 ``None`` PROIBIDO). Stories futuras (1.3) usam ``Set*Callback`` posteriores
 para registrar handlers reais sem re-init (Q08-E — DLL não-idempotente).
+
+Story 1.7b-followup (Q-DRIFT-05): TODAS as 7 signatures usam ``TAssetID``
+por valor no 1º arg, alinhado ao exemplo oficial Nelogica (main.py
+L243/L324/L336/L346/L391/L435).
 """
 
 
@@ -365,4 +388,204 @@ Callback recebe handle opaco (``c_size_t``) que DEVE ser passado a
 ``TranslateTrade`` em IngestorThread (FORA do callback — R3). Callback faz
 APENAS ``queue.put_nowait((handle, flags))`` — ver
 ``callbacks.make_history_trade_callback_v2``.
+"""
+
+
+# =====================================================================
+# Story 1.7b-followup — 14 default callback signatures (alinhamento Nelogica)
+# =====================================================================
+# Exemplo oficial (``profitdll/Exemplo Python/main.py`` L745-761) chama 14
+# ``Set*Callback`` ANTES de aguardar conexão. Inicialização sem esses
+# registros pode deixar slots NULL e impedir o handshake (smoke 2026-05-04
+# refutou hipóteses ProfitChart e MARKET_WAITING — restou alinhamento ao
+# exemplo como caminho seguro). Cada signature é derivada literalmente do
+# decorator ``@WINFUNCTYPE(...)`` da função correspondente em main.py.
+#
+# Todos os tipos são WINFUNCTYPE — em Linux/Mac shim para CFUNCTYPE
+# (definido no topo deste módulo).
+# =====================================================================
+
+
+class TConnectorOrderIdentifier(Structure):
+    """Order identifier — mirror de ``profitTypes.py`` L115-120.
+
+    Usado em ``orderCallback`` (main.py L465-467). Passado por valor.
+    """
+
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("Version", c_ubyte),
+        ("LocalOrderID", c_int64),
+        ("ClOrderID", c_wchar_p),
+    ]
+
+
+class TConnectorAccountIdentifier(Structure):
+    """Account identifier — mirror de ``profitTypes.py`` L68-75.
+
+    Usado em ``orderHistoryCallback``, ``BrokerSubAccountListChangedCallback``
+    e ``getAssetsPositionCallback`` (main.py L487, L538, L507). Passado por
+    valor.
+    """
+
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("Version", c_ubyte),
+        ("BrokerID", c_int),
+        ("AccountID", c_wchar_p),
+        ("SubAccountID", c_wchar_p),
+        ("Reserved", c_int64),
+    ]
+
+
+# main.py L440 — assetListCallback signature.
+TAssetListCallback = WINFUNCTYPE(None, TAssetID, c_wchar_p)
+
+# main.py L445 — adjustHistoryCallbackV2 signature (9 args após TAssetID).
+TAdjustHistoryCallbackV2 = WINFUNCTYPE(
+    None,
+    TAssetID,
+    c_double,  # value
+    c_wchar_p,  # strType
+    c_wchar_p,  # strObserv
+    c_wchar_p,  # dtAjuste
+    c_wchar_p,  # dtDelib
+    c_wchar_p,  # dtPagamento
+    c_uint,  # nFlags
+    c_double,  # dMult
+)
+
+# main.py L450 — assetListInfoCallback signature (12 args).
+TAssetListInfoCallback = WINFUNCTYPE(
+    None,
+    TAssetID,
+    c_wchar_p,  # strName
+    c_wchar_p,  # strDescription
+    c_int,  # iMinOrdQtd
+    c_int,  # iMaxOrdQtd
+    c_int,  # iLote
+    c_int,  # iSecurityType
+    c_int,  # iSecuritySubType
+    c_double,  # dMinPriceInc
+    c_double,  # dContractMult
+    c_wchar_p,  # strValidDate
+    c_wchar_p,  # strISIN
+)
+
+# main.py L457 — assetListInfoCallbackV2 signature (15 args; +setor/subSetor/segmento).
+TAssetListInfoCallbackV2 = WINFUNCTYPE(
+    None,
+    TAssetID,
+    c_wchar_p,  # strName
+    c_wchar_p,  # strDescription
+    c_int,  # iMinOrdQtd
+    c_int,  # iMaxOrdQtd
+    c_int,  # iLote
+    c_int,  # iSecurityType
+    c_int,  # iSecuritySubType
+    c_double,  # dMinPriceInc
+    c_double,  # dContractMult
+    c_wchar_p,  # strValidDate
+    c_wchar_p,  # strISIN
+    c_wchar_p,  # strSetor
+    c_wchar_p,  # strSubSetor
+    c_wchar_p,  # strSegmento
+)
+
+# main.py L391 — offerBookCallbackV2 signature (16 args; pArraySell/Buy = POINTER(c_ubyte)).
+TOfferBookCallbackV2 = WINFUNCTYPE(
+    None,
+    TAssetID,
+    c_int,  # nAction
+    c_int,  # nPosition
+    c_int,  # Side
+    c_int,  # nQtd
+    c_int,  # nAgent
+    c_longlong,  # nOfferID
+    c_double,  # sPrice
+    c_int,  # bHasPrice
+    c_int,  # bHasQtd
+    c_int,  # bHasDate
+    c_int,  # bHasOfferID
+    c_int,  # bHasAgent
+    c_wchar_p,  # date
+    POINTER(c_ubyte),  # pArraySell
+    POINTER(c_ubyte),  # pArrayBuy
+)
+
+# main.py L465 — orderCallback signature.
+TOrderCallback = WINFUNCTYPE(None, TConnectorOrderIdentifier)
+
+# main.py L487 — orderHistoryCallback signature.
+TOrderHistoryCallback = WINFUNCTYPE(None, TConnectorAccountIdentifier)
+
+# main.py L491 — invalidAssetCallback signature.
+TInvalidTickerCallback = WINFUNCTYPE(None, TConnectorAssetIdentifier)
+
+# main.py L324 — tradeCallback live (V2) signature — mesma de THistoryTradeCallbackV2.
+TTradeCallbackV2 = THistoryTradeCallbackV2
+
+# main.py L507 — getAssetsPositionCallback signature.
+TAssetPositionListCallback = WINFUNCTYPE(
+    None,
+    TConnectorAccountIdentifier,
+    TConnectorAssetIdentifier,
+    c_long,  # LastEvent
+)
+
+# main.py L523 — BrokerAccountListChangedCallback signature.
+TBrokerAccountListChangedCallback = WINFUNCTYPE(None, c_int, c_int)
+
+# main.py L538 — BrokerSubAccountListChangedCallback signature.
+TBrokerSubAccountListChangedCallback = WINFUNCTYPE(None, TConnectorAccountIdentifier)
+
+# main.py L253 — priceDepthCallback signature.
+TPriceDepthCallback = WINFUNCTYPE(
+    None,
+    TConnectorAssetIdentifier,
+    c_ubyte,  # side
+    c_int,  # position
+    c_ubyte,  # updateType
+)
+
+# main.py L316 — tradingMessageResultCallback signature
+# (POINTER(TConnectorTradingMessageResult)). Para evitar definir struct nova
+# (não usada além deste registro), usamos POINTER(c_ubyte) — ctypes aceita
+# qualquer ponteiro como POINTER(c_ubyte) para callback que apenas ignora
+# o conteúdo (Noop). Nota: alinhamento de chamada (stdcall) depende
+# apenas da quantidade/tamanho de args — POINTER é POINTER, conteúdo
+# não-importa. TODO se algum dia formos consumir esse callback de verdade:
+# definir TConnectorTradingMessageResult Structure (profitTypes.py L312-323).
+TTradingMessageResultCallback = WINFUNCTYPE(None, POINTER(c_ubyte))
+
+
+# Lista canônica das 14 funções `Set*Callback` chamadas pelo exemplo oficial
+# ANTES de wait_login (main.py L745-761). Cada entrada é
+# ``(method_name, funtype)`` — wrapper itera para registrar Noop em todos.
+# Ordem replicada literalmente do exemplo.
+DEFAULT_CALLBACK_REGISTRATIONS: Final[tuple[tuple[str, type], ...]] = (
+    ("SetAssetListCallback", TAssetListCallback),
+    ("SetAdjustHistoryCallbackV2", TAdjustHistoryCallbackV2),
+    ("SetAssetListInfoCallback", TAssetListInfoCallback),
+    ("SetAssetListInfoCallbackV2", TAssetListInfoCallbackV2),
+    ("SetOfferBookCallbackV2", TOfferBookCallbackV2),
+    ("SetOrderCallback", TOrderCallback),
+    ("SetOrderHistoryCallback", TOrderHistoryCallback),
+    ("SetInvalidTickerCallback", TInvalidTickerCallback),
+    ("SetTradeCallbackV2", TTradeCallbackV2),
+    ("SetAssetPositionListCallback", TAssetPositionListCallback),
+    ("SetBrokerAccountListChangedCallback", TBrokerAccountListChangedCallback),
+    ("SetBrokerSubAccountListChangedCallback", TBrokerSubAccountListChangedCallback),
+    ("SetPriceDepthCallback", TPriceDepthCallback),
+    ("SetTradingMessageResultCallback", TTradingMessageResultCallback),
+)
+"""14 ``Set*Callback`` registrations alinhadas ao exemplo oficial Nelogica.
+
+Fonte canônica: ``profitdll/Exemplo Python/main.py`` L745-761 (chamados
+ANTES de ``wait_login``). Cada signature derivada literalmente do
+``@WINFUNCTYPE(...)`` da função correspondente em main.py.
+
+Wrapper itera esta lista em ``ProfitDLL._register_default_callbacks``,
+registrando NoopCallback em cada slot — todos respeitam R3 (callback faz
+no-op explícito). Para registrar handler real depois, caller chama o
+método ``Set*`` próprio (ex.: ``set_history_trade_callback_v2``) que
+substitui o Noop.
 """

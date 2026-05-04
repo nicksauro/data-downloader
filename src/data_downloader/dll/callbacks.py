@@ -231,14 +231,20 @@ def make_progress_callback(progress_queue: Queue[int]) -> Any:
     - Detecte quirk Q02-E (99% reconectando) sem confundir com travamento.
     - Registre ``progress_history`` em ``ChunkResult``.
 
+    Signature (Q-DRIFT-05 — Story 1.7b-followup): ``TProgressCallback`` agora
+    usa ``(TAssetID, c_int)`` — TAssetID por valor, alinhado ao exemplo
+    oficial Nelogica (main.py L243). Anteriormente expandia em
+    ``(c_wchar_p, c_wchar_p, c_int, c_int)`` o que desalinhava o stack
+    frame stdcall.
+
     Args:
         progress_queue: ``Queue[int]`` consumida por ``download_chunk``
             ProgressMonitor thread. Cada item = inteiro 1..100.
 
     Returns:
         Objeto ``WINFUNCTYPE``-wrapped (signature
-        ``TProgressCallback`` da DLL — V1 signature: ``(ticker, bolsa,
-        feed, progress)``). JÁ está em ``_cb_refs``.
+        ``TProgressCallback`` da DLL — ``(TAssetID, c_int)``). JÁ está em
+        ``_cb_refs``.
 
     Examples:
         >>> from queue import Queue
@@ -248,12 +254,12 @@ def make_progress_callback(progress_queue: Queue[int]) -> Any:
     """
 
     def _progress_cb(
-        _ticker: object,
-        _bolsa: object,
-        _feed: int,
+        _asset_id: object,
         progress: int,
     ) -> None:
         # CRITICAL — apenas put_nowait. Não adicionar NADA aqui (R3/INV-1).
+        # ``_asset_id`` é TAssetID struct passado por valor — descartado
+        # (IngestorThread já conhece o ticker via contexto do chunk).
         with contextlib.suppress(Full):
             progress_queue.put_nowait(int(progress))
 

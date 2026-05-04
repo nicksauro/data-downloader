@@ -255,18 +255,24 @@ def test_wait_market_connected_returns_true_with_canonical_sequence() -> None:
 
 
 @pytest.mark.unit
-def test_wait_market_connected_accepts_market_waiting_result_2() -> None:
-    """Q-AMB-01 / AC5 — result=2 (MARKET_WAITING) também retorna True."""
+def test_wait_market_connected_does_not_accept_market_waiting_result_2() -> None:
+    """Story 1.7b-followup — apenas result=4 conta como connected.
+
+    Refuta Q-AMB-01: ``MARKET_WAITING=2`` é estado intermediário, NÃO
+    "connected" (alinhado a manual + exemplo Nelogica main.py L223).
+    Sem ``(MARKET_DATA, 4)`` na fila, ``wait`` deve atingir timeout.
+    """
     dll = ProfitDLL(dll_path=Path("/fake.dll"))
     _seed_state_queue(
         dll,
         [
             (LOGIN, 0),
             (ROTEAMENTO, 2),
-            (MARKET_DATA, MARKET_WAITING),  # =2
+            (MARKET_DATA, MARKET_WAITING),  # =2 — NÃO basta para connected
         ],
     )
-    assert dll.wait_market_connected(timeout=5) is True
+    # Drena 3 estados, nenhum é result=4 → timeout retorna False.
+    assert dll.wait_market_connected(timeout=1) is False
 
 
 @pytest.mark.unit

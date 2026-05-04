@@ -283,17 +283,21 @@ def test_make_progress_callback_returns_callable_and_appends() -> None:
 def test_progress_callback_only_calls_put_nowait_inv1() -> None:
     """AC5/INV-1 — Progress callback faz APENAS put_nowait(int).
 
-    Signature da DLL: ``(ticker, bolsa, feed, progress)``. Apenas progress
-    é enfileirado; demais args descartados.
+    Signature da DLL (Q-DRIFT-05): ``(TAssetID, c_int)``. Apenas progress
+    é enfileirado; ``TAssetID`` é descartado pelo IngestorThread já
+    conhecer o ticker via contexto.
     """
+    from data_downloader.dll.types import TAssetID
+
     mock_queue = MagicMock(spec=Queue)
     mock_dll = MagicMock()
 
     cb = make_progress_callback(mock_queue)
 
-    cb("WDOJ26", "F", 0, 50)
-    cb("WDOJ26", "F", 0, 99)
-    cb("WDOJ26", "F", 0, 100)
+    asset = TAssetID(ticker="WDOJ26", bolsa="F", feed=0)
+    cb(asset, 50)
+    cb(asset, 99)
+    cb(asset, 100)
 
     assert mock_queue.put_nowait.call_count == 3
     assert mock_queue.put_nowait.call_args_list[0].args == (50,)
@@ -309,11 +313,14 @@ def test_progress_callback_only_calls_put_nowait_inv1() -> None:
 @pytest.mark.unit
 def test_progress_callback_swallows_full_silently() -> None:
     """Progress callback engole queue.Full sem lançar."""
+    from data_downloader.dll.types import TAssetID
+
     q: Queue[int] = Queue(maxsize=1)
     cb = make_progress_callback(q)
 
-    cb("WDOJ26", "F", 0, 1)  # OK
-    cb("WDOJ26", "F", 0, 2)  # raises Full → engolido
+    asset = TAssetID(ticker="WDOJ26", bolsa="F", feed=0)
+    cb(asset, 1)  # OK
+    cb(asset, 2)  # raises Full → engolido
 
     assert q.qsize() == 1
 

@@ -49,9 +49,9 @@ from data_downloader.dll.callbacks import make_noop_callback, make_state_callbac
 from data_downloader.dll.errors import DLLInitError, decode_nl_error
 from data_downloader.dll.types import (
     CONN_TYPE_NAME,
+    DEFAULT_CALLBACK_REGISTRATIONS,
     MARKET_CONNECTED,
     MARKET_DATA,
-    MARKET_WAITING,
     NOOP_SLOT_SIGNATURES,
     STATE_CODE_ALIAS,
 )
@@ -374,6 +374,87 @@ class ProfitDLL:
 
         log.info("dll.initialized", code=ret)
 
+        # Story 1.7b-followup: registrar 14 callbacks default ANTES de
+        # ``wait_market_connected`` — alinha exatamente com exemplo oficial
+        # Nelogica (main.py L745-761). Inicialização sem esses registros pode
+        # deixar slots NULL e impedir o handshake (smoke 2026-05-04 refutou
+        # hipóteses ProfitChart e MARKET_WAITING — alinhamento ao exemplo é
+        # o caminho seguro).
+        self._register_default_callbacks()
+
+    # =================================================================
+    # Default callbacks registration (Story 1.7b-followup)
+    # =================================================================
+
+    def _register_default_callbacks(self) -> None:
+        """Registra 14 callbacks default com NoopCallback (alinha exemplo Nelogica).
+
+        Itera ``DEFAULT_CALLBACK_REGISTRATIONS`` (definição em ``types.py``
+        — ordem replicada literalmente de ``profitdll/Exemplo Python/main.py``
+        L745-761), criando um NoopCallback para cada signature e chamando o
+        ``Set*Callback`` correspondente.
+
+        Cada callback é construído via :func:`callbacks.make_noop_callback`,
+        que append em ``_cb_refs`` (anti-GC, Q07-V) e respeita R3 (no-op
+        explícito, sem I/O / sem chamada à DLL).
+
+        Tolerância a versões: se a DLL real não expor alguma das funções
+        ``Set*Callback`` (drift entre versões), apenas loga warning e
+        continua. Isso preserva o init em DLLs antigas; downloads reais
+        usam ``set_history_trade_callback_v2`` etc. que substituem o Noop.
+
+        Raises:
+            DLLInitError: Se DLL não inicializada (chamado antes de
+                ``initialize_market_only`` — guarda interna).
+        """
+        if self._dll is None:
+            # Defensivo — chamado SOMENTE no fim de ``initialize_market_only``,
+            # mas guarda contra reentrância acidental.
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "_register_default_callbacks chamado sem DLL inicializada.",
+            )
+        registered: list[str] = []
+        skipped: list[str] = []
+        for method_name, funtype in DEFAULT_CALLBACK_REGISTRATIONS:
+            cb = make_noop_callback(funtype)
+            # Cinto-e-suspensório: ref adicional na lista da instância (anti-GC
+            # local — factory já appendou no global ``_cb_refs``).
+            self._cb_refs.append(cb)
+            try:
+                setter = getattr(self._dll, method_name)
+            except AttributeError:
+                # DLL não exporta — toleramos (versão antiga / drift). Não
+                # bloqueia init; downloads reais ainda funcionam.
+                skipped.append(method_name)
+                log.warning(
+                    "dll.default_callback_unsupported",
+                    method=method_name,
+                    detail="ProfitDLL não exporta esta função; pulando registro Noop.",
+                )
+                continue
+            try:
+                setter(cb)
+            except OSError as exc:
+                # Chamada falhou em runtime (raro; pode indicar DLL corrompida).
+                # Loga e continua — não bloqueia init.
+                skipped.append(method_name)
+                log.warning(
+                    "dll.default_callback_setter_failed",
+                    method=method_name,
+                    error=str(exc),
+                )
+                continue
+            registered.append(method_name)
+        log.info(
+            "dll.default_callbacks_registered",
+            count_registered=len(registered),
+            count_skipped=len(skipped),
+            registered=registered,
+            skipped=skipped,
+        )
+
     # =================================================================
     # Wait for connected (AC5)
     # =================================================================
@@ -382,31 +463,33 @@ class ProfitDLL:
         """Aguarda sequência canônica de connection states até MARKET_DATA conectado.
 
         Drena ``self._state_queue`` em loop (na thread do caller — NÃO no
-        callback, R3) e retorna ``True`` quando recebe ``(MARKET_DATA, 2)``
-        OU ``(MARKET_DATA, 4)`` — Q-AMB-01 / AC5: aceita ambos
-        ``MARKET_WAITING=2`` e ``MARKET_CONNECTED=4`` como "market data
-        conectado". Loga cada estado recebido com alias resolvido.
+        callback, R3) e retorna ``True`` SOMENTE quando recebe
+        ``(MARKET_DATA, MARKET_CONNECTED=4)`` — alinhado ao exemplo oficial
+        Nelogica (``profitdll/Exemplo Python/main.py`` L223) e ao manual.
+        ``MARKET_WAITING=2`` é apenas um estado intermediário possível
+        (Q02-E hipótese empírica), logado mas NÃO tratado como
+        "connected" (refutado por smoke 2026-05-04 + manual + exemplo).
 
-        Sequência típica (manual §3.2 L3317-3329):
+        Sequência típica (manual §3.2 L3317-3329 + main.py L196-241):
             (0, 0) → LOGIN connected
             (1, 2) → ROTEAMENTO connected
-            (2, X) → MARKET_DATA conectado (X ∈ {2, 4})
+            (2, 2) → MARKET_WAITING (intermediário, NÃO connected)
+            (2, 4) → MARKET_CONNECTED (autoritativo — retorna True)
             (3, 0) → MARKET_LOGIN OK
 
-        Default 300s (5 min) — Q-DRIFT-02 (smoke 2026-05-04): MARKET_DATA pode
-        levar >60s para conectar em ambientes com handshake lento ou quando
-        ProfitChart precisa estar rodando concorrentemente. Progress logado a
-        cada 30s para que o usuário veja que não está travado.
+        Default 300s (5 min): em ambientes reais o handshake pode levar
+        >60s. Heartbeat a cada 30s mostra que o wait está vivo.
 
         Args:
             timeout: Timeout total em segundos (default 300 — 5 min).
 
         Returns:
-            ``True`` se MARKET_DATA conectou dentro do timeout; ``False``
-            em timeout (sem raise — caller decide se aborta ou re-tenta).
+            ``True`` se MARKET_DATA conectou (result=4) dentro do timeout;
+            ``False`` em timeout (sem raise — caller decide se aborta ou
+            re-tenta).
         """
-        # Q-DRIFT-02: heartbeat a cada 30s para visibilidade quando o handshake
-        # é lento (silêncio total >60s confunde operador — parece travado).
+        # Heartbeat a cada 30s para visibilidade quando o handshake é lento
+        # (silêncio total >60s confunde operador — parece travado).
         heartbeat_interval = 30.0
         start = time.monotonic()
         deadline = start + timeout
@@ -415,32 +498,26 @@ class ProfitDLL:
             now = time.monotonic()
             remaining = deadline - now
             if remaining <= 0:
-                # Q-DRIFT-02: log inclui hint para o operador. Se este timeout
-                # disparar com frequência, ProfitChart provavelmente precisa
-                # estar aberto e logado com a mesma chave (pré-requisito V1.0
-                # documentado em INSTALL.md §2.4 e QUIRKS.md Q-DRIFT-02).
+                # Mensagem genérica sem hipóteses refutadas (ProfitChart como
+                # pré-requisito foi refutado pelo usuário — manual + exemplo
+                # confirmam que init standalone basta). Microcopy ID alinha
+                # com docs/ux/MICROCOPY_CATALOG.md ERR_DLL_MARKET_TIMEOUT.
                 log.warning(
                     "dll.connected_timeout",
                     timeout=timeout,
-                    quirk="Q-DRIFT-02",
                     microcopy_id="ERR_DLL_MARKET_TIMEOUT",
-                    hint=(
-                        "MARKET_DATA não conectou — abra ProfitChart e faça "
-                        "login com a mesma chave de licença Nelogica."
-                    ),
                 )
                 return False
 
             # Heartbeat — emite log se passou ``heartbeat_interval`` sem state
             # novo. NÃO consome do queue; apenas informa que ainda estamos
-            # vivos esperando (Q-DRIFT-02: handshake pode levar minutos).
+            # vivos esperando.
             if now >= next_heartbeat:
                 elapsed = int(now - start)
                 log.info(
                     "dll.waiting_market_data",
                     elapsed_seconds=elapsed,
                     timeout=timeout,
-                    quirk="Q-DRIFT-02",
                 )
                 next_heartbeat = now + heartbeat_interval
 
@@ -461,11 +538,10 @@ class ProfitDLL:
                 alias=alias,
             )
 
-            # AC5 / Q-AMB-01: aceita result ∈ {2, 4} para conn_type=2.
-            if conn_type == MARKET_DATA and result in (
-                MARKET_WAITING,
-                MARKET_CONNECTED,
-            ):
+            # Critério "connected" = (conn_type == MARKET_DATA AND result == MARKET_CONNECTED=4),
+            # alinhado ao exemplo oficial Nelogica (main.py L223) e ao manual.
+            # ``MARKET_WAITING=2`` é apenas estado intermediário, NÃO connected.
+            if conn_type == MARKET_DATA and result == MARKET_CONNECTED:
                 log.info("dll.connected", alias=alias)
                 return True
 
