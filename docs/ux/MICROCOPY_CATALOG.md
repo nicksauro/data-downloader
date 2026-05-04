@@ -331,6 +331,133 @@ default; aparece com `--verbose` ou no log expansível da progress bar.
 
 ---
 
+## 17b. IDs Adicionados — Epic 3 Prep (COUNCIL-12, 2026-05-03)
+
+> Novos IDs para a UI Qt (Epic 3). Sem texto inventado em runtime — Felix
+> consome estes IDs ao implementar telas. Uma é a autoridade exclusiva.
+
+### 17b.1 — DownloadScreen (Story 3.2)
+
+| ID | Tipo | Contexto | pt-BR |
+|----|------|----------|-------|
+| `LBL_CURRENT_CONTRACT` | label | DownloadScreen — label do contrato atual durante download (M16) | Contrato atual |
+| `LBL_DOWNLOAD_SCREEN_TITLE` | label | DownloadScreen — título principal | Baixar Histórico |
+| `LBL_DOWNLOAD_SCREEN_SUBTITLE` | label | DownloadScreen — subtítulo normal | Selecione, configure e clique em baixar |
+| `LBL_DOWNLOAD_SCREEN_SUBTITLE_DOWNLOADING` | label | DownloadScreen — subtítulo durante download | Baixando {symbol} |
+| `LBL_PERIOD_RANGE_DISPLAY` | label | DownloadScreen — display formatado do range (template) | {start} → {end} (~{duration}) |
+| `LBL_ESTIMATE_RANGE` | label | DownloadScreen — estimativa em banda honesta (template) | Estimativa: {min}-{max} minutos |
+| `LBL_ESTIMATE_UNAVAILABLE` | label | DownloadScreen — quando Pyro baseline indisponível | Estimativa indisponível — depende do volume |
+| `LBL_ADVANCED_DRAWER` | label | DownloadScreen — header do drawer Avançado | Avançado (chunk size, retry, pasta) |
+| `LBL_NAVIGATION_HINT` | label | DownloadScreen — hint de não-bloqueio | UI não bloqueia — pode navegar para Catálogo enquanto baixa |
+| `LBL_FOOTER_SHORTCUTS` | label | DownloadScreen — footer com atalhos | Atalhos: Ctrl+D iniciar  •  Ctrl+R repetir último  •  Ctrl+/ todos |
+| `PLH_SYMBOL_SUGGESTED_HINT` | placeholder | DownloadScreen — hint quando sugerido | {symbol} sugerido — contrato vigente do {asset} |
+| `TIP_CANCEL_DURING_RECONNECT` | tooltip | DownloadScreen — tooltip do CANCELAR durante quirk 99% | Reconnect normal — cancelar agora pode forçar re-baixar tudo. |
+
+### 17b.2 — CatalogScreen (Story 3.3)
+
+| ID | Tipo | Contexto | pt-BR |
+|----|------|----------|-------|
+| `LBL_CATALOG_SCREEN_TITLE` | label | CatalogScreen — título principal | Catálogo |
+| `LBL_CATALOG_LOADING` | label | CatalogScreen — texto durante loading | Carregando catálogo... |
+| `LBL_CATALOG_FOOTER_SUMMARY` | label | CatalogScreen — footer summary (template) | {n_partitions} partições  •  {total_mb} MB total |
+| `LBL_CATALOG_FOOTER_DRIFT` | label | CatalogScreen — footer drift indicator (template) | ⚠ {n_drift} com drift |
+| `LBL_FILTERS_DROPDOWN` | label | CatalogScreen — dropdown de filtros | Filtros |
+| `LBL_DETAIL_PANEL_HEADER` | label | CatalogScreen — header do detail panel (template) | Detalhes: {symbol} (selecionado) |
+| `LBL_DETAIL_FOLDER` | label | CatalogScreen — detail panel — pasta | Pasta |
+| `LBL_DETAIL_SCHEMA` | label | CatalogScreen — detail panel — schema | Schema |
+| `LBL_DETAIL_DLL_VERSION` | label | CatalogScreen — detail panel — versão DLL | DLL |
+| `LBL_DETAIL_CHECKSUM` | label | CatalogScreen — detail panel — checksum | Checksum |
+| `LBL_DETAIL_CHECKSUM_VALID` | label | CatalogScreen — detail panel — checksum OK (template) | ✓ válido (sha256: {prefix}...) |
+| `LBL_DETAIL_CHECKSUM_INVALID` | label | CatalogScreen — detail panel — checksum mismatch | ✗ inválido — re-baixar recomendado |
+| `LBL_DETAIL_ROW_COUNT` | label | CatalogScreen — detail panel — row count | Row count |
+| `BTN_REVALIDATE_CHECKSUM` | button | CatalogScreen — botão re-validar checksum | Re-validar Checksum |
+| `BTN_RECONCILE` | button | CatalogScreen — botão reconciliar (drift) | Reconciliar |
+| `BTN_CLEAR_FILTERS` | button | CatalogScreen — botão limpar filtros | Limpar Filtros |
+| `BTN_REFRESH_CATALOG` | button | CatalogScreen — botão refresh com atalho | ↻ Atualizar (Ctrl+R) |
+| `EMP_CATALOG_FILTER_NO_MATCH_TITLE` | empty | CatalogScreen — empty filtrado título (template) | Nenhum histórico encontrado para "{filter}". |
+| `EMP_CATALOG_FILTER_NO_MATCH_SUBTITLE` | empty | CatalogScreen — empty filtrado subtítulo | Tente outros filtros ou liste tudo. |
+| `WAR_CATALOG_DRIFT_ROW` | warning | CatalogScreen — tooltip linha com drift | Diferença detectada entre catálogo e arquivos. Reconcilie para corrigir. |
+| `WAR_CATALOG_DELETE_ACTIVE_DOWNLOAD` | warning | CatalogScreen — bloqueio delete durante download | Download em progresso para este símbolo. Aguarde ou cancele primeiro. |
+
+### 17b.3 — SettingsScreen (Story 3.4)
+
+| ID | Tipo | Contexto | pt-BR |
+|----|------|----------|-------|
+| `LBL_SETTINGS_SCREEN_TITLE` | label | SettingsScreen — título principal | Configurações |
+| `LBL_SETTINGS_SECTION_DLL` | label | SettingsScreen — header seção DLL | ProfitDLL |
+| `LBL_SETTINGS_SECTION_STORAGE` | label | SettingsScreen — header seção Storage | Storage |
+| `LBL_SETTINGS_SECTION_PERFORMANCE` | label | SettingsScreen — header seção Performance | Performance (read-only) |
+| `LBL_SETTINGS_SECTION_ABOUT` | label | SettingsScreen — header seção About | About |
+| `LBL_DLL_STATUS_CONNECTED` | label | SettingsScreen — status DLL conectada (template) | ✓ Conectada (versão {version}) |
+| `LBL_DLL_STATUS_DISCONNECTED` | label | SettingsScreen — status DLL desconectada | ✗ Não conectou |
+| `LBL_DLL_STATUS_TESTING` | label | SettingsScreen — status durante teste | ↻ Testando conexão... |
+| `LBL_DLL_STATUS_NOT_CONFIGURED` | label | SettingsScreen — status sem .env | ⚠ Não configurado |
+| `LBL_DLL_PATH` | label | SettingsScreen — label do path DLL | DLL path |
+| `LBL_ENV_VARS` | label | SettingsScreen — label de seção env | Variáveis .env |
+| `LBL_STORAGE_DATA_DIR` | label | SettingsScreen — label pasta data | Pasta data |
+| `LBL_STORAGE_FREE_SPACE` | label | SettingsScreen — label espaço livre (template) | {free_gb} GB livres de {total_gb} GB total |
+| `LBL_STORAGE_CATALOG_OK` | label | SettingsScreen — catálogo íntegro (template) | ✓ íntegro ({n_partitions} partições registradas) |
+| `LBL_STORAGE_CATALOG_DRIFT` | label | SettingsScreen — catálogo com drift (template) | ⚠ {n_drift} diferenças detectadas — rode reconciliar |
+| `LBL_PERF_DLL_QUEUE_SIZE` | label | SettingsScreen — DLL queue size display | DLL queue size |
+| `LBL_PERF_STORAGE_QUEUE_SIZE` | label | SettingsScreen — storage queue size display | Storage queue size |
+| `LBL_PERF_CHUNK_SIZE` | label | SettingsScreen — chunk size display | Chunk size |
+| `LBL_PERF_MAX_RETRIES` | label | SettingsScreen — max retries display | Max retries |
+| `LBL_PERF_NOTE_ADVANCED` | label | SettingsScreen — nota sobre advanced flags | (Mudanças requerem advanced flags — consulte docs/perf/) |
+| `LBL_ABOUT_APP_VERSION` | label | SettingsScreen — versão app (template) | data-downloader v{version} |
+| `LBL_ABOUT_DLL_VERSION` | label | SettingsScreen — versão DLL (template) | ProfitDLL: {version} |
+| `LBL_ABOUT_SCHEMA_VERSION` | label | SettingsScreen — versão schema (template) | Schema: {version} |
+| `LBL_ABOUT_DOCS_LINK` | label | SettingsScreen — link docs | 📖 Documentação |
+| `LBL_ABOUT_BUG_LINK` | label | SettingsScreen — link bugs | 🐛 Reportar bug |
+| `BTN_TEST_CONNECTION` | button | SettingsScreen — testar conexão DLL | Testar Conexão |
+| `BTN_OPEN_DLL_FOLDER` | button | SettingsScreen — abrir pasta DLL | Abrir Pasta DLL |
+| `BTN_CHANGE_DATA_DIR` | button | SettingsScreen — mudar pasta data | Mudar Pasta |
+| `BTN_OPEN_DATA_DIR` | button | SettingsScreen — abrir data dir no Explorer | Abrir no Explorer |
+| `BTN_INTEGRITY_CHECK` | button | SettingsScreen — verificar integridade catálogo | Verificar Integridade |
+| `BTN_DOCTOR_FULL` | button | SettingsScreen — diagnóstico completo | Diagnóstico Completo (doctor) |
+| `BTN_SAVE_SETTINGS` | button | SettingsScreen — salvar | Salvar |
+| `BTN_OPEN_ENV_FOLDER` | button | SettingsScreen — abrir pasta .env (empty state) | Abrir Pasta .env |
+| `BTN_EDIT_ENV` | button | SettingsScreen — editar .env (error state) | Editar .env |
+| `BTN_SHOW_SECRET` | button | SettingsScreen — mostrar valor mascarado | Mostrar |
+| `BTN_HIDE_SECRET` | button | SettingsScreen — esconder valor | Esconder |
+| `EMP_SETTINGS_DLL_FIRST_RUN_TITLE` | empty | SettingsScreen — empty DLL primeiro uso (título) | Para começar, configure suas credenciais ProfitDLL |
+| `EMP_SETTINGS_DLL_FIRST_RUN_STEP1` | empty | SettingsScreen — empty DLL passo 1 | 1. Obtenha sua chave em https://nelogica.com.br |
+| `EMP_SETTINGS_DLL_FIRST_RUN_STEP2` | empty | SettingsScreen — empty DLL passo 2 | 2. Crie/edite ~/.data-downloader/.env com PROFITDLL_KEY, PROFIT_USER, PROFIT_PASS |
+| `EMP_SETTINGS_DLL_FIRST_RUN_STEP3` | empty | SettingsScreen — empty DLL passo 3 | 3. Clique em Testar Conexão |
+| `SUC_SETTINGS_SAVED` | success | SettingsScreen — settings salvos | Configurações salvas. |
+| `TST_SETTINGS_SAVED` | success toast | SettingsScreen — toast salvar | ✓ Configurações salvas. |
+
+### 17b.4 — MainWindow / Status Bar (Story 3.1)
+
+| ID | Tipo | Contexto | pt-BR |
+|----|------|----------|-------|
+| `LBL_NAV_DOWNLOAD` | label | MainWindow sidebar — item Download | Download |
+| `LBL_NAV_CATALOG` | label | MainWindow sidebar — item Catálogo | Catálogo |
+| `LBL_NAV_SETTINGS` | label | MainWindow sidebar — item Settings | Settings |
+| `LBL_STATUSBAR_DLL_CONNECTED` | label | StatusBar — DLL conectada (template) | ✓ DLL: conectada ({version}) |
+| `LBL_STATUSBAR_DLL_DISCONNECTED` | label | StatusBar — DLL desconectada | ✗ DLL: desconectada |
+| `LBL_STATUSBAR_DLL_CONNECTING` | label | StatusBar — DLL conectando | ↻ DLL: conectando... |
+| `LBL_STATUSBAR_APP_VERSION` | label | StatusBar — versão app (template) | v{version} |
+| `LBL_STATUSBAR_SHORTCUTS` | label | StatusBar — atalho cheat sheet | Ctrl+/ |
+| `LBL_NAV_BADGE_DOWNLOADING` | label | Sidebar — badge nav Download durante download | ↻ |
+
+### 17b.5 — Toasts e modais novos (Stories 3.x)
+
+| ID | Tipo | Contexto | pt-BR |
+|----|------|----------|-------|
+| `TST_RECONCILE_DONE` | success toast | Após reconciliar (template) | ✓ Catálogo reconciliado. {n_added} adicionadas, {n_removed} removidas. |
+| `TST_DELETE_DONE_TOAST` | info toast | Após delete (template) | Histórico de {symbol} apagado. |
+| `TST_TEST_CONNECTION_OK` | success toast | Settings — teste DLL OK | ✓ Conexão OK. |
+| `TST_TEST_CONNECTION_FAIL` | error toast | Settings — teste DLL falhou | ✗ Conexão falhou. Veja detalhes. |
+| `MOD_QUIT_DURING_DOWNLOAD_TITLE` | prompt | Modal sair durante download — título | Sair durante download em progresso? |
+| `MOD_QUIT_DURING_DOWNLOAD_BODY` | prompt | Modal sair durante download — corpo | Trades já baixados serão preservados (cache em re-tentativa). |
+| `BTN_QUIT_AND_CANCEL` | button | Modal sair durante download — confirmar | Sim, sair (cancelar download) |
+| `BTN_KEEP_DOWNLOADING` | button | Modal sair durante download — negar | Continuar baixando |
+| `MOD_CHEAT_SHEET_TITLE` | label | Modal Ctrl+/ — título | Atalhos disponíveis |
+| `MOD_DELETE_PERMANENT_BODY` | prompt | Modal delete — corpo extra (template) | Apagar PERMANENTEMENTE histórico de {symbol}? Esta operação é irreversível. Trades serão removidos do disco e do catálogo. |
+| `MOD_DELETE_PERMANENT_HINT` | label | Modal delete — hint para input | Digite APAGAR para confirmar |
+
+---
+
 ## 18. Quirk Q11-99 — Texto Canônico (referência rápida)
 
 Este quirk aparece em CLI, Qt, e potencialmente em logs. Um único texto

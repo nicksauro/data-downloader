@@ -1,13 +1,15 @@
-# FLOWS — Esqueletos de Fluxos Principais
+# FLOWS — Fluxos Principais Epic 3-Ready
 
-> Fluxos seed para Epic 3 (UI Qt). Placeholders detalhados — Epic 3 vai expandir
-> com Felix. Cada flow descreve atores, etapas, decisões, edge cases e os 5
-> estados (normal, loading, error, empty, success).
+> Fluxos detalhados Epic-3-ready para a UI Qt. Cada flow descreve atores com
+> responsabilidades exatas, etapas com (input usuário, ação sistema, microcopy ID,
+> duração estimada), decisões textuais, edge cases exaustivos e os 5 estados
+> (normal, loading, error, empty, success) com microcopy + ação visual.
 
-**Versão:** 0.1.0 (seed)
+**Versão:** 0.2.0 (Epic 3 prep — COUNCIL-12)
 **Data:** 2026-05-03
-**Status:** seed (Story 0.3) — refinamento no Epic 3
-**Autoridade:** 🎨 Uma — exclusiva sobre fluxos
+**Status:** ready (Story 0.3 + COUNCIL-12 expansion)
+**Autoridade:** Uma — exclusiva sobre fluxos
+**Implementação:** Felix (Epic 3 stories 3.1-3.8)
 
 ---
 
@@ -16,9 +18,11 @@
 ```
 [USUÁRIO] = ação humana
 [SISTEMA] = ação automática
-[DECISÃO] = ramificação (com critério)
-[ERRO] = caminho de erro tratado
-{condição} = condição lógica
+[DECISÃO] = ramificação (com critério if/then/else textual)
+[ERRO]    = caminho de erro tratado
+{var}     = variável de runtime
+(MID)     = referência a microcopy ID em MICROCOPY_CATALOG.md
+~Xs       = duração estimada (Pyro baseline ou empírico)
 ```
 
 ---
@@ -28,284 +32,326 @@
 **Cenário:** caso 80% dos usuários — baixar histórico do contrato vigente
 do mês corrente. **Promessa de produto inegociável: 1 clique.**
 
-**Atores:**
-- 🧑 Usuário
-- 🖼️ UI Qt (DownloadScreen)
-- 💻 Backend (orchestrator)
-- 🗝️ ProfitDLL
-- 💾 Storage (Parquet + SQLite catálogo)
+### Atores e Responsabilidades
 
-**Pré-condições:**
+| Ator | Responsabilidade exata |
+|------|------------------------|
+| Usuário | Apertar 1 botão (BAIXAR HISTÓRICO). Em casos avançados pode mudar símbolo/período antes. |
+| UI Qt — DownloadScreen | Renderizar form com defaults inteligentes; emitir signal de start; consumir progress via QueuedConnection; trocar estado visual (normal → loading → success/error). |
+| DownloadAdapter (QObject + QThread) | Bridge entre MainThread Qt e public_api. Chama `download()` em thread separada; itera `handle.stream()`; emite `progress`/`error`/`finished`. |
+| public_api (Aria/Dex) | `download(symbol, start, end) -> DownloadHandle`; `handle.stream() -> Iterator[DownloadProgress]`; `handle.cancel()`. Fronteira estável SemVer. |
+| Orchestrator | Chunker + retry + commit Parquet. Roda em threads próprias (R11). |
+| ProfitDLL (Nelo) | Recebe pedidos de chunk; emite eventos via callbacks. Reconnect ~99% é normal (P4). |
+| Storage (Sol) | Atomic write Parquet + registro SQLite catálogo. Schema v1.0.0. |
+
+### Pré-condições
+
 - App instalado e aberto.
-- DLL inicializada (Story 1.2 garante).
-- Conexão com corretora ativa.
+- DLL inicializada (Story 1.2 garante via singleton).
+- `.env` com `PROFITDLL_KEY`, `PROFIT_USER`, `PROFIT_PASS` válidos.
+- Conexão internet ativa.
 
-**Etapas:**
+### Etapas
 
-1. `[USUÁRIO]` Abre o app.
-2. `[SISTEMA]` Carrega DownloadScreen (default screen).
-3. `[SISTEMA]` Pré-preenche campos com defaults inteligentes:
-   - **Símbolo** = última usada (cache `~/.data-downloader/last_symbol`) OU contrato vigente do WDO.
-   - **Período** = "Mês corrente" (preset).
-   - **Pasta** = configurada (default `~/data-downloader/data/`).
-4. `[SISTEMA]` Mostra estimativa: "Estimativa: ~3-5 minutos" (consultando Pyro baseline).
-5. `[USUÁRIO]` Clica em **[BAIXAR HISTÓRICO]**.
-6. `[SISTEMA]` Tela transforma para estado **loading**:
-   - Campos viram readonly.
-   - Aparece barra de progresso + subtitle + log expansível.
-   - Botão troca para **[CANCELAR]**.
-7. `[SISTEMA]` Backend inicia download em thread separada (R11).
-8. `[SISTEMA]` Atualiza progresso a cada chunk (signal Qt → slot UI).
-9. `[SISTEMA]` Conclui. Mostra estado **success**:
-   - Toast verde 5s: "✓ WDOJ26: 1.234.567 trades em 3 arquivos."
-   - Botão "Ver no Catálogo →" no toast.
-   - Tela volta ao normal (campos editáveis, botão BAIXAR).
+| # | (a) Input usuário | (b) Ação sistema | (c) Microcopy ID | (d) Duração est. |
+|---|-------------------|------------------|------------------|------------------|
+| 1 | Abre o app | Carrega `app.py` → `QApplication` → `MainWindow` → `DownloadScreen` (default). | — | < 3s (cold start, target P0) |
+| 2 | (passivo) | Lê cache `~/.data-downloader/last_symbol`. Se existe, usa. Senão, consulta `vigent_contract("WDO")` para sugerir contrato vigente do WDO. | `LBL_SYMBOL`, `LBL_CONTRACT_VALID_UNTIL` | < 200ms |
+| 3 | (passivo) | Pré-preenche **Período** = `PLH_PERIOD_CURRENT_MONTH` (preset). | `LBL_PERIOD` | < 50ms |
+| 4 | (passivo) | Pré-preenche **Pasta** = `~/data-downloader/data/` (cria se não existe). | `LBL_OUTPUT_FOLDER` | < 100ms |
+| 5 | (passivo) | Mostra estimativa banda honesta consultando Pyro baseline. | `LBL_ESTIMATE` ("~3-7 min") | — |
+| 6 | Clica **[⬇ BAIXAR HISTÓRICO]** OU pressiona Ctrl+D | DownloadScreen → `on_download_clicked()` → `QMetaObject.invokeMethod(adapter, 'start', Qt.QueuedConnection, ...)`. | `BTN_DOWNLOAD` | < 16ms (slot MainThread) |
+| 7 | (aguarda) | Tela transforma para estado **loading**: campos viram readonly; aparece QProgressBar + subtitle + log expansível; botão troca para `BTN_CANCEL`. | `INF_STARTING_DOWNLOAD` | < 200ms (transição) |
+| 8 | (aguarda; pode navegar) | Adapter.start() em QThread invoca `download()`. Backend abre sessão DLL, faz chunker, emite progress. UI **NÃO bloqueia** — usuário pode ir para Catálogo. | `INF_FETCHING_CHUNK` (template `Chunk {x} de {y}`) | varia (30s–30min) |
+| 9 | (passivo; observa) | Cada `progress` recebido: atualiza barra, label `current_contract` (M16), tempo elapsed/remaining. | `LBL_PROGRESS`, `LBL_REMAINING`, `LBL_ELAPSED` | < 16ms por update |
+| 10 | (passivo) | Conclui. Adapter emite `finished(DownloadResult)`. UI mostra estado **success**: toast verde 5s + tela volta ao normal com campos ainda preenchidos. | `SUC_DOWNLOAD_DONE`, `TST_DOWNLOAD_DONE`, `BTN_VIEW_CATALOG` | toast 5s |
 
-**Decisões:**
+### Decisões (if/then/else)
 
-| Ponto | Decisão | Critério |
-|-------|---------|----------|
-| Step 3 | Cache hit vs default | Cache existe em `last_symbol`? Sim: cache. Não: WDO vigente. |
-| Step 4 | Mostra estimativa? | Sim, sempre. Banda honesta (3-7 min, não "5 min"). |
-| Step 6 | UI bloqueia? | NÃO. Usuário pode navegar para Catálogo durante. |
-| Step 8 | Quirk 99% reconnect? | Se DLL emite reconnect: muda subtitle para WAR_99_RECONNECT, cor amarela. |
+| Ponto | Decisão textual |
+|-------|----------------|
+| Step 2 — escolha de símbolo | **IF** cache `last_symbol` existe e arquivo legível **THEN** usa cache **ELSE IF** `vigent_contract("WDO")` retorna válido **THEN** usa contrato vigente **ELSE** mostra empty state `EMP_DOWNLOAD_NEW_USER` com placeholder `PLH_SYMBOL` ("ex: WDOJ26"). |
+| Step 5 — estimativa | **IF** Pyro baseline disponível para tamanho de período **THEN** mostra banda (3-7 min) **ELSE** mostra "Estimativa indisponível — depende do volume" (sem inventar número — P9 zero alucinação). |
+| Step 6 — validação inline | **IF** símbolo inválido (não-vigente, formato errado) **THEN** bloqueia botão + mostra erro inline `ERR_DLL_INVALID_TICKER` ao lado do campo **ELSE IF** período > 30 dias **THEN** mostra warning inline `WAR_LARGE_PERIOD` (não bloqueia, informa) **ELSE** habilita botão. |
+| Step 8 — navegação durante download | **IF** usuário clica em "Catálogo" no nav **THEN** muda QStackedWidget para CatalogScreen, mantém adapter rodando, badge visual no nav Download mostra "↻ baixando". |
+| Step 9 — quirk 99% reconnect | **IF** `progress.state == "reconnecting"` **THEN** ver Flow 4. |
+| Step 10 — pós-sucesso | Toast aparece top-right, auto-dismiss 5s, dismissable manual. Click no link "Ver no Catálogo" navega para CatalogScreen filtrado pelo símbolo recém-baixado. |
 
-**5 Estados:**
+### 5 Estados
 
-| Estado | Descrição | Microcopy |
-|--------|-----------|-----------|
-| **Normal** | Campos preenchidos, botão BAIXAR ativo | "Selecione e clique" implícito |
-| **Loading** | Download em andamento, barra/subtitle/log | INF_FETCHING_CHUNK |
-| **Error** | DLL falhou ou disco cheio | ERR_DLL_* ou ERR_DISK_FULL + botão "Tentar Novamente" |
-| **Empty** | Primeira vez (cache vazio) | EMP_DOWNLOAD_NEW_USER + defaults pré-preenchidos |
-| **Success** | Download concluído | SUC_DOWNLOAD_DONE + toast + link catálogo |
+| Estado | Microcopy ID | Ação visual |
+|--------|--------------|-------------|
+| **Normal** | `LBL_SYMBOL`, `LBL_PERIOD`, `LBL_OUTPUT_FOLDER`, `LBL_ESTIMATE`, `BTN_DOWNLOAD` | Form preenchido com defaults; botão primário ativo (cor `primary` #4F8CFF); cursor disponível em campos. |
+| **Loading** | `INF_STARTING_DOWNLOAD` → `INF_FETCHING_CHUNK` → `INF_WRITING_PARQUET` | Form readonly (opacity 60%); QProgressBar visível com cor `accent.cyan`; subtitle textual + ETA; log expansível (▸ Detalhes); botão muda para `BTN_CANCEL` (cor `error.red`). |
+| **Error** | `ERR_DLL_*` ou `ERR_DISK_*` (depende da causa) | Card vermelho com título bold + detalhe + ação imperativa; ícone ✗; botão `BTN_RETRY` (primário) + link "▸ Mais detalhes" (expand log técnico). |
+| **Empty** (primeira vez) | `EMP_DOWNLOAD_NEW_USER` | Subtitle "Bem-vindo!"; placeholder `PLH_SYMBOL`; defaults pré-preenchidos com sugestão WDO vigente; tooltip educativo no botão. |
+| **Success** | `SUC_DOWNLOAD_DONE`, `TST_DOWNLOAD_DONE` | Toast verde top-right 5s com `BTN_VIEW_CATALOG`; tela volta ao normal mantendo campos preenchidos para próximo download. |
 
-**Edge Cases:**
+### Edge Cases (lista exaustiva)
 
 | # | Caso | Tratamento |
 |---|------|-----------|
-| EC1 | Símbolo não-vigente digitado | Validação inline + sugestão (ERR_DLL_INVALID_TICKER) |
-| EC2 | Período > 30 dias | Warning inline + confirmação (PMT_LARGE_PERIOD_CONFIRM) |
-| EC3 | Disco cheio durante write | Erro graceful + parcial preservado (ERR_DISK_FULL) |
-| EC4 | DLL desconecta no meio | Auto-retry interno; se falhar, ERR_DLL_DISCONNECTED |
-| EC5 | Quirk 99% reconnect | Subtitle amarelo (WAR_99_RECONNECT), barra mantém posição, NÃO cancelar |
-| EC6 | Re-baixar período já baixado | Cache hit silencioso (SUC_CACHE_HIT) — sem trabalho duplicado |
-| EC7 | Período inclui feriado/weekend sem trades | Continua, marca como vazio no log; ERR_HOLIDAY_NO_TRADES se TODO o range |
-| EC8 | Rollover de contrato no meio do período | Detect + download continuous (Story 1.5b) |
-| EC9 | Conexão internet cai completamente | ERR_NO_INTERNET + retry button |
-| EC10 | App fecha durante download | Confirmação modal "Cancelar download?" |
+| EC1 | DLL não conectou (chave inválida) | Estado **Error** com `ERR_DLL_NO_LICENSE`; botão `BTN_RETRY` + link "Abrir Configurações > DLL". |
+| EC2 | Símbolo digitado não é contrato vigente | Validação inline antes de start: `ERR_DLL_INVALID_TICKER`; sugestão de contrato vigente próximo (ex: "Quer usar WDOJ26?"). |
+| EC3 | Período > 1 contrato (rollover no meio) | Backend faz `download_continuous`; UI mostra `current_contract` atual (M16); subtitle muda automaticamente quando rollover detectado. |
+| EC4 | Período > 30 dias | Warning inline `WAR_LARGE_PERIOD` antes do start ("Vai gerar N chunks, ~X minutos"); não bloqueia, informa. Confirmação `PMT_LARGE_PERIOD_CONFIRM` se > 90 dias. |
+| EC5 | Disco cheio durante write | Erro graceful `ERR_DISK_FULL`; parcial preservado (atomic write); UI mostra estado Error com link "Mudar pasta em Configurações". |
+| EC6 | Cancel mid-download (Ctrl+C / Esc / botão) | Ver Flow 3 completo. |
+| EC7 | Quirk 99% reconnect | Ver Flow 4 completo. |
+| EC8 | Smoke 30 dias real (primeira vez ambiente real) | Mesmo flow normal; Quinn valida via VM; sem tratamento especial UI. |
+| EC9 | Re-baixar período já baixado (cache hit) | Cache hit silencioso `SUC_CACHE_HIT`; sem trabalho duplicado; toast info "Já estava baixado — nada novo." |
+| EC10 | Conexão internet cai completamente | `ERR_NO_INTERNET`; estado Error com `BTN_RETRY`. |
+| EC11 | DLL desconecta no meio (não 99% reconnect) | Auto-retry interno do orchestrator; se falhar > 3x, `ERR_DLL_DISCONNECTED`. |
+| EC12 | App fecha durante download (Ctrl+Q ou X janela) | Confirmação modal "Cancelar download em progresso?" (PMT_CANCEL_CONFIRM); se confirma: drain + commit parcial (Flow 3); se nega: cancela close. |
+| EC13 | Período inclui só feriado/weekend (sem trades) | `ERR_HOLIDAY_NO_TRADES` se range inteiro for inviável; senão continua e log marca dias vazios. |
+| EC14 | Pasta de destino sem permissão de escrita | `ERR_DISK_PERMISSION` antes de start; bloqueia botão + link "Mudar pasta". |
+| EC15 | Versão DLL desatualizada | Warning `WAR_OLD_DLL_VERSION` no startup (não bloqueia); aparece no Settings também. |
+| EC16 | Catálogo SQLite locked por outro processo | `ERR_CATALOG_LOCKED`; estado Error com `BTN_RETRY` (auto após 5s). |
+| EC17 | Período inválido (start > end) | Validação inline `ERR_INVALID_PERIOD` antes de start; bloqueia botão. |
+| EC18 | Data no futuro | Validação inline `ERR_PERIOD_FUTURE`; bloqueia botão. |
+| EC19 | Período fora do range disponível na DLL | `ERR_PERIOD_TOO_OLD`; sugere data inicial mínima. |
+| EC20 | Métrica `ui_progress_dropped_count > 0` (M11) | Não bloqueia, mas registra log; se > threshold em sessão, hint dim no log expansível. |
 
 ---
 
 ## Flow 2 — Browse Catálogo
 
-**Cenário:** usuário quer ver/gerenciar histórico já baixado.
+**Cenário:** usuário quer ver/gerenciar/validar histórico já baixado.
 
-**Atores:**
-- 🧑 Usuário
-- 🖼️ UI Qt (CatalogScreen)
-- 💾 Storage (SQLite catálogo + filesystem)
+### Atores e Responsabilidades
 
-**Pré-condições:**
+| Ator | Responsabilidade exata |
+|------|------------------------|
+| Usuário | Navegar, filtrar, selecionar partições; pode deletar (com confirm) ou re-validar checksum. |
+| UI Qt — CatalogScreen | Renderizar QTableView com `QSortFilterProxyModel`; gerenciar filtros; abrir confirm modals destrutivos. |
+| CatalogAdapter (QObject + QThread) | Bridge para `public_api.read()` e queries SQLite. Lista partições com metadata (row_count, size, schema_version, checksum). |
+| public_api | `read(symbol, start, end)`, queries auxiliares de catálogo (futuro Story 3.3). |
+| Storage (Sol) | SQLite catalog DB + Parquet partitions. |
+
+### Pré-condições
+
 - App aberto.
-- Catálogo SQLite existe (criado no primeiro download ou por bootstrap).
+- Catálogo SQLite existe (criado no primeiro download ou bootstrap).
 
-**Etapas:**
+### Etapas
 
-1. `[USUÁRIO]` Clica em "Catálogo" no nav OU pressiona Ctrl+B.
-2. `[SISTEMA]` Carrega CatalogScreen, mostra loading skeleton.
-3. `[SISTEMA]` Lê SQLite (DuckDB join Parquet metadata se necessário).
-4. `[SISTEMA]` Renderiza tabela:
-   - Colunas: Símbolo, Período, Trades, Arquivos, Tamanho, Última Atualização.
-   - Ordenação default: Última Atualização desc.
-5. `[USUÁRIO]` Pode:
-   - **Filtrar** por símbolo (campo busca, Ctrl+F).
-   - **Ordenar** clicando em coluna.
-   - **Selecionar** item (Enter abre detalhe).
-   - **Apagar** item (Delete → confirmação destrutiva).
-   - **Validar** item (botão linha → roda validate).
-   - **Abrir pasta** (botão linha → Explorer).
-6. `[SISTEMA]` Refresh: Ctrl+R recarrega.
+| # | (a) Input usuário | (b) Ação sistema | (c) Microcopy ID | (d) Duração est. |
+|---|-------------------|------------------|------------------|------------------|
+| 1 | Clica em "Catálogo" no sidebar OU Ctrl+B | `MainWindow.stack.setCurrentWidget(catalog_screen)`. | — | < 16ms |
+| 2 | (passivo) | CatalogScreen mostra loading skeleton. CatalogAdapter dispara `list_partitions()` em QThread. | "Carregando catálogo..." | < 500ms (típico) |
+| 3 | (passivo) | Adapter executa query SQLite + (opcional) join com Parquet metadata. Emite `partitions(list)`. | — | < 200ms para < 1000 partições |
+| 4 | (passivo) | UI popula QTableView com colunas: contract, year, month, row_count, size_mb, last_modified, schema_version. Default sort: `last_modified DESC`. | `LBL_TRADES_COUNT`, `LBL_FILES_COUNT`, `LBL_SIZE`, `LBL_LAST_UPDATE` | < 100ms |
+| 5 | Filtro: digita em busca (Ctrl+F) | `QSortFilterProxyModel.setFilterFixedString(symbol)`. Debounce 300ms. | `PLH_SEARCH_CATALOG` | < 50ms por filtro |
+| 6 | Filtro: escolhe exchange/date range no drawer "Filtros" | Aplica predicado custom no proxy model. | "Filtros" (`BTN_DETAILS` reused) | — |
+| 7 | Seleciona linha (click ou Enter) | Mostra detail panel embaixo com: pasta completa, schema_version, dll_version, checksum status, ações. | `BTN_VALIDATE_CONTRACT`, `BTN_OPEN_FOLDER`, `BTN_REPEAT_LAST`, `BTN_DELETE` | < 50ms |
+| 8 | Clica `BTN_DELETE` | Abre confirm modal destrutivo `PMT_DELETE_CONFIRM` (digitar APAGAR). | `PMT_DELETE_CONFIRM`, `BTN_DELETE_CONFIRM` | — |
+| 9 | Confirma delete | Backend remove arquivos Parquet + entrada SQLite. Toast info `SUC_DELETE_DONE`. | `SUC_DELETE_DONE` | < 1s típico |
+| 10 | Clica "Re-validar checksum" | Backend re-calcula checksum dos Parquets + compara com SQLite. Toast verde ou erro. | `TST_VALIDATION_PASSED` ou `TST_VALIDATION_FAILED` | depende do tamanho |
+| 11 | Ctrl+R | Refresh: re-roda step 2-4. | `BTN_REPEAT_LAST` reused (refresh) | — |
 
-**Decisões:**
+### Decisões (if/then/else)
 
-| Ponto | Decisão | Critério |
-|-------|---------|----------|
-| Step 4 | Mostrar item se cache drift detectado? | Sim, com warning ⚠ "drift" e CTA "reconciliar" |
-| Step 5 (apagar) | Confirmação? | SIM, destrutiva: PMT_DELETE_CONFIRM digitar APAGAR |
+| Ponto | Decisão textual |
+|-------|----------------|
+| Step 4 — drift detectado | **IF** alguma partição tem drift (catalog_size != disk_size, ou checksum mismatch) **THEN** marca linha com ⚠ + tooltip + CTA "Reconciliar" no footer. |
+| Step 5 — busca sem match | **IF** filtro retorna 0 linhas **THEN** mostra empty state `EMP_CATALOG_FILTERED` com botão "Limpar filtros". |
+| Step 8 — delete enquanto download em progresso do mesmo símbolo | **IF** símbolo ativamente sendo baixado **THEN** bloqueia delete + warning "Download em progresso. Aguarde ou cancele primeiro." |
+| Step 10 — re-validar checksum mismatch | **IF** mismatch detectado **THEN** toast `TST_VALIDATION_FAILED` com link "Re-baixar período" (atalho para Flow 1 com símbolo+período pré-preenchidos). |
 
-**5 Estados:**
+### 5 Estados
 
-| Estado | Descrição | Microcopy |
-|--------|-----------|-----------|
-| **Normal** | Tabela populada com items | (sem mensagem) |
-| **Loading** | Carregando catálogo | "Carregando catálogo..." (skeleton) |
-| **Error** | Falha ao ler SQLite/disco | ERR_CATALOG_DRIFT ou ERR_DISK_PERMISSION |
-| **Empty** | Catálogo vazio (primeira vez ou tudo apagado) | EMP_CATALOG_FIRST_RUN + CTA |
-| **Success** | (não aplicável; tela de browse) | — |
+| Estado | Microcopy ID | Ação visual |
+|--------|--------------|-------------|
+| **Normal** | (sem mensagem específica; tabela populada) | QTableView com partições; detail panel embaixo (visível se row selected); footer summary "{N} partições, {total_mb} MB total". |
+| **Loading** | "Carregando catálogo..." | Skeleton rows (░░░░ animado dim); barra busca disabled. |
+| **Error** | `ERR_CATALOG_DRIFT` ou `ERR_DISK_PERMISSION` ou `ERR_CATALOG_LOCKED` | Card centralizado: ⚠ título + detalhe + ação ([RECONCILIAR] / [ABRIR PASTA] / [TENTAR NOVAMENTE]). |
+| **Empty** | `EMP_CATALOG_FIRST_RUN` (zero partições) ou `EMP_CATALOG_FILTERED` (filtro 0 results) | Ícone xl 📁 (ou substituto) + título + subtítulo educativo + CTA primário [⬇ BAIXAR HISTÓRICO] (navega Flow 1) ou [Limpar Filtros]. |
+| **Success** | `SUC_RECONCILE_DONE`, `SUC_DELETE_DONE`, `TST_VALIDATION_PASSED` | Toast top-right (verde para reconcile/validate OK; info para delete); tabela atualiza automaticamente. |
 
-**Edge Cases:**
+### Edge Cases
 
 | # | Caso | Tratamento |
 |---|------|-----------|
-| EC1 | Catálogo > 1000 partições | Paginação ou virtual scroll |
-| EC2 | Drift detectado (catalog ≠ disco) | Warning inline + CTA reconciliar |
-| EC3 | Filtro sem resultado | EMP_CATALOG_FILTERED + botão "Limpar filtros" |
-| EC4 | Arquivo corrompido | Indicador ⚠ na linha + tooltip ERR_CORRUPTED_PARQUET |
-| EC5 | Outro processo escrevendo (lock) | Read-only mode + warning "Catálogo em uso" |
-| EC6 | Apagar enquanto download em progresso do mesmo símbolo | Bloquear apagar, warning "Download em progresso" |
+| EC1 | Catálogo > 1000 partições | Virtual scroll automático via QTableView nativo; paginação opcional via drawer Avançado. |
+| EC2 | Drift detectado (catalog ≠ disk) | Linha marcada com ⚠; CTA footer "Reconciliar"; click → roda `doctor --reconcile` em adapter. |
+| EC3 | Filtro sem resultado | `EMP_CATALOG_FILTERED` + botão "Limpar filtros". |
+| EC4 | Arquivo Parquet corrompido | Indicador ⚠ na linha + tooltip `ERR_CORRUPTED_PARQUET`; ação "Re-baixar". |
+| EC5 | Outro processo escrevendo no SQLite (lock) | Read-only mode + warning "Catálogo em uso — atualizando em modo leitura"; retry automático após 5s. |
+| EC6 | Apagar enquanto download em progresso do mesmo símbolo | Bloqueia delete + warning "Download em progresso. Aguarde ou cancele primeiro." |
+| EC7 | Re-validar checksum em arquivo grande (> 100MB) | Progress bar inline na linha (não modal); cancelável. |
+| EC8 | Filesystem lento (HDD remoto) | Loading state estende até completion; sem timeout artificial; usuário vê skeleton. |
+| EC9 | Schema version legacy (não-v1.0.0) | Linha marcada com badge "v0.x"; tooltip "Schema legado — re-baixar para schema atual recomendado". |
 
 ---
 
 ## Flow 3 — Cancelar Download em Progresso
 
-**Cenário:** usuário muda de ideia ou notou erro e quer parar download.
+**Cenário:** usuário muda de ideia ou nota erro e quer parar download.
 
-**Atores:**
-- 🧑 Usuário
-- 🖼️ UI Qt (DownloadScreen) ou CLI
-- 💻 Backend (orchestrator)
-- 💾 Storage (commit parcial)
+### Atores e Responsabilidades
 
-**Pré-condições:**
-- Download em progresso (estado loading).
+| Ator | Responsabilidade exata |
+|------|------------------------|
+| Usuário | Apertar botão CANCELAR ou Ctrl+C ou Esc na DownloadScreen. |
+| UI Qt — DownloadScreen | Capturar cancel intent; abrir modal confirm; após confirm, transitar para estado "cancelando"; chamar `adapter.cancel()` via `QMetaObject.invokeMethod`. |
+| DownloadAdapter | `@Slot cancel()` chama `handle.cancel()` (ADR-007a). |
+| public_api — DownloadHandle | `cancel()` sinaliza orchestrator para drain + commit parcial. |
+| Orchestrator | Recebe sinal cancel: para chunker, drena dll_queue, commita Parquet parcial, atualiza catalog (`status="cancelled"`), fecha sessão DLL. |
 
-**Etapas (UI Qt):**
+### Pré-condições
 
-1. `[USUÁRIO]` Clica em **[CANCELAR]** OU pressiona Esc OU Ctrl+C.
-2. `[SISTEMA]` Mostra modal de confirmação (não bloqueante visualmente — mas
-   modal por destrutividade): PMT_CANCEL_CONFIRM.
-3. `[DECISÃO]` Usuário escolhe:
-   - **Continuar baixando**: modal fecha, download segue.
-   - **Sim, cancelar**: passa para step 4.
-4. `[SISTEMA]` Estado **cancelando**:
-   - Botão CANCELAR vira "Cancelando..." (disabled).
-   - Spinner amarelo.
-   - Subtitle: "↻ Drenando fila + commitando parcial..."
-5. `[SISTEMA]` Backend: para chunker, drena callback queue, commita parcial,
-   atualiza catálogo com partições parciais marcadas.
-6. `[SISTEMA]` Conclui cleanup. Mostra estado **success do cancel**:
-   - Toast info: "↻ Download cancelado. Parcial salvo: 234.567 trades."
-   - Tela volta ao normal.
+- Download em progresso (estado **Loading** do Flow 1, com `current_handle != None`).
 
-**Etapas (CLI):**
+### Etapas (UI Qt)
 
-1. `[USUÁRIO]` Pressiona Ctrl+C.
-2. `[SISTEMA]` Captura SIGINT (handler graceful).
-3. `[SISTEMA]` Inline prompt: PMT_CANCEL_CONFIRM.
-4. `[DECISÃO]`: Sim → continua step 5. Não → retoma.
-5. `[SISTEMA]` Mostra "↻ Cancelando..." e drena.
-6. `[SISTEMA]` SUC_CANCEL_DONE + exit code 130.
+| # | (a) Input usuário | (b) Ação sistema | (c) Microcopy ID | (d) Duração est. |
+|---|-------------------|------------------|------------------|------------------|
+| 1 | Clica `BTN_CANCEL` OU Esc OU Ctrl+C | DownloadScreen captura via QShortcut (WidgetWithChildrenShortcut scope). | `BTN_CANCEL` | < 16ms |
+| 2 | (passivo) | Abre modal confirmação destrutivo (não-bloqueante visualmente, mas modal porque destrutivo). | `PMT_CANCEL_CONFIRM`, `BTN_CANCEL_CONFIRM`, `BTN_CONTINUE` | < 100ms |
+| 3 | Escolhe ação | **IF** "Continuar baixando": modal fecha, download segue normal. **ELSE** ("Sim, cancelar"): step 4. | — | — |
+| 4 | (aguarda) | Estado **Loading.cancelling** (sub-estado): botão CANCELAR vira "Cancelando..." disabled; spinner amarelo; subtitle troca para `INF_GRACEFUL_SHUTDOWN`. | `INF_GRACEFUL_SHUTDOWN` | — |
+| 5 | (aguarda) | `QMetaObject.invokeMethod(adapter, 'cancel', QueuedConnection)` → `adapter.cancel()` → `handle.cancel()`. | — | < 16ms (slot) |
+| 6 | (aguarda) | Backend: para chunker, drena dll_queue (até 30s típico), commita parcial Parquet (atomic), atualiza SQLite (`status="cancelled"`, `n_partial_trades`), fecha sessão DLL. | — | tipicamente < 30s |
+| 7 | (passivo) | Adapter recebe último progress + emite `finished(DownloadResult(status=cancelled))`. | — | — |
+| 8 | (passivo) | UI mostra estado **Success do cancel**: toast info `TST_CANCEL_DONE`; tela volta ao normal (campos preenchidos). | `SUC_CANCEL_DONE`, `TST_CANCEL_DONE` | toast 3s |
 
-**5 Estados:**
+### Etapas (CLI — referência cruzada)
 
-| Estado | Descrição | Microcopy |
-|--------|-----------|-----------|
-| **Normal** | (n/a — fluxo é transição) | — |
-| **Loading (cancelando)** | Drenando fila, commitando parcial | INF_GRACEFUL_SHUTDOWN |
-| **Error** | Cleanup falhou (raro) | "Erro ao cancelar limpo. Dados parciais podem estar inconsistentes." + CTA `doctor` |
+| # | Ação |
+|---|------|
+| 1 | Usuário aperta Ctrl+C |
+| 2 | SIGINT capturado pelo handler graceful (NÃO termina abrupto) |
+| 3 | Inline prompt `PMT_CANCEL_CONFIRM` |
+| 4 | **IF** "s": continua step 5 **ELSE** retoma download |
+| 5 | Drain + commit parcial |
+| 6 | `SUC_CANCEL_DONE` + exit code 130 |
+
+### Decisões (if/then/else)
+
+| Ponto | Decisão textual |
+|-------|----------------|
+| Step 2 — modal | **IF** quirk 99% reconnect ativo no momento do cancel **THEN** modal mostra warning extra: "A corretora está reconectando. Cancelar agora pode forçar re-baixar tudo. Continuar cancelando?" (override do PMT_CANCEL_CONFIRM padrão). |
+| Step 6 — drain demora > 30s | **IF** drain ainda em andamento após 30s **THEN** UI mostra toast com botão "Forçar saída" (SIGKILL/QThread.terminate, com warning "buffer pode ser perdido"). |
+| Step 8 — pós-cancel | Tela mostra subtle hint: "Retomar com botão BAIXAR (período pré-preenchido com last range)" — convida resume natural. |
+
+### 5 Estados
+
+| Estado | Microcopy ID | Ação visual |
+|--------|--------------|-------------|
+| **Normal** | (n/a — flow é transição) | — |
+| **Loading.cancelling** (sub-estado) | `INF_GRACEFUL_SHUTDOWN` | Botão "Cancelando..." disabled cinza; spinner amarelo no header da progress card; barra mantém última posição. |
+| **Error** | "Erro ao cancelar limpo. Dados parciais podem estar inconsistentes." | Card amarelo (não vermelho — não é erro fatal); CTA "Rodar `doctor --reconcile`" + link "Abrir log". |
 | **Empty** | (n/a) | — |
-| **Success** | Cancelado com parcial preservado | SUC_CANCEL_DONE + retomar com `--resume` |
+| **Success do cancel** | `SUC_CANCEL_DONE`, `TST_CANCEL_DONE` | Toast info top-right 3s "↻ Download cancelado. {N} trades já salvos preservados."; tela volta ao normal. |
 
-**Edge Cases:**
+### Edge Cases
 
 | # | Caso | Tratamento |
 |---|------|-----------|
-| EC1 | Usuário cancela depois cancela de novo (Ctrl+C 2x) | Force quit, warning "buffer pode estar perdido" |
-| EC2 | Cleanup demora > 30s | Toast com botão "Forçar saída" (SIGKILL) |
-| EC3 | Disco cheio durante commit parcial | Aviso, parcial pode ficar incompleto, log para reconcile |
-| EC4 | Cancelamento durante quirk 99% reconnect | Aviso "Reconnect normal — confirma cancelar?" extra |
-| EC5 | Após cancelar, usuário tenta retomar | `--resume` lê catalog parcial, continua do último chunk OK |
+| EC1 | Usuário cancela depois cancela de novo (Ctrl+C 2x rápido) | Force quit (`QThread.terminate()`) + warning "buffer pode ter dados perdidos"; exit 130. |
+| EC2 | Cleanup demora > 30s | Toast com botão "Forçar saída" após 30s. |
+| EC3 | Disco cheio durante commit parcial | Aviso `ERR_DISK_FULL`; parcial pode ficar incompleto; log para reconcile manual posterior. |
+| EC4 | Cancelamento durante quirk 99% reconnect | Confirmação extra com warning específico (ver Step 2 decisão). |
+| EC5 | Após cancelar, usuário tenta retomar (Flow 1 mesmo símbolo+período) | Cache hit detecta partial; backend retoma do último chunk OK (ADR-007a `--resume` semântica). |
+| EC6 | Backend não responde a cancel (handle.cancel() vapor) | Timeout 60s → `QThread.terminate()` + warning hard "Cancelamento forçado — verificar integridade com `doctor`". |
+| EC7 | Cancel após 100% (já no commit final) | Bloqueia cancel + info "Quase pronto — finalizando salvamento ({Xs} restantes)". |
 
 ---
 
-## Flow 4 — Quirk 99% Reconnect Acontecendo
+## Flow 4 — Quirk 99% Reconnect (NÃO é cancelar)
 
 **Cenário:** download chega em ~99% e a corretora "desconecta" para
 re-sincronizar. Comportamento normal validado por Nelo. UI deve informar
-sem assustar.
+sem assustar e **NÃO oferecer cancel implicitamente**.
 
-**Atores:**
-- 🖼️ UI Qt (DownloadScreen) ou CLI (progress)
-- 🗝️ ProfitDLL
-- 💻 Backend (orchestrator)
-- 🧑 Usuário (observador)
+### Atores e Responsabilidades
 
-**Pré-condições:**
-- Download em progresso (estado loading).
-- Chegou em ~99% e DLL emitiu evento de reconnect.
+| Ator | Responsabilidade exata |
+|------|------------------------|
+| ProfitDLL (Nelo) | Emite evento `dll.reconnecting` ao detectar reconnect; depois `dll.reconnected`. |
+| Orchestrator | Captura evento, propaga via `DownloadProgress(state="reconnecting", percent=99, current_contract=...)`. |
+| DownloadAdapter | Emite `progress` com state="reconnecting"; UI atualiza estado visual. |
+| UI Qt — DownloadScreen | Detecta state="reconnecting"; muda cor barra (amarelo), mostra overlay/banner literal `WAR_99_RECONNECT`, mantém botão CANCELAR mas com tooltip warning. |
+| Usuário | Aguarda (não cancela, conforme microcopy literal pede). |
 
-**Etapas:**
+### Pré-condições
 
-1. `[SISTEMA]` Backend recebe sinal `dll.reconnecting` no listener.
-2. `[SISTEMA]` Emite signal Qt `progressUpdate(state="reconnecting", percent=99)`.
-3. `[SISTEMA]` UI/CLI atualiza:
-   - Barra mantém em 99% (NÃO regride).
-   - Cor da barra muda de **ciano** para **amarelo**.
-   - Spinner ativo aparece ao lado da barra.
-   - Subtitle muda para WAR_99_RECONNECT (texto exato): "A corretora está
-     reconectando — é normal, aguarde até 30 minutos. Não cancele."
-   - Botão CANCELAR ainda visível (usuário pode forçar se quiser, com warning extra).
-4. `[USUÁRIO]` Aguarda (ou cancela com warning extra).
-5. `[SISTEMA]` Backend recebe `dll.reconnected`.
-6. `[SISTEMA]` Emite signal `progressUpdate(state="resuming", percent=99)`.
-7. `[SISTEMA]` UI/CLI:
-   - Subtitle volta ao normal.
-   - Cor da barra volta para ciano.
-   - Spinner some.
-8. `[SISTEMA]` Download retoma, vai para 100%.
-9. `[SISTEMA]` Mostra estado success normal (Flow 1 step 9).
+- Download em progresso (Flow 1 estado Loading).
+- DLL emitiu evento de reconnect (geralmente em ~99%, mas pode ser em outros %).
 
-**Decisões:**
+### Etapas
 
-| Ponto | Decisão | Critério |
-|-------|---------|----------|
-| Step 3 | Mostrar timer "X minutos esperando"? | NÃO. Pode dar falsa impressão de bug. Apenas spinner + texto. |
-| Step 3 | Bloquear botão CANCELAR? | NÃO. H3 (controle do usuário) — sempre cancelável. Mas warning extra ao tentar. |
-| Step 3 | Cor amarela ou vermelha? | AMARELA (warning, não erro). É comportamento normal. |
-| Step 3 | Tocar som? | NÃO. Distrai. |
-| Step 5 | Notificar reconnect? | Não com toast — apenas voltar ao normal silenciosamente. |
+| # | (a) Input usuário | (b) Ação sistema | (c) Microcopy ID | (d) Duração est. |
+|---|-------------------|------------------|------------------|------------------|
+| 1 | (passivo; observa) | Backend recebe sinal `dll.reconnecting`. Orchestrator emite `DownloadProgress(state="reconnecting", percent=99, current_contract=X)`. | — | — |
+| 2 | (passivo) | Adapter emite signal Qt `progress(DownloadProgress)` com state="reconnecting". | — | — |
+| 3 | (passivo) | UI/CLI atualiza visual: barra **mantém em 99%** (NÃO regride); cor muda de **ciano** para **amarelo** (`warning.yellow` #F2C94C); spinner pulsante aparece ao lado da barra. | — | < 16ms |
+| 4 | (passivo) | Aparece overlay/banner amarelo com texto LITERAL exato `WAR_99_RECONNECT`: "A corretora está reconectando — é normal, aguarde até 30 minutos. Não cancele." | `WAR_99_RECONNECT` (texto literal canônico — § MICROCOPY 18) | persiste até reconnect |
+| 5 | (passivo) | Botão CANCELAR ainda visível (H3 — controle do usuário sempre disponível) MAS com tooltip warning: "Reconnect normal — cancelar agora pode forçar re-baixar tudo." | `BTN_CANCEL`, `TIP_BTN_CANCEL` (custom tooltip) | — |
+| 6 | (aguarda) | Tipicamente 1-30 min (validado Nelo). Sem timer visível (P9 — não inventar tempo exato). | — | varia (1-30 min) |
+| 7 | (passivo) | Backend recebe `dll.reconnected`. Emite `progress(state="resuming", percent=99)`. | — | — |
+| 8 | (passivo) | UI: subtitle volta ao normal; cor barra volta para **ciano**; spinner some. Sem toast/notificação (P7 — sucesso silencioso). | `INF_FETCHING_CHUNK` (volta ao padrão) | < 16ms |
+| 9 | (passivo) | Download retoma, vai para 100%, mostra `SUC_DOWNLOAD_DONE` (Flow 1 step 10). | `SUC_DOWNLOAD_DONE` | — |
 
-**5 Estados:** (este flow é estado especial dentro do Loading do Flow 1)
+### Decisões (if/then/else)
 
-| Estado | Descrição | Microcopy |
-|--------|-----------|-----------|
-| **Loading.reconnecting** | Quirk 99% ativo | WAR_99_RECONNECT |
-| **Loading.resuming** | Reconnect concluído, retomando | (transição rápida, sem mensagem específica) |
+| Ponto | Decisão textual |
+|-------|----------------|
+| Step 3 — cor | **AMARELA** sempre (warning, não erro). É comportamento normal validado. Nunca vermelha. |
+| Step 4 — timer "X minutos esperando" | **NÃO mostrar** timer numérico — pode dar falsa impressão de bug ou criar expectativa enganosa. Apenas spinner + texto literal. |
+| Step 4 — variação curta | **IF** terminal estreito (< 80 cols) ou status bar Qt **THEN** usar `WAR_99_RECONNECT_SHORT` ("Reconectando... (normal, aguarde)"). Senão, texto longo. |
+| Step 5 — bloquear botão CANCELAR | **NÃO bloquear**. H3 (controle do usuário). Mas tooltip warning extra explica risco. Confirmação modal extra se usuário insiste (ver Flow 3 EC4). |
+| Step 5 — som | **NÃO tocar som**. Distrai. |
+| Step 7 — notificar reconnect | **NÃO mostrar toast** "Reconectado". Voltar ao normal silenciosamente (P7). |
+| Step 6 — > 30 min | **IF** reconnect demora > 30 min **THEN** atualizar microcopy para warning escalado: "Reconnect demorando mais que o normal. Considere cancelar e tentar de novo mais tarde." (mas ainda não força cancel). |
+| Step 6 — loop reconnect/disconnect | **IF** > 3 ciclos sem progresso real **THEN** erro hard `ERR_DLL_DISCONNECTED` (Flow 1 estado Error). |
 
-**Edge Cases:**
+### 5 Estados (sub-estados de Flow 1.Loading)
+
+| Estado | Microcopy ID | Ação visual |
+|--------|--------------|-------------|
+| **Loading.reconnecting** | `WAR_99_RECONNECT` | Barra mantém em 99% (ou % atual, se quirk acontece em outro %) com cor amarela `#F2C94C`; spinner pulsante; banner amarelo overlay com texto literal; botão CANCELAR com tooltip warning. |
+| **Loading.resuming** | `INF_FETCHING_CHUNK` (volta ao padrão) | Transição rápida (< 1s); cor volta para ciano; spinner desaparece; banner some. |
+
+### Edge Cases
 
 | # | Caso | Tratamento |
 |---|------|-----------|
-| EC1 | Reconnect demora > 30 min | Após 30min: warning "Reconnect demorando mais que o normal. Considere cancelar e tentar de novo mais tarde." (mas sem forçar cancel) |
-| EC2 | Reconnect e desconecta de novo (loop) | Após 3 ciclos sem progresso real: erro hard "Conexão instável. ERR_DLL_DISCONNECTED" |
-| EC3 | Usuário cancela durante reconnect | Confirmação extra: "A corretora está reconectando — cancelar agora pode forçar re-baixar tudo. Continuar cancelando?" |
-| EC4 | Quirk acontece em < 99% (ex: 70%) | Mesmo tratamento — barra mantém posição, subtitle warning |
-| EC5 | App fechado durante reconnect | Estado salvo no catalog; `--resume` retoma do último chunk OK |
+| EC1 | Reconnect demora > 30 min | Após 30 min: warning escalado "Reconnect demorando mais que o normal. Considere cancelar e tentar de novo mais tarde." Não força cancel. |
+| EC2 | Reconnect e desconecta de novo (loop) | Após 3 ciclos sem progresso real: erro hard `ERR_DLL_DISCONNECTED` (Flow 1 estado Error). |
+| EC3 | Usuário cancela durante reconnect | Confirmação extra: Flow 3 EC4 microcopy override. |
+| EC4 | Quirk acontece em < 99% (ex: 70%) | Mesmo tratamento — barra mantém posição (não regride), subtitle warning. |
+| EC5 | App fechado durante reconnect | Confirmação modal Flow 1 EC12; estado salvo no catalog; `--resume` retoma do último chunk OK. |
+| EC6 | Métrica `ui_progress_dropped_count > 0` durante reconnect | Não bloqueia, mas log aumenta — Pyro instrumenta para detectar UI overhead. |
+| EC7 | DLL emite reconnect mas `current_contract` muda no mesmo evento (rollover + reconnect simultâneo) | UI atualiza tanto label do contrato quanto subtitle warning; ambos coexistem sem conflito. |
 
 ---
 
 ## Glossário de Estados
 
 - **Normal**: tela em uso comum, nenhuma operação ativa.
-- **Loading**: operação assíncrona em andamento, UI continua responsiva (R11).
+- **Loading**: operação assíncrona em andamento, UI continua responsiva (R11). Pode ter sub-estados (`Loading.reconnecting`, `Loading.cancelling`).
 - **Error**: algo falhou; tela mostra microcopy + ação de recuperação.
 - **Empty**: sem dados ainda — primeira vez ou filtro sem match. Educativo + CTA.
 - **Success**: operação concluída — toast + próximo passo sugerido.
 
 Sub-estados (ex: `Loading.reconnecting`, `Loading.cancelling`) são variações
-de um dos 5 principais. Devem ser desenhados quando relevante (ex: Flow 4).
+de um dos 5 principais. Devem ser desenhados quando relevante (ver Flows 3 e 4).
 
 ---
 
 ## Referências
 
-- PRINCIPLES.md §1 (promessa de produto), §3 P1 (5 estados)
-- MICROCOPY_CATALOG.md (todos os textos)
-- THEME.md §6 (atalhos teclado)
-- CLI_PATTERNS.md §3 (quirk 99%), §7 (cancelamento)
-- MANIFEST.md R11 (UI não bloqueia)
-- ARCHITECTURE.md (signals Qt entre threads)
+- PRINCIPLES.md §1 (promessa de produto), §3 P1 (5 estados), §3 P4 (quirk 99%)
+- WIREFRAMES.md (telas correspondentes)
+- MICROCOPY_CATALOG.md (todos os textos + IDs novos Epic 3 prep)
+- THEME.md §6 (atalhos teclado), §3 (mapeamento Rich↔Qt)
+- QT_PATTERNS.md (Felix — implementação Signal/Slot, QShortcut, QFileDialog)
+- CLI_PATTERNS.md §3 (quirk 99% CLI), §7 (cancelamento CLI)
+- ADR-003 + amendment (PySide6 single-process, --onedir, DontUseNativeDialog)
+- ADR-007a (DownloadHandle.cancel())
+- MANIFEST.md R11 (UI não bloqueia), R17 (microcopy é design)
+- COUNCIL-12 (Epic 3 prep sign-off)
 
 ---
 
