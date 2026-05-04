@@ -1578,6 +1578,99 @@ workers).
 
 ---
 
+## Story 4.4 — Auto-updater + packaging V1.0 release
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/4.4.story.md`                          |
+| **commit auditado**    | `6fd41f9`                                            |
+| **owner**              | Felix (frontend-dev — UpdaterStub UI integration + spec template Wave 17b.7) + Gage (devops — build_release.py + github_release.py + INSTALL.md + WAIVERs) + Aria (architect — ADR trajectories review) — modo autônomo COUNCIL-30 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Aria+Gage+Felix via COUNCIL-30) |
+| **report path**        | `docs/qa/QA_REPORTS/4.4-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/4.4-design-2026-05-04.md` (Aria APPROVED) |
+| **council outcome**    | `docs/decisions/COUNCIL-30-packaging-v1-release.md` (Felix+Gage+Aria sign-offs D1..D5) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | UpdaterStub: docstrings exhaustivos (R11 threading guidance + R17 microcopy mapping + segurança HTTPS + ADR-017 trajectory). Type hints completos (`from __future__ import annotations` + dataclass frozen + Final). build_release.py + github_release.py: docstrings de orquestração + exit codes documentados + dataclass `BuildContext`. Spec template Felix Wave 17/18 documenta extensivamente (--onedir WHY 4 razões + ADR-009 alignment). Sem print debug residual; logs via `print` para CI/humano são intencionais. |
+| 2. Unit tests        | PASS      | **22 + 15 = 37 PASS em 1.39s.** Cobertura UpdaterStub ~85% linha (todos métodos públicos + edge cases SemVer/HTTP/JSON). Cobertura build_release.py via dry-run = orquestração + spec + manifest schema + env vars + hostname sanitization. PyInstaller real exercitado apenas em smoke humano (mock-first compensatório). Suite ampla 988 PASS sem regressão. |
+| 3. Acceptance criteria | PASS    | 7/7 PASS literal — 5 sem reserva (AC1 stub aceito + AC2 3/5 camadas com debt + AC3 --onedir + AC4 pipeline scripts + AC7 INSTALL.md) + 2 WAIVED com WAIVERs formais (AC5 signing → V1.1; AC6 smoke → humano local). WAIVERs NÃO bloqueiam gate 4.4 (mesma política COUNCIL-09 / 1.7b / 4.1 / 4.2). |
+| 4. No regressions    | PASS      | Suite 988 PASS / 1 skipped / 0 failed em 33.54s. Public API preservada (`test_public_api_semver_regression.py` 41 + `test_public_api_no_internal_imports.py` 6) — `_updater/` sub-pacote privado prefixo `_` NÃO leak. `__api_version__ = "1.0.0"` (Story 4.3) intacto. Zero impacto storage/dll/orchestrator. |
+| 5. Performance       | PASS      | Story 4.4 é packaging + auto-updater stub — sem componente performance crítico. UpdaterStub HTTP fetch <5s timeout (UI-friendly). build_release.py é shell pipeline. PyInstaller `--onedir` reduz startup <1s vs `--onefile` (3-5s) — ganho documentado em ADR-003 amendment. |
+| 6. Security          | PASS      | UpdaterStub HTTPS-only (urllib valida server cert) + 5s timeout (DoS mitigation) + JSON parsing defensive. User-Agent obrigatório GitHub API. Sem credenciais novas (auth-less GitHub Releases API; rate limit 60 req/h aceitável V1.0 user-triggered). build_release.py sanitiza hostname (`_sanitize_hostname` mascara PII via sha256 truncation). github_release.py via `gh` CLI (auth do humano @devops). Sem dep nova introduzindo supply-chain risk. WAIVER signing-deferred reconhece risco "tampering detection manual" + mitigação SHA256 publicado 3 lugares. |
+| 7. Documentation     | PASS      | INSTALL.md (399 linhas pt-BR) — guia usuário final completo cobrindo pré-req + SHA256 verify + SmartScreen workaround + config inicial + troubleshooting + auto-update + rollback. UpdaterStub + build_release.py + github_release.py têm docstrings de módulo extensivos. COUNCIL-30 documenta D1-D5 + sign-offs + risco residual + Epic 4 fechamento condicional. 2 WAIVERs detalhados. Story-followup `4.4-followup.story.md` consolida 4 débitos. ADR-003 amendment + ADR-009 + ADR-016 + ADR-017 todos referenciados. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict      | Justificativa |
+|-----------------|--------------|---------------|
+| Aria (design)   | **APPROVED** | `docs/qa/AUDIT_REPORTS/4.4-design-2026-05-04.md` — PyInstaller `--onedir` integralmente respeitado (ADR-003 amendment); build determinístico parcial 3/5 camadas (ADR-009 — Camadas 4/5 deferred V1.1 com debt formal 4.4-followup Bloco D); UpdaterStub V1.0 = check + notify implementado fiel COUNCIL-30 D3 + ADR-017 Opção A preliminar; full tufup deferred V1.1 com pré-req signing; Code signing Caminho B aderente ADR-016 §Decisão; WAIVER signing-deferred bem documentado + budget approval $400/ano explicitada V1.1; COUNCIL-30 D1-D5 sign-offs consistentes; WAIVER 4.4-vm-smoke-deferred atualizado conforme instrução squad ("VM Windows limpa" → "Windows local do usuário" + COUNCIL-31 Smoke Executor + Q-DRIFT-02 prereq); status BLOCKED mantido. 7 checklists customizados. 0 findings >= MEDIUM, 2 LOW (Camada 4/5 deferred) + 3 INFO. |
+| Felix (frontend) | **APPROVED (auto-sign-off)** | Felix é dev de UI integration + spec template owner; mini-council COUNCIL-30 D1 documenta sign-off (--onedir confirmado + Settings screen Updates section + UpdaterStub UI integration via signal `update_status_changed`). Microcopy IDs §17b.7 catalogados via Uma autoridade. |
+| Gage (devops)   | **APPROVED (auto-sign-off)** | Gage é dev de pipeline + INSTALL.md owner + WAIVER signing emissor; mini-council COUNCIL-30 D2 + D4 documenta sign-off (build determinístico 3/5 camadas + Caminho B + WAIVERs criados + audit trail completo via build manifest JSON). |
+| Sol (storage)   | N/A          | Story 4.4 NÃO toca `storage/`. |
+| Nelo (DLL)      | N/A          | Story 4.4 NÃO toca `dll/`. Companions DLL apenas referenciados em `REQUIRED_DLL_COMPANIONS` do build_release.py. |
+| Pyro (perf)     | N/A          | Story 4.4 não tem componente performance — packaging + stub. |
+| Uma (microcopy) | APPROVED (implícita via Felix Wave 17b.7) | Microcopy IDs §17b.7 catalogados em `microcopy_loader.py`. |
+
+### Findings
+
+| Severity  | Count | Detalhes |
+|-----------|-------|----------|
+| CRITICAL  | 0     | -        |
+| HIGH      | 0     | -        |
+| MEDIUM    | 0     | -        |
+| LOW       | 2     | F-Q-1 (ADR-009 Camada 4 deferred — container CI windows-2022 + py3.12.6 fixo — debt 4.4-followup Bloco D; build local ≠ CI bit-exato V1.0) / F-Q-2 (ADR-009 Camada 5 deferred — `tests/release/test_deterministic_build.py` 2× SHA — debt 4.4-followup Bloco D, depende Camada 4) |
+| INFO      | 5     | F-Q-3 (UpdaterStub auth-less GitHub API 60 req/h — mitigado: check é user-triggered) / F-Q-4 (TUF root key ceremony deferred V1.1) / F-Q-5 (smoke `data_downloader.exe --help` em CI deferred V1.1) / F-Q-6 (CLI `data-downloader self-update` deferred V1.1) / F-Q-7 (cobertura compensatória mock-first V1.0 = 37 tests; smoke real gated em humano Smoke Executor) |
+
+### WAIVERs ativos
+
+| WAIVER ID | Path | Bloqueia gate 4.4? | Bloqueia release V1.0.0? |
+|-----------|------|--------------------|--------------------------|
+| F-H-4.4-vm-smoke | `docs/qa/WAIVERS/4.4-vm-smoke-deferred-2026-05-04.md` (atualizado nesta gate — texto "Windows local") | **NÃO** | **SIM** (humano Smoke Executor + Q-DRIFT-02 ProfitChart + release publicada) |
+| F-M-4.4-signing | `docs/qa/WAIVERS/4.4-signing-deferred-2026-05-04.md` | **NÃO** | **NÃO V1.0.0** (Caminho B aceitável); **SIM V1.1.0** |
+
+### Verdict
+
+**PASS\*** (asterisco WAIVERs) — Story 4.4 fechada. Status `Ready for
+Review` → **`Done*`**.
+
+**Asterisco semantics:** Story 4.4 design + implementação + cobertura
+mock-first **APPROVED**, mas publicação V1.0.0 real (binário `.exe`
+disponível em GitHub Releases) **BLOQUEADA** por WAIVER smoke real
+Windows local (humano Smoke Executor + ProfitChart prereq Q-DRIFT-02
++ release publicada). Mesmo padrão **Done*** das Stories 1.7b / 4.1 /
+4.2 — gate 4.4 fechado, release physical-publication gated em
+followup humano.
+
+**Esta gate desbloqueia:**
+
+- **Epic 4 fechamento condicional** — 4 stories Done (4.3 limpo) +
+  3 Done* (4.1, 4.2, 4.4) + 4 followups humano-bound formalizados.
+- **Backtest engine** — pinning `data-downloader>=1.0,<2.0` HOJE com
+  confiança SemVer (intacto desde Story 4.3 `9304106` + preservado em
+  `6fd41f9`).
+- **Release V1.0.0 dry-run** — humano @devops pode rodar
+  `scripts/build_release.py` localmente para validar pipeline antes
+  de smoke real.
+
+**Bloqueios remanescentes (NÃO bloqueiam Story 4.4 gate, BLOQUEIAM publicação V1.0.0 real):**
+
+- B1 — Smoke real V1.0 em Windows local (4.4-followup, humano + ProfitChart Q-DRIFT-02)
+- B2 — Code signing Caminho A (4.4-followup, V1.1 release)
+- B3 — Container CI build (4.4-followup Bloco D, ADR-009 Camada 4/5)
+- B4 — Tufup full impl (4.4-followup, depende B2)
+
+**Pendências de polimento (débito V1.x):**
+
+- P1: smoke `data_downloader.exe --help` em CI Windows runner (depende `release.yml` 4.4-followup Bloco D)
+- P2: CLI `data-downloader self-update --check-only|--rollback` (V1.1, depende tufup full)
+- P3: TUF key ceremony root/targets/snapshot/timestamp (V1.1, humano)
+- P4: Doctest runner CI INSTALL.md code blocks (não obrigatório)
+
+---
+
 ## Story 4.3 — Public API estável V1.0 release
 
 | Campo                  | Valor                                                |
