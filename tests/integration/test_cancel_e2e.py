@@ -82,13 +82,17 @@ def catalog_with_contract(data_dir: Path) -> Catalog:
 
 
 class TestCancelE2E:
-    def test_cancel_before_start_yields_cancelled_result(
-        self, data_dir: Path, catalog_with_contract: Catalog
-    ) -> None:
+    def test_cancel_before_start_yields_cancelled_result(self, data_dir: Path) -> None:
         """Cancel chamado IMEDIATAMENTE retorna status='cancelled'.
 
         Cobre o early-exit no worker (cancel_event.is_set() antes de
         chamar orchestrator.run).
+
+        Story 2.7 / COUNCIL-22: catalog é criado DENTRO da factory para
+        garantir thread-affinity (sqlite3.Connection é thread-local).
+        Versão antiga usava fixture compartilhada que crashava em
+        race-condition (worker começava antes do cancel chegar e tentava
+        usar conn de outra thread).
         """
 
         class _DummyDLL:
@@ -101,7 +105,10 @@ class TestCancelE2E:
             return _DummyDLL()
 
         def _catalog_factory(d: Path) -> Catalog:
-            return catalog_with_contract
+            # Cria catalog DENTRO do worker thread (thread-affinity sqlite).
+            cat = Catalog(db_path=d / "history" / "catalog.db", data_dir=d)
+            _seed_contract(cat)
+            return cat
 
         def _writer_factory(d: Path) -> ParquetWriter:
             return ParquetWriter(data_dir=d)

@@ -80,6 +80,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SENSITIVE_KEY_SUBSTRINGS",
+    "DynamicStreamLoggerFactory",
     "bind_context",
     "bound_context",
     "clear_context",
@@ -89,6 +90,89 @@ __all__ = [
     "redact_secrets",
     "setup_logging",
 ]
+
+
+# =====================================================================
+# Test-infra hardening — Dynamic stream logger factory
+# =====================================================================
+#
+# Story 2.7 / COUNCIL-22 (Quinn finding): structlog.PrintLoggerFactory
+# captura ``sys.stderr`` no momento da configuração e produz
+# ``PrintLogger`` instances que carregam a referência fixa do file
+# handle. Quando pytest CliRunner / capsys captura sys.stderr para uma
+# StringIO ephemeral, qualquer log emitido APÓS o teardown do runner
+# levanta ``ValueError: I/O operation on closed file.`` em testes
+# subsequentes (poison cross-test).
+#
+# Fix: ``DynamicStreamLoggerFactory`` produz loggers que resolvem
+# ``sys.stderr`` a CADA emit (em vez de no construtor), evitando o
+# leak da referência morta. Hot path NÃO é impactado (R21) — produção
+# resolve sys.stderr UMA vez no boot do CLI e nunca o substitui;
+# overhead é uma leitura de atributo (<10ns).
+
+
+class _DynamicStreamLogger:
+    """Logger structlog-compatível que resolve ``sys.stderr`` a cada emit.
+
+    Substitui :class:`structlog.PrintLogger` que captura o file handle no
+    construtor — cenário que quebra suítes pytest com captura de stdout
+    (CliRunner, capsys). Chamadas de log resolvem ``sys.stderr`` no
+    momento do emit, então mudanças temporárias do stream (como pytest
+    capturando) NÃO contaminam tests subsequentes quando o stream
+    original é restaurado.
+
+    Methods (msg/log/info/debug/warning/error/critical/exception/fatal)
+    têm assinatura idêntica a PrintLogger — drop-in replacement.
+    """
+
+    def __init__(self, file: Any | None = None) -> None:
+        # ``file`` é aceito por API compat mas IGNORADO em favor de
+        # resolução dinâmica via ``sys.stderr``. Caller que precise de
+        # destino diferente (ex.: stdout) pode setar :data:`_target_attr`
+        # explicitamente.
+        self._target_attr: str = "stderr"
+
+    def _emit(self, message: str) -> None:
+        # noqa: print — INTENCIONAL. Este é o backend do PrintLogger structlog;
+        # structlog renderiza mensagem como string e este método a emite via
+        # print() para o stream resolvido. NÃO é debug print que viola R21.
+        stream = getattr(sys, self._target_attr, None)
+        if stream is None:  # pragma: no cover — defensivo, sys.stderr quase nunca é None
+            return
+        try:
+            print(message, file=stream, flush=True)  # noqa: print
+        except (ValueError, OSError):
+            # Stream foi fechado entre o getattr e o print (race em teardown
+            # de pytest capture). Fallback para o stderr "real" do
+            # processo via fileno=2 — best-effort, NÃO levanta.
+            with contextlib.suppress(ValueError, OSError, AttributeError):
+                print(message, file=sys.__stderr__, flush=True)  # noqa: print
+
+    msg = _emit
+    log = _emit
+    info = _emit
+    debug = _emit
+    warning = _emit
+    warn = _emit
+    error = _emit
+    err = _emit
+    critical = _emit
+    fatal = _emit
+    exception = _emit
+
+
+class DynamicStreamLoggerFactory:
+    """Factory que produz :class:`_DynamicStreamLogger` instances.
+
+    Drop-in replacement para :class:`structlog.PrintLoggerFactory` —
+    aceita ``file`` por compat mas resolve sys.stderr dinamicamente.
+    """
+
+    def __init__(self, file: Any | None = None) -> None:
+        self._file = file  # ignorado intencionalmente — vide _DynamicStreamLogger
+
+    def __call__(self, *args: Any) -> _DynamicStreamLogger:
+        return _DynamicStreamLogger(self._file)
 
 
 # =====================================================================
@@ -298,8 +382,7 @@ def configure_logging(
     level_int = getattr(logging, level_upper, None)
     if not isinstance(level_int, int):
         raise ValueError(
-            f"Invalid log level {level!r}; expected one of "
-            "DEBUG, INFO, WARNING, ERROR, CRITICAL."
+            f"Invalid log level {level!r}; expected one of DEBUG, INFO, WARNING, ERROR, CRITICAL."
         )
 
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
@@ -329,7 +412,11 @@ def configure_logging(
         processors=[*shared_processors, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(level_int),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        # Story 2.7 / COUNCIL-22: factory dinâmica resolve sys.stderr a
+        # CADA emit, evitando crash em testes que capturam stdout
+        # (CliRunner / capsys). Hot path safe — overhead < 10ns
+        # (getattr de módulo). Ver _DynamicStreamLogger docstring.
+        logger_factory=DynamicStreamLoggerFactory(),
         cache_logger_on_first_use=True,
     )
 

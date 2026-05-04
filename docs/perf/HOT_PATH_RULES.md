@@ -157,4 +157,70 @@ Resultado vai para `BASELINES.md` e atualiza esta política se necessário.
 
 Sugestão Sol/Aria: marcar funções hot path com decorator `@hot_path` + linter custom em pre-commit.
 
+---
+
+## Auditoria mecânica (Story 2.7 / COUNCIL-22)
+
+Implementada em `scripts/audit_hot_path.py` (Pyro). Faz AST scan dos
+hot paths registrados e detecta violações vetadas.
+
+### Como rodar
+
+```bash
+# CLI direto (relatório humano):
+python scripts/audit_hot_path.py
+
+# JSON output (CI / dashboards):
+python scripts/audit_hot_path.py --json
+
+# Auditar arquivos extras (pre-commit):
+python scripts/audit_hot_path.py --paths src/data_downloader/dll/callbacks.py
+```
+
+### Pre-commit hook (opt-in)
+
+Wrapper em `scripts/hooks/check_hot_path.py`. Para ativar:
+
+```yaml
+# .pre-commit-config.yaml
+- repo: local
+  hooks:
+    - id: check-hot-path
+      name: Audit R21 hot-path compliance
+      entry: python scripts/hooks/check_hot_path.py
+      language: system
+      types: [python]
+      files: ^src/data_downloader/.*\.py$
+```
+
+### Hot path registry autoritativo (Story 2.7)
+
+| Arquivo | Função | Vazão típica | Tipo |
+|---------|--------|-------------|------|
+| `dll/callbacks.py` | `_history_cb` (closure de `make_history_trade_callback_v2`) | per-trade @ 100-4000/s | HOT |
+| `dll/callbacks.py` | `_progress_cb` (closure de `make_progress_callback`) | per-1% @ 100/job | HOT (pequeno) |
+| `orchestrator/download_primitive.py` | `_process_trade` (método de `_IngestorThread`) | per-trade @ 100-4000/s | HOT |
+
+Funções **excluídas** (cool path):
+- `_trades_to_table` (per-batch, ~1-10/s)
+- `register_partition` (per-chunk, ~1/min)
+- `_process_progress` (per-1%)
+
+### Violações conhecidas (baseline 2026-05-04)
+
+`scripts/audit_hot_path.py` detecta atualmente **3 violações** em
+`download_primitive.py::_process_trade` (linhas 286, 328, 337). Estas
+violações são herança da implementação inicial e devem ser endereçadas
+em uma Story 2.X dedicada (Pyro+Dex):
+
+1. `log.warning("download.translate_failed", ...)` — substituir por
+   `Counter("trades_translate_failed_total")`.
+2. `log.info("download.last_packet", ...)` — mover para `_run_inner`
+   (cool path; emitido apenas no fim do drain).
+3. `log.debug("download.trade_edit", ...)` — substituir por
+   `Counter("trades_edit_total")` ou skip se `DEBUG_SAMPLE=0`.
+
+O script reporta exit 1 (FAIL) enquanto essas violações existirem —
+NÃO instalar o pre-commit hook como blocking até serem corrigidas.
+
 — Pyro ⚡
