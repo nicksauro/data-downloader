@@ -27,7 +27,8 @@ compatível para mocking — execução real só ocorre em Win64).
 from __future__ import annotations
 
 import sys
-from typing import Final
+from ctypes import Structure, c_size_t, c_ubyte, c_ushort
+from typing import ClassVar, Final
 
 # ``WINFUNCTYPE`` (stdcall) só existe em Windows. Em outras plataformas
 # fazemos shim para ``CFUNCTYPE`` para permitir importação + mocks (testes
@@ -39,6 +40,7 @@ if sys.platform == "win32":
         c_double,
         c_int,
         c_int64,
+        c_longlong,
         c_uint,
         c_wchar_p,
     )
@@ -50,6 +52,7 @@ else:  # pragma: no cover — shim só ativo em testes não-Windows
         c_double,
         c_int,
         c_int64,
+        c_longlong,
         c_uint,
         c_wchar_p,
     )
@@ -252,4 +255,114 @@ de credencial (key, user, password) = 11 args totais conforme manual §3.1.
 Story 1.2 substitui CADA UM destes slots por NoopCallback (Q11-E / AC2 —
 ``None`` PROIBIDO). Stories futuras (1.3) usam ``Set*Callback`` posteriores
 para registrar handlers reais sem re-init (Q08-E — DLL não-idempotente).
+"""
+
+
+# =====================================================================
+# Story 1.3 — V2 history download types
+# =====================================================================
+# Decisão COUNCIL-03: usar ``SetHistoryTradeCallbackV2`` + ``TranslateTrade``.
+# - Callback V2 entrega ``(asset, pTrade_handle, flags)`` na ConnectorThread.
+# - ``TranslateTrade(pTrade, byref(TConnectorTrade))`` desempacota o struct
+#   FORA do callback (em IngestorThread) — lei R3 / manual §4 L4382.
+# - Versões V1 (`THistoryTradeCallback` e `TProgressCallback` acima) ficam
+#   mantidas para NoopCallback do init slot.
+#
+# Fonte canônica:
+# - profitdll/Exemplo Python/profitTypes.py L56-66 (SystemTime),
+#   L88-94 (TConnectorAssetIdentifier), L280-291 (TConnectorTrade)
+# - profitdll/Exemplo Python/profit_dll.py L70-71 (TranslateTrade argtypes)
+# - profitdll/Exemplo Python/main.py L324-333 (V2 trade callback pattern)
+# =====================================================================
+
+
+class SystemTime(Structure):
+    """Mirror Win32 ``SYSTEMTIME`` — campo ``TradeDate`` em ``TConnectorTrade``.
+
+    Campos canônicos (profitTypes.py L56-66). ``wDayOfWeek`` é preenchido
+    pela DLL mas IGNORADO no parser de timestamp do squad (R7 — usamos
+    apenas ``wYear..wMilliseconds``, BRT naive).
+    """
+
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("wYear", c_ushort),
+        ("wMonth", c_ushort),
+        ("wDayOfWeek", c_ushort),
+        ("wDay", c_ushort),
+        ("wHour", c_ushort),
+        ("wMinute", c_ushort),
+        ("wSecond", c_ushort),
+        ("wMilliseconds", c_ushort),
+    ]
+
+
+class TConnectorAssetIdentifier(Structure):
+    """Asset identifier V2 — usado em callbacks V2 (manual §3.2).
+
+    Mirror de ``profitTypes.py`` L88-94. Passado por valor (não pointer)
+    no callback V2 — ConnectorThread monta o struct na stack do callback.
+    """
+
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("Version", c_ubyte),
+        ("Ticker", c_wchar_p),
+        ("Exchange", c_wchar_p),
+        ("FeedType", c_ubyte),
+    ]
+
+
+class TConnectorTrade(Structure):
+    """Struct desempacotada por ``TranslateTrade`` (V2 trade — manual §3.2).
+
+    Mirror de ``profitTypes.py`` L280-291. Antes de cada chamada a
+    ``TranslateTrade``, ``Version`` deve ser setada para ``0`` pelo caller
+    (main.py L328 demonstra). Os demais campos são preenchidos pela DLL.
+
+    - ``TradeDate``: timestamp BRT naive (R7) via ``SystemTime``.
+    - ``TradeNumber``: trade_id estável (chave de dedup curta — SCHEMA.md §2.1).
+    - ``Price``: preço do trade.
+    - ``Quantity``: quantidade negociada (``c_longlong``).
+    - ``Volume``: ``Price * Quantity`` (calculado pela DLL).
+    - ``BuyAgent`` / ``SellAgent``: IDs de corretora (resolvíveis via
+      ``GetAgentName`` — Q14-E, fora do escopo Story 1.3).
+    - ``TradeType``: tipo do trade (auction, regular, cross, etc.).
+    """
+
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("Version", c_ubyte),
+        ("TradeDate", SystemTime),
+        ("TradeNumber", c_uint),
+        ("Price", c_double),
+        ("Quantity", c_longlong),
+        ("Volume", c_double),
+        ("BuyAgent", c_int),
+        ("SellAgent", c_int),
+        ("TradeType", c_ubyte),
+    ]
+
+
+# Flags do callback V2 (3º arg). Convenção observada (PROFITDLL_KNOWLEDGE.md §3
+# + manual §3.2 L1912 cita ``TC_LAST_PACKET``). Bit-fields:
+TC_IS_EDIT: Final[int] = 0x01
+"""Bit 0: trade é edição (correção) de trade prévio (não inserção nova)."""
+
+TC_LAST_PACKET: Final[int] = 0x02
+"""Bit 1: este é o último pacote do download histórico — sinal autoritativo
+de fim, complementar ao progress=100 (Q02-E mitigation)."""
+
+
+# History trade callback V2 — manual §3.2 L1912 + main.py L324 (mesmo padrão
+# que tradeCallback live; SetHistoryTradeCallbackV2 reusa a signature).
+THistoryTradeCallbackV2 = WINFUNCTYPE(
+    None,
+    TConnectorAssetIdentifier,  # asset (passado por valor)
+    c_size_t,  # pTrade — handle opaco (passar a TranslateTrade)
+    c_uint,  # flags (TC_IS_EDIT | TC_LAST_PACKET | ...)
+)
+"""V2 history trade callback (Story 1.3 / COUNCIL-03).
+
+Callback recebe handle opaco (``c_size_t``) que DEVE ser passado a
+``TranslateTrade`` em IngestorThread (FORA do callback — R3). Callback faz
+APENAS ``queue.put_nowait((handle, flags))`` — ver
+``callbacks.make_history_trade_callback_v2``.
 """

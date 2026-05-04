@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 from types import TracebackType
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -168,6 +168,12 @@ class ProfitDLL:
 
         # ``dll_version`` cache (AC13) — preenchido na 1ª chamada à property.
         self._dll_version_cache: str | None = None
+
+        # Story 1.3 — referências defensivas adicionais para callbacks
+        # registrados após init (history V2, progress). A factory já appenda
+        # em ``callbacks._cb_refs`` (módulo-level, anti-GC global), esta
+        # lista é cinto-e-suspensório (custo zero, append-only).
+        self._cb_refs: list[Any] = []
 
     # =================================================================
     # Context manager protocol
@@ -511,3 +517,229 @@ class ProfitDLL:
         self._dll_version_cache = version
         log.info("dll.version_resolved", version=version)
         return version
+
+    # =================================================================
+    # Story 1.3 — History download primitive
+    # =================================================================
+    # Decisão COUNCIL-03: V2 history callback (TranslateTrade em
+    # IngestorThread, NÃO no callback). Wrapper expõe métodos para:
+    #
+    # - registrar callbacks via Set*Callback (R10/Q13-V — V2 sempre)
+    # - chamar GetHistoryTrades com formato exato de data (manual §3.1 L1750)
+    # - traduzir handle opaco em TConnectorTrade struct (TranslateTrade)
+    #
+    # Validações na fronteira (chamada do método):
+    # - exchange ∈ ('F', 'B') — R8/Q05-V
+    # - formato de data "DD/MM/YYYY HH:mm:SS" — manual §3.1 L1750
+    # =================================================================
+
+    def set_history_trade_callback_v2(self, callback: Any) -> None:
+        """Registra callback V2 de trades históricos (Story 1.3 / COUNCIL-03).
+
+        Wraps ``self._dll.SetHistoryTradeCallbackV2(callback)``. O ``callback``
+        DEVE vir de :func:`data_downloader.dll.callbacks.make_history_trade_callback_v2`
+        — já em ``_cb_refs`` (anti-GC, Q07-V), faz APENAS ``put_nowait`` (R3).
+
+        Após o registro, chamadas a :meth:`get_history_trades` farão o
+        callback disparar para cada trade do range. ``TranslateTrade`` é
+        responsabilidade do consumer — ver :meth:`translate_trade`.
+
+        Args:
+            callback: Objeto ``WINFUNCTYPE``-wrapped (signature
+                ``THistoryTradeCallbackV2``). Garantido em ``_cb_refs``
+                pela factory.
+
+        Raises:
+            DLLInitError: Se DLL não inicializada (NL_NOT_INITIALIZED).
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de set_history_trade_callback_v2.",
+            )
+        # Mantém referência adicional defensiva (Q07-V) — factory já appendou,
+        # esta segunda referência é cinto-e-suspensório (custo zero, lista
+        # global é append-only durante a vida do processo).
+        self._cb_refs.append(callback)
+        self._dll.SetHistoryTradeCallbackV2(callback)
+        log.info("dll.history_trade_callback_v2_registered")
+
+    def set_progress_callback(self, callback: Any) -> None:
+        """Registra callback de progresso de download histórico (Story 1.3).
+
+        Wraps ``self._dll.SetProgressCallback(callback)``. ``callback`` DEVE
+        vir de :func:`data_downloader.dll.callbacks.make_progress_callback` —
+        já em ``_cb_refs``, faz APENAS ``put_nowait(int)`` (R3).
+
+        Args:
+            callback: Objeto ``WINFUNCTYPE``-wrapped (signature
+                ``TProgressCallback``).
+
+        Raises:
+            DLLInitError: Se DLL não inicializada.
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de set_progress_callback.",
+            )
+        self._cb_refs.append(callback)
+        self._dll.SetProgressCallback(callback)
+        log.info("dll.progress_callback_registered")
+
+    def get_history_trades(
+        self,
+        ticker: str,
+        exchange: str,
+        dt_start: str,
+        dt_end: str,
+    ) -> int:
+        """Solicita download de trades históricos (Story 1.3 — manual §3.1).
+
+        Formato esperado das datas (manual §3.1 L1750 — Nelo):
+        ``"DD/MM/YYYY HH:mm:SS"``. Validado upfront — ``ValueError`` se inválido.
+
+        Bolsa DEVE ser letra única (R8/Q05-V): ``"F"`` (BMF) ou ``"B"``
+        (Bovespa). String ``"BMF"`` retorna ``NL_EXCHANGE_UNKNOWN``.
+
+        A chamada dispara assincronamente:
+
+        - múltiplos ``HistoryTradeCallbackV2`` (1 por trade) na ConnectorThread
+        - múltiplos ``ProgressCallback`` (progresso 1..100) na ConnectorThread
+
+        Caller DEVE ter registrado ambos callbacks ANTES — caso contrário,
+        trades chegam mas são descartados (callback ainda é o NoopCallback
+        do init).
+
+        Args:
+            ticker: Contrato vigente (NÃO alias — Q01-V). Ex.: ``"WDOJ26"``,
+                ``"PETR4"``.
+            exchange: ``"F"`` ou ``"B"``.
+            dt_start: ``"DD/MM/YYYY HH:mm:SS"``.
+            dt_end: ``"DD/MM/YYYY HH:mm:SS"``.
+
+        Returns:
+            Código retornado por ``GetHistoryTrades`` (0 sucesso, NL_*
+            negativo em erro).
+
+        Raises:
+            ValueError: Bolsa ou formato de data inválido.
+            DLLInitError: DLL não inicializada.
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de get_history_trades.",
+            )
+        # R8/Q05-V — bolsa DEVE ser letra única ('F' ou 'B'). Validar
+        # upfront com erro claro em vez de deixar a DLL retornar
+        # NL_EXCHANGE_UNKNOWN críptico (Sentinel §12 documentou semanas
+        # debugando "BMF").
+        if exchange not in ("F", "B"):
+            raise ValueError(
+                f"exchange must be 'F' (BMF) or 'B' (Bovespa); got {exchange!r}. "
+                "Strings como 'BMF', 'BOVESPA' são REJEITADAS pela DLL "
+                "(R8/Q05-V — manual §3.1 L1673)."
+            )
+        # Formato manual §3.1 L1750 — validar antes de chamar a DLL.
+        _validate_history_date_format(dt_start, "dt_start")
+        _validate_history_date_format(dt_end, "dt_end")
+
+        from ctypes import c_wchar_p
+
+        log.info(
+            "dll.get_history_trades_call",
+            ticker=ticker,
+            exchange=exchange,
+            dt_start=dt_start,
+            dt_end=dt_end,
+        )
+        ret: int = self._dll.GetHistoryTrades(
+            c_wchar_p(ticker),
+            c_wchar_p(exchange),
+            c_wchar_p(dt_start),
+            c_wchar_p(dt_end),
+        )
+        log.info("dll.get_history_trades_return", code=ret)
+        return ret
+
+    def translate_trade(self, p_trade_handle: int, trade_struct: Any) -> int:
+        """Desempacota handle V2 em ``TConnectorTrade`` struct (Story 1.3).
+
+        Wraps ``self._dll.TranslateTrade(handle, byref(struct))``. **DEVE ser
+        chamado em IngestorThread (FORA do callback)** — chamar a DLL de
+        dentro do callback viola lei R3 / manual §4 L4382 / Q06-V.
+
+        Caller é responsável por:
+
+        1. Setar ``trade_struct.Version = 0`` antes da primeira chamada
+           (main.py L328 demonstra).
+        2. Copiar campos relevantes do struct ANTES da próxima chamada (a DLL
+           reusa o buffer apontado pela próxima invocação).
+
+        Args:
+            p_trade_handle: Handle opaco recebido pelo callback V2 (1º item
+                da tuple enfileirada).
+            trade_struct: Instância de ``TConnectorTrade`` reutilizável (caller
+                aloca uma vez e reusa entre chamadas — barato).
+
+        Returns:
+            Código retornado por ``TranslateTrade`` (``0 = NL_OK`` em sucesso,
+            NL_* negativo em erro). Caller decide se descarta ou loga.
+
+        Raises:
+            DLLInitError: DLL não inicializada.
+        """
+        if self._dll is None:
+            raise DLLInitError(
+                -2147483646,
+                "NL_NOT_INITIALIZED",
+                "Chame initialize_market_only antes de translate_trade.",
+            )
+        from ctypes import byref
+
+        rc: int = self._dll.TranslateTrade(p_trade_handle, byref(trade_struct))
+        return rc
+
+
+# =====================================================================
+# Story 1.3 — Helpers de validação (módulo-level, reusáveis em testes)
+# =====================================================================
+
+
+_HISTORY_DATE_FORMAT: Final[str] = "DD/MM/YYYY HH:mm:SS"
+"""Formato de data esperado por ``GetHistoryTrades`` (manual §3.1 L1750)."""
+
+
+def _validate_history_date_format(s: str, field: str) -> None:
+    """Valida formato exato ``"DD/MM/YYYY HH:mm:SS"`` (manual §3.1 L1750).
+
+    Não usa ``strptime`` — apenas estrutura. Validação semântica completa
+    (parser BRT naive) fica em ``orchestrator.timestamp.parse_brt_timestamp``.
+    Aqui o objetivo é falhar rápido com erro claro antes de gastar a chamada
+    da DLL com formato errado.
+
+    Args:
+        s: String a validar.
+        field: Nome do campo (para mensagem de erro).
+
+    Raises:
+        ValueError: Se string não tem 19 chars, ou separadores errados.
+    """
+    if not isinstance(s, str) or len(s) != 19:
+        raise ValueError(
+            f"{field} must be string of length 19 in format "
+            f"{_HISTORY_DATE_FORMAT!r}; got {s!r} (len={len(s) if isinstance(s, str) else 'N/A'})"
+        )
+    # Posições fixas de separadores (DD/MM/YYYY HH:mm:SS):
+    #  012345678901234567 8
+    #  DD / MM / YYYY space HH : mm : SS
+    if s[2] != "/" or s[5] != "/" or s[10] != " " or s[13] != ":" or s[16] != ":":
+        raise ValueError(
+            f"{field} must match format {_HISTORY_DATE_FORMAT!r}; got {s!r}. "
+            "Separadores esperados: '/', '/', ' ', ':', ':' "
+            "nas posições 2, 5, 10, 13, 16."
+        )

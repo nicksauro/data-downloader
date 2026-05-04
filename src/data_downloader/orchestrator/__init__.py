@@ -18,4 +18,20 @@ Fronteiras (Aria, ARCHITECTURE.md §5):
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from data_downloader.orchestrator.download_primitive import (
+    ChunkResult,
+    TradeRecord,
+    download_chunk,
+)
+from data_downloader.orchestrator.timestamp import (
+    format_brt_timestamp,
+    parse_brt_timestamp,
+)
+
+__all__ = [
+    "ChunkResult",
+    "TradeRecord",
+    "download_chunk",
+    "format_brt_timestamp",
+    "parse_brt_timestamp",
+]

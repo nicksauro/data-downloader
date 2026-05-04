@@ -21,7 +21,9 @@ from data_downloader.dll import callbacks as cb_module
 from data_downloader.dll.callbacks import (
     _cb_refs,
     cleanup_cb_refs,
+    make_history_trade_callback_v2,
     make_noop_callback,
+    make_progress_callback,
     make_state_callback,
 )
 from data_downloader.dll.types import NOOP_SLOT_SIGNATURES, TStateCallback
@@ -183,3 +185,149 @@ def test_cleanup_cb_refs_clears_for_test_isolation() -> None:
     assert len(_cb_refs) == 0
     # Sanity: módulo ainda tem a lista (não foi reassign).
     assert cb_module._cb_refs is _cb_refs
+
+
+# =====================================================================
+# Story 1.3 — V2 history trade callback
+# =====================================================================
+
+
+@pytest.mark.unit
+def test_make_history_trade_callback_v2_returns_callable_and_appends() -> None:
+    """make_history_trade_callback_v2 retorna WINFUNCTYPE-wrapped E appenda em _cb_refs."""
+    q: Queue[tuple[int, int]] = Queue(maxsize=100)
+    initial = len(_cb_refs)
+
+    cb = make_history_trade_callback_v2(q)
+
+    assert cb is not None
+    assert callable(cb)
+    assert len(_cb_refs) == initial + 1
+    assert cb is _cb_refs[-1]
+
+
+@pytest.mark.unit
+def test_history_trade_callback_v2_only_calls_put_nowait_inv1() -> None:
+    """AC5/INV-1 — V2 history callback faz APENAS put_nowait((handle, flags)).
+
+    Verificação:
+      1. mock_queue.put_nowait chamado com tupla (handle, flags) — convertidos
+         a int.
+      2. Nenhum método de mock_dll chamado (R3 — callback NÃO chama DLL).
+
+    Em Windows o trampoline WINFUNCTYPE valida tipos. Em vez de invocar via
+    trampoline (precisaria struct ctypes real), inspecionamos a função
+    Python interna via closure — semanticamente equivalente.
+    """
+    from data_downloader.dll.types import TConnectorAssetIdentifier
+
+    mock_queue = MagicMock(spec=Queue)
+    mock_dll = MagicMock()
+
+    cb = make_history_trade_callback_v2(mock_queue)
+
+    # Construir TConnectorAssetIdentifier real (struct ctypes — barato).
+    asset = TConnectorAssetIdentifier(Version=0, Ticker="WDOJ26", Exchange="F", FeedType=0)
+    cb(asset, 12345, 0)
+    cb(asset, 99999, 2)  # flags=2 = TC_LAST_PACKET
+
+    # CORE ASSERTIONS:
+    assert mock_queue.put_nowait.call_count == 2
+    assert mock_queue.put_nowait.call_args_list[0].args == ((12345, 0),)
+    assert mock_queue.put_nowait.call_args_list[1].args == ((99999, 2),)
+    # Nenhum outro método da queue:
+    assert not mock_queue.put.called
+    assert not mock_queue.get.called
+    # CORE INV-1: callback NÃO chamou DLL:
+    assert (
+        mock_dll.mock_calls == []
+    ), f"V2 history callback chamou DLL — viola INV-1/R3. Calls: {mock_dll.mock_calls}"
+
+
+@pytest.mark.unit
+def test_history_trade_callback_v2_swallows_full_silently() -> None:
+    """Callback engole queue.Full silenciosamente (não pode lançar — bloquearia ConnectorThread)."""
+    from data_downloader.dll.types import TConnectorAssetIdentifier
+
+    q: Queue[tuple[int, int]] = Queue(maxsize=1)
+    cb = make_history_trade_callback_v2(q)
+    asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
+
+    cb(asset, 1, 0)  # OK
+    cb(asset, 2, 0)  # raises Full INTERNAMENTE; engolido
+
+    # Sem exception — apenas o primeiro está na queue.
+    assert q.qsize() == 1
+
+
+# =====================================================================
+# Story 1.3 — Progress callback
+# =====================================================================
+
+
+@pytest.mark.unit
+def test_make_progress_callback_returns_callable_and_appends() -> None:
+    """make_progress_callback retorna WINFUNCTYPE-wrapped E appenda em _cb_refs."""
+    q: Queue[int] = Queue(maxsize=100)
+    initial = len(_cb_refs)
+
+    cb = make_progress_callback(q)
+
+    assert cb is not None
+    assert callable(cb)
+    assert len(_cb_refs) == initial + 1
+    assert cb is _cb_refs[-1]
+
+
+@pytest.mark.unit
+def test_progress_callback_only_calls_put_nowait_inv1() -> None:
+    """AC5/INV-1 — Progress callback faz APENAS put_nowait(int).
+
+    Signature da DLL: ``(ticker, bolsa, feed, progress)``. Apenas progress
+    é enfileirado; demais args descartados.
+    """
+    mock_queue = MagicMock(spec=Queue)
+    mock_dll = MagicMock()
+
+    cb = make_progress_callback(mock_queue)
+
+    cb("WDOJ26", "F", 0, 50)
+    cb("WDOJ26", "F", 0, 99)
+    cb("WDOJ26", "F", 0, 100)
+
+    assert mock_queue.put_nowait.call_count == 3
+    assert mock_queue.put_nowait.call_args_list[0].args == (50,)
+    assert mock_queue.put_nowait.call_args_list[1].args == (99,)
+    assert mock_queue.put_nowait.call_args_list[2].args == (100,)
+    # Nenhum outro método:
+    assert not mock_queue.put.called
+    assert not mock_queue.get.called
+    # INV-1: callback NÃO chamou DLL:
+    assert mock_dll.mock_calls == []
+
+
+@pytest.mark.unit
+def test_progress_callback_swallows_full_silently() -> None:
+    """Progress callback engole queue.Full sem lançar."""
+    q: Queue[int] = Queue(maxsize=1)
+    cb = make_progress_callback(q)
+
+    cb("WDOJ26", "F", 0, 1)  # OK
+    cb("WDOJ26", "F", 0, 2)  # raises Full → engolido
+
+    assert q.qsize() == 1
+
+
+@pytest.mark.unit
+def test_history_v2_and_progress_callbacks_added_to_cb_refs_independently() -> None:
+    """Cada factory appenda 1 ref. Múltiplas chamadas acumulam (anti-GC)."""
+    cleanup_cb_refs()
+    assert len(_cb_refs) == 0
+
+    h_q: Queue[tuple[int, int]] = Queue()
+    p_q: Queue[int] = Queue()
+
+    make_history_trade_callback_v2(h_q)
+    make_progress_callback(p_q)
+
+    assert len(_cb_refs) == 2

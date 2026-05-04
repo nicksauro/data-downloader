@@ -31,12 +31,18 @@ import contextlib
 from queue import Full, Queue
 from typing import Any
 
-from data_downloader.dll.types import TStateCallback
+from data_downloader.dll.types import (
+    THistoryTradeCallbackV2,
+    TProgressCallback,
+    TStateCallback,
+)
 
 __all__ = [
     "_cb_refs",
     "cleanup_cb_refs",
+    "make_history_trade_callback_v2",
     "make_noop_callback",
+    "make_progress_callback",
     "make_state_callback",
 ]
 
@@ -146,6 +152,112 @@ def make_noop_callback(funtype: type) -> Any:
         del args
 
     wrapped: Any = funtype(_noop)
+    _cb_refs.append(wrapped)
+    return wrapped
+
+
+# =====================================================================
+# Story 1.3 — History download callbacks (V2)
+# =====================================================================
+# Decisão COUNCIL-03 (mini-council Dex+Nelo+Sol): usar V2
+# (``SetHistoryTradeCallbackV2`` + ``TranslateTrade``).
+#
+# - History callback V2 entrega ``(asset, pTrade_handle, flags)`` na
+#   ConnectorThread.
+# - Callback faz APENAS ``queue.put_nowait((handle, flags))`` — lei R3 /
+#   manual §4 L4382 / ADR-005 INV-1.
+# - ``TranslateTrade(pTrade, byref(TConnectorTrade))`` é responsabilidade do
+#   IngestorThread (FORA do callback) — chamá-lo no callback violaria R3.
+# - Política put-with-timeout (resposta H4 Pyro em
+#   ``OPEN_QUESTIONS_RESPONSES.md`` Q1) é aplicada na thread CONSUMIDORA
+#   (IngestorThread .get(timeout=...)), NÃO aqui — o callback usa
+#   ``put_nowait`` por necessidade (não pode bloquear ConnectorThread).
+# =====================================================================
+
+
+def make_history_trade_callback_v2(trade_queue: Queue[tuple[int, int]]) -> Any:
+    """Cria o callback V2 de trades históricos (Story 1.3 / COUNCIL-03).
+
+    O callback faz EXCLUSIVAMENTE ``trade_queue.put_nowait((handle, flags))``.
+    O ``handle`` é opaco (``c_size_t`` truncado para ``int`` Python) e DEVE
+    ser passado a ``ProfitDLL.translate_trade`` em **IngestorThread** —
+    NUNCA dentro do callback (lei R3 / manual §4 L4382 / Q06-V).
+
+    Política de overflow: ``put_nowait`` raises ``queue.Full`` em saturação.
+    Callback engole silenciosamente (não pode logar/lançar — bloquearia a
+    ConnectorThread). Detecção via metric externa em IngestorThread.
+    O design real para back-pressure (resposta H4 Nelo em
+    ``OPEN_QUESTIONS_RESPONSES.md`` Q1) é "fila grande + drain rápido em
+    IngestorThread" — Story 1.3 usa ``maxsize=100_000`` (finding Pyro 1.4.5).
+
+    Args:
+        trade_queue: ``Queue[tuple[int, int]]`` consumida por
+            ``download_chunk`` IngestorThread. Tuple = ``(handle, flags)``.
+
+    Returns:
+        Objeto ``WINFUNCTYPE``-wrapped pronto para passar a
+        ``ProfitDLL.set_history_trade_callback_v2``. JÁ está em
+        ``_cb_refs`` (anti-GC, Q07-V) — caller NÃO precisa appendar.
+
+    Examples:
+        >>> from queue import Queue
+        >>> q: Queue[tuple[int, int]] = Queue(maxsize=100_000)
+        >>> cb = make_history_trade_callback_v2(q)
+        >>> # Pass cb to dll.set_history_trade_callback_v2(cb).
+    """
+
+    def _history_cb(_asset: object, p_trade: int, flags: int) -> None:
+        # CRITICAL — apenas put_nowait. Não adicionar NADA aqui (R3/INV-1).
+        # ``_asset`` é descartado — IngestorThread já conhece symbol via
+        # contexto do download_chunk (ticker/exchange validados upfront).
+        # ``p_trade`` é handle opaco (``c_size_t``); int(...) força python int
+        # estável para uso na fila.
+        with contextlib.suppress(Full):
+            trade_queue.put_nowait((int(p_trade), int(flags)))
+
+    wrapped: Any = THistoryTradeCallbackV2(_history_cb)
+    _cb_refs.append(wrapped)
+    return wrapped
+
+
+def make_progress_callback(progress_queue: Queue[int]) -> Any:
+    """Cria o callback de progresso de download histórico (Story 1.3).
+
+    Callback faz EXCLUSIVAMENTE ``progress_queue.put_nowait(int(progress))``.
+    Progresso é inteiro 1..100 (manual §3.1 L1750). Histórico chega na
+    queue para que ProgressMonitor thread:
+
+    - Detecte conclusão (progresso=100).
+    - Detecte quirk Q02-E (99% reconectando) sem confundir com travamento.
+    - Registre ``progress_history`` em ``ChunkResult``.
+
+    Args:
+        progress_queue: ``Queue[int]`` consumida por ``download_chunk``
+            ProgressMonitor thread. Cada item = inteiro 1..100.
+
+    Returns:
+        Objeto ``WINFUNCTYPE``-wrapped (signature
+        ``TProgressCallback`` da DLL — V1 signature: ``(ticker, bolsa,
+        feed, progress)``). JÁ está em ``_cb_refs``.
+
+    Examples:
+        >>> from queue import Queue
+        >>> q: Queue[int] = Queue(maxsize=1000)
+        >>> cb = make_progress_callback(q)
+        >>> # Pass cb to dll.set_progress_callback(cb).
+    """
+
+    def _progress_cb(
+        _ticker: object,
+        _bolsa: object,
+        _feed: int,
+        progress: int,
+    ) -> None:
+        # CRITICAL — apenas put_nowait. Não adicionar NADA aqui (R3/INV-1).
+        with contextlib.suppress(Full):
+            progress_queue.put_nowait(int(progress))
+
+    wrapped: Any = TProgressCallback(_progress_cb)
     _cb_refs.append(wrapped)
     return wrapped
 
