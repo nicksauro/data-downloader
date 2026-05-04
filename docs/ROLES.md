@@ -357,4 +357,45 @@ Quinn `*qa-gate` em PR de `cli.py`:
 
 ---
 
-*— Squad data-downloader, ROLES v1.0.1 — 2026-05-03 (amendment)*
+## 9. Amendment 2026-05-04 — Smoke Executor (Autoridade Compartilhada Tríade)
+
+**Autor:** 📋 Morgan + 🧪 Quinn + ⚙️ Gage (mini-council)
+**Origem:** COUNCIL-31 — usuário forneceu credenciais ProfitDLL e autorizou modo autônomo
+**Related:** `docs/decisions/COUNCIL-31-smoke-executor-role-autonomous.md`, `docs/qa/SMOKE_PROTOCOL.md` §2.B, COUNCIL-09 (política original)
+
+Smoke real contra ProfitDLL ao vivo deixa de ser exclusivamente humano quando o usuário autoriza explicitamente o squad em **modo autônomo** com credenciais fornecidas. A nova autoridade é **compartilhada por uma tríade** — preservando separation of concerns e impedindo conflito de interesse de qualquer agente individual.
+
+### Autoridade Compartilhada — Smoke Executor (modo autônomo)
+
+| Papel | Agente | Operação Exclusiva | Notas |
+|-------|--------|---------------------|-------|
+| **Executor** | 💻 Dex | Roda comando smoke per `SMOKE_PROTOCOL.md` §4 | Gera Parquets, logs JSONL, hashes SHA256 |
+| **Validador** | 🧪 Quinn | Aplica 6 critérios PASS / 8 critérios FAIL §7-8 | Emite verdict; **NÃO executa o que valida** |
+| **Auditor** | ⚙️ Gage | Registra em audit log: executor, commit_sha, smoke_id, verdict, evidência path | **NÃO executa nem valida** — só audita |
+
+### Pré-condições obrigatórias (todas devem ser verdadeiras)
+
+1. `.env` presente com `PROFITDLL_KEY`, `PROFIT_USER`, `PROFIT_PASS` válidos.
+2. `ProfitDLL.dll` + companions instaladas na máquina do squad.
+3. Autorização explícita do usuário registrada (mensagem na conversa, comentário em PR ou em story-followup).
+4. Sem autorização → modo padrão (humano executa) prevalece per `SMOKE_PROTOCOL.md` §2.A.
+
+### Regras de não-acumulação
+
+- Quinn **NUNCA** executa smoke que vai validar (mesmo princípio §5 `WAIVERS/README.md` — emissor não assina).
+- Dex **NUNCA** emite verdict sobre smoke que executou.
+- Gage **NUNCA** assume papel de executor ou validador — só audita.
+- Falha de execução: Dex produz relatório de falha (hashes parciais sanitizados); Quinn lê e gera `QA_FIX_REQUEST` per §10.
+
+### Aplica a
+
+- WAIVERS 1.7b, 1.8, 4.1, 4.2 — agora desbloqueáveis pela tríade autônoma.
+- WAIVER 4.4 — **continua humano** (VM Windows limpa + SmartScreen click-through fora do alcance tríade).
+
+### Rationale
+
+Ver COUNCIL-31 §3-4 para opções consideradas (Quinn-só / Gage-só / Dex-só / novo papel) e §5 para decisão final. Resumo: Quinn-só viola separation of concerns; Gage-só extrapola escopo release puro; Dex-só é 1 olho; novo papel violaria limite de 10 agentes do MANIFEST. Tríade preserva todos os princípios.
+
+---
+
+*— Squad data-downloader, ROLES v1.0.2 — 2026-05-04 (amendment COUNCIL-31)*

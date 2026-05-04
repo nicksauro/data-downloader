@@ -17,6 +17,14 @@ Garantir que o caminho **CLI → orchestrator → DLL real → write Parquet →
 
 ## 2. Quem pode rodar
 
+> **Amendment 2026-05-04 (COUNCIL-31):** o smoke real passou a ter dois modos
+> de execução. Modo padrão (§2.A) preserva o protocolo original (humano executa);
+> modo autônomo (§2.B) habilita uma tríade de agentes (Dex+Quinn+Gage) quando
+> o usuário autoriza explicitamente e fornece credenciais. **Critérios PASS/FAIL
+> (§7-8) são objetivos e idênticos nos dois modos.**
+
+### 2.A Modo padrão — humano executa (default)
+
 **Apenas o usuário humano**, na máquina Windows que possui:
 
 - `ProfitDLL.dll` + companions DLLs + `.dat` instalados (caminho conhecido).
@@ -24,7 +32,35 @@ Garantir que o caminho **CLI → orchestrator → DLL real → write Parquet →
 - Ambiente Python 3.11+ com `data-downloader` instalado (modo dev: `pip install -e .`).
 - Internet estável (banda mínima 1 Mbps; smoke pode baixar ~50-200 MB).
 
-**Agentes (Quinn, Dex, Gage, etc.) NÃO podem rodar este teste** — não têm DLL nem licença. Quinn **valida a evidência produzida** pelo humano.
+Neste modo, **agentes (Quinn, Dex, Gage, etc.) NÃO podem rodar este teste** — assume-se que não têm DLL nem credenciais. Quinn **valida a evidência produzida** pelo humano.
+
+### 2.B Modo autônomo — tríade Smoke Executor (Dex executa + Quinn valida + Gage audita)
+
+**Habilitado SOMENTE quando todas as pré-condições são satisfeitas:**
+
+1. Usuário fornece credenciais válidas (`PROFITDLL_KEY` / `PROFIT_USER` / `PROFIT_PASS`) em `.env` local do squad.
+2. `ProfitDLL.dll` + companions instaladas na máquina do squad.
+3. Usuário **autoriza explicitamente** modo autônomo (mensagem na conversa, comentário em PR/story, ou story-followup com flag `autonomous_mode_authorized: true`).
+4. Sem qualquer uma das três acima → modo §2.A prevalece.
+
+**Distribuição de responsabilidades (per ROLES.md §9 / COUNCIL-31):**
+
+| Papel       | Agente   | Responsabilidade                                                                         |
+|-------------|----------|------------------------------------------------------------------------------------------|
+| Executor    | 💻 Dex   | Roda comando per §4. Coleta logs JSONL, Parquets, hashes SHA256, snapshot catálogo.       |
+| Validador   | 🧪 Quinn | Lê evidência produzida. Aplica 6 critérios PASS (§7) + verifica 8 critérios FAIL (§8). Emite verdict. |
+| Auditor     | ⚙️ Gage  | Registra entry em audit log: executor=Dex, validator=Quinn, commit_sha código, hashes Parquets, verdict, evidência path. |
+
+**Regras de não-acumulação (separation of concerns):**
+
+- Quinn **NUNCA** executa o smoke que vai validar (princípio §5 `WAIVERS/README.md`).
+- Dex **NUNCA** emite verdict sobre smoke que executou.
+- Gage **NUNCA** executa nem valida — apenas audita.
+- Em caso de falha durante execução, Dex gera relatório de falha **mesmo assim** com hashes parciais sanitizados; Quinn lê e gera `QA_FIX_REQUEST` per §10.
+
+**Sanitização (§11) é obrigatória** em ambos os modos — sem hostname, sem username em paths, sem conteúdo de `.env`, sem credenciais.
+
+**Limitação:** modo autônomo NÃO se aplica a smokes que exigem ambientes fora do squad — exemplo: `WAIVER 4.4` (VM Windows limpa + SmartScreen click-through) **permanece humano** porque tríade autônoma não tem como provisionar VM nem clicar em dialogs SmartScreen.
 
 ---
 
@@ -313,4 +349,5 @@ Se houver dúvida, perguntar a Gage (devops) antes de comitar.
 
 ---
 
-— Quinn, no portão 🧪 (autoria do protocolo; smoke executado pelo humano, validado por Quinn)
+— Quinn, no portão 🧪 (autoria do protocolo)
+— Amendment §2 split — Morgan 📋 + Quinn 🧪 + Gage ⚙️ (COUNCIL-31, 2026-05-04): modo padrão humano + modo autônomo tríade (Dex executa + Quinn valida + Gage audita)
