@@ -415,6 +415,115 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         title="Cleanup de backups concluído",
         detail="{n_removed} arquivos .bak removidos (idade > {days} dias).",
     ),
+    # =================================================================
+    # §17b — Epic 3 IDs (Story 3.1+ — Uma authority via MICROCOPY_CATALOG.md)
+    # =================================================================
+    # §17b.1 — DownloadScreen
+    "BTN_DOWNLOAD": MicrocopyEntry(msg_type="button", title="Baixar Histórico"),
+    "BTN_DOWNLOAD_PRIMARY": MicrocopyEntry(msg_type="button", title="⬇ BAIXAR HISTÓRICO"),
+    "BTN_LIST_CONTRACTS": MicrocopyEntry(msg_type="button", title="Listar Contratos Vigentes"),
+    "BTN_DETAILS": MicrocopyEntry(msg_type="button", title="Detalhes"),
+    "BTN_DETAILS_HIDE": MicrocopyEntry(msg_type="button", title="Esconder Detalhes"),
+    "LBL_SYMBOL": MicrocopyEntry(msg_type="label", title="Símbolo"),
+    "LBL_PERIOD": MicrocopyEntry(msg_type="label", title="Período"),
+    "LBL_START_DATE": MicrocopyEntry(msg_type="label", title="Data inicial"),
+    "LBL_END_DATE": MicrocopyEntry(msg_type="label", title="Data final"),
+    "LBL_OUTPUT_FOLDER": MicrocopyEntry(msg_type="label", title="Pasta de Destino"),
+    "LBL_CURRENT_CONTRACT": MicrocopyEntry(msg_type="label", title="Contrato atual"),
+    "LBL_DOWNLOAD_SCREEN_TITLE": MicrocopyEntry(msg_type="label", title="Baixar Histórico"),
+    "LBL_DOWNLOAD_SCREEN_SUBTITLE": MicrocopyEntry(
+        msg_type="label", title="Selecione, configure e clique em baixar"
+    ),
+    "LBL_DOWNLOAD_SCREEN_SUBTITLE_DOWNLOADING": MicrocopyEntry(
+        msg_type="label", title="Baixando {symbol}"
+    ),
+    "LBL_PERIOD_RANGE_DISPLAY": MicrocopyEntry(
+        msg_type="label", title="{start} → {end} (~{duration})"
+    ),
+    "LBL_ESTIMATE_RANGE": MicrocopyEntry(msg_type="label", title="Estimativa: {min}-{max} minutos"),
+    "LBL_ESTIMATE_UNAVAILABLE": MicrocopyEntry(
+        msg_type="label", title="Estimativa indisponível — depende do volume"
+    ),
+    "LBL_ADVANCED_DRAWER": MicrocopyEntry(
+        msg_type="label", title="Avançado (chunk size, retry, pasta)"
+    ),
+    "LBL_NAVIGATION_HINT": MicrocopyEntry(
+        msg_type="label",
+        title="UI não bloqueia — pode navegar para Catálogo enquanto baixa",
+    ),
+    "LBL_FOOTER_SHORTCUTS": MicrocopyEntry(
+        msg_type="label",
+        title="Atalhos: Ctrl+D iniciar  •  Ctrl+R repetir último  •  Ctrl+/ todos",
+    ),
+    "PLH_SYMBOL": MicrocopyEntry(msg_type="placeholder", title="ex: WDOJ26"),
+    "PLH_SYMBOL_SUGGESTED_HINT": MicrocopyEntry(
+        msg_type="placeholder", title="{symbol} sugerido — contrato vigente do {asset}"
+    ),
+    "TIP_SYMBOL": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "Código do contrato (ex: WDOJ26 = WDO vencimento abril/2026). "
+            "Use o autocomplete para ver vigentes."
+        ),
+    ),
+    "TIP_PERIOD": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "Período de histórico para baixar. Default: mês corrente. "
+            "Períodos > 30 dias são divididos em chunks."
+        ),
+    ),
+    "TIP_BTN_DOWNLOAD": MicrocopyEntry(msg_type="label", title="Iniciar download (Ctrl+D)."),
+    "TIP_BTN_CANCEL": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "Cancelar download em progresso. Trades já baixados são preservados. " "(Ctrl+C ou Esc)"
+        ),
+    ),
+    "TIP_CANCEL_DURING_RECONNECT": MicrocopyEntry(
+        msg_type="label",
+        title="Reconnect normal — cancelar agora pode forçar re-baixar tudo.",
+    ),
+    # §17b.4 — MainWindow / StatusBar
+    "LBL_NAV_DOWNLOAD": MicrocopyEntry(msg_type="label", title="Download"),
+    "LBL_NAV_CATALOG": MicrocopyEntry(msg_type="label", title="Catálogo"),
+    "LBL_NAV_SETTINGS": MicrocopyEntry(msg_type="label", title="Settings"),
+    "LBL_STATUSBAR_DLL_CONNECTED": MicrocopyEntry(
+        msg_type="label", title="✓ DLL: conectada ({version})"
+    ),
+    "LBL_STATUSBAR_DLL_DISCONNECTED": MicrocopyEntry(msg_type="label", title="✗ DLL: desconectada"),
+    "LBL_STATUSBAR_DLL_CONNECTING": MicrocopyEntry(msg_type="label", title="↻ DLL: conectando..."),
+    "LBL_STATUSBAR_APP_VERSION": MicrocopyEntry(msg_type="label", title="v{version}"),
+    "LBL_STATUSBAR_SHORTCUTS": MicrocopyEntry(msg_type="label", title="Ctrl+/"),
+    "LBL_NAV_BADGE_DOWNLOADING": MicrocopyEntry(msg_type="label", title="↻"),
+    # §17b.2 — CatalogScreen (placeholders mínimos para Story 3.1)
+    "LBL_CATALOG_SCREEN_TITLE": MicrocopyEntry(msg_type="label", title="Catálogo"),
+    # §17b.3 — SettingsScreen (placeholder mínimo para Story 3.1)
+    "LBL_SETTINGS_SCREEN_TITLE": MicrocopyEntry(msg_type="label", title="Configurações"),
+    # §17b.5 — Toasts e modais
+    "TST_DOWNLOAD_DONE": MicrocopyEntry(
+        msg_type="success",
+        title="✓ {symbol}: {n_trades} trades em {n_files} arquivos.",
+    ),
+    "TST_CANCEL_DONE": MicrocopyEntry(
+        msg_type="info",
+        title="↻ Download cancelado. Parcial salvo.",
+    ),
+    "MOD_QUIT_DURING_DOWNLOAD_TITLE": MicrocopyEntry(
+        msg_type="prompt", title="Sair durante download em progresso?"
+    ),
+    "MOD_QUIT_DURING_DOWNLOAD_BODY": MicrocopyEntry(
+        msg_type="prompt",
+        title="Trades já baixados serão preservados (cache em re-tentativa).",
+    ),
+    "BTN_QUIT_AND_CANCEL": MicrocopyEntry(msg_type="button", title="Sim, sair (cancelar download)"),
+    "BTN_KEEP_DOWNLOADING": MicrocopyEntry(msg_type="button", title="Continuar baixando"),
+    # Empty state DownloadScreen
+    "EMP_DOWNLOAD_NEW_USER": MicrocopyEntry(
+        msg_type="empty",
+        title="Bem-vindo ao data-downloader",
+        detail="Selecione um símbolo + período + clique em Baixar.",
+    ),
 }
 
 

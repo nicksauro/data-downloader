@@ -1,56 +1,130 @@
-"""data_downloader.ui.widgets.symbol_picker — Picker de símbolo com autocomplete.
+"""data_downloader.ui.widgets.symbol_picker — Picker de símbolo (Story 3.2).
 
 Owner: Felix (frontend-dev) | Design: Uma (ux-design-expert).
 
-**Status:** Epic 3 — TODO (placeholder skeleton, COUNCIL-12 prep).
+``QComboBox`` editável com autocomplete e cache do último símbolo usado em
+``~/.data_downloader/cache/last_symbol.txt``. Resolução do contrato vigente
+(via :func:`vigent_contract`) é oportunística — fica em modo "stub" se a
+DLL/catálogo não estiver disponível, sem bloquear a UI.
 
-Widget composto para selecionar contrato/símbolo. Combina ``QComboBox``
-editável com autocomplete consumindo ``vigent_contract()`` via
-``CatalogAdapter`` (não chama ``public_api`` diretamente — passa pelo
-adapter em QThread, conforme R11).
-
-Comportamento (Felix Story 3.2):
-
-    - **Default value** — última usada (cache ``~/.data-downloader/last_symbol``)
-      ou contrato vigente do WDO.
-    - **Autocomplete** — mostra contrato vigente em destaque + alternativas.
-      Format: "WDOJ26 (vigente até 28/03/2026)" usando ``LBL_CONTRACT_VALID_UNTIL``.
-    - **Validação inline** — se símbolo digitado não é contrato vigente,
-      mostra erro inline ``ERR_DLL_INVALID_TICKER`` ao lado do campo.
-    - **Botão "Listar Vigentes"** — abre modal com tabela de contratos
-      vigentes filtráveis por asset (WDO, WIN, etc.).
-    - **Tooltip** — ``TIP_SYMBOL`` (THEME — context).
-
-Microcopy referenced:
-    - ``LBL_SYMBOL`` — label do campo
-    - ``PLH_SYMBOL`` — placeholder "ex: WDOJ26"
-    - ``LBL_CONTRACT_VALID_UNTIL`` — sufixo "vigente até {date}"
-    - ``BTN_LIST_CONTRACTS`` — "Listar Vigentes"
-    - ``ERR_DLL_INVALID_TICKER`` — erro inline
-    - ``PLH_SYMBOL_SUGGESTED_HINT`` — hint quando sugerido
-    - ``TIP_SYMBOL`` — tooltip
-
-Referências:
-    - docs/ux/WIREFRAMES.md (DownloadScreen)
-    - docs/ux/MICROCOPY_CATALOG.md
-    - docs/ux/QT_PATTERNS.md §2 (signal/slot via adapter)
-    - docs/decisions/COUNCIL-12-epic3-prep.md
+Microcopy IDs (R17 — Uma):
+    - ``LBL_SYMBOL`` (label)
+    - ``PLH_SYMBOL`` (placeholder)
+    - ``BTN_LIST_CONTRACTS`` (botão "Listar Vigentes" — V2)
+    - ``TIP_SYMBOL`` (tooltip)
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+
+from data_downloader.ui.microcopy_loader import format_msg
+
 __all__ = ["SymbolPicker"]
 
 
-class SymbolPicker:
-    """Placeholder — Epic 3 Story 3.2 implementa ``QWidget`` real.
+_CACHE_DIR = Path.home() / ".data_downloader" / "cache"
+_CACHE_FILE = _CACHE_DIR / "last_symbol.txt"
 
-    Autocomplete de contratos vigentes com validação inline. Consome
-    ``vigent_contract()`` via CatalogAdapter (R11 — não bloqueia MainThread).
+# Lista mínima de símbolos sugeridos por default (não exaustiva — apenas
+# UX hint enquanto DLL não responde). Estes não são "vigentes" (data-bound);
+# são candidatos comuns que o usuário pode editar.
+_DEFAULT_SUGGESTIONS: tuple[str, ...] = ("WDOJ26", "WINJ26", "WDO", "WIN")
+
+
+class SymbolPicker(QWidget):
+    """Combobox com autocomplete + label + hint do contrato vigente.
+
+    API pública:
+        value() -> str: símbolo digitado (uppercase, trimmed).
+        set_value(str) -> None: programaticamente preenche.
+        save_to_cache(): persiste o valor atual em ``last_symbol.txt``.
     """
 
-    def __init__(self) -> None:
-        raise NotImplementedError(
-            "Epic 3 — Story 3.2 implementa SymbolPicker. "
-            "Veja docs/ux/WIREFRAMES.md (DownloadScreen) + COUNCIL-12."
-        )
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self._label = QLabel(format_msg("LBL_SYMBOL"), self)
+        self._label.setProperty("role", "subtitle")
+
+        self._combo = QComboBox(self)
+        self._combo.setEditable(True)
+        self._combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._combo.setToolTip(format_msg("TIP_SYMBOL"))
+
+        # Placeholder ("ex: WDOJ26") — em QComboBox é via lineEdit.
+        line_edit = self._combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText(format_msg("PLH_SYMBOL"))
+
+        # Popula sugestões + cache.
+        for sym in _DEFAULT_SUGGESTIONS:
+            self._combo.addItem(sym)
+        cached = self._load_from_cache()
+        if cached:
+            self.set_value(cached)
+        else:
+            # Default = 1ª sugestão.
+            self.set_value(_DEFAULT_SUGGESTIONS[0])
+
+        # Hint do contrato vigente (atualizado quando vigent_contract roda).
+        self._hint = QLabel("", self)
+        self._hint.setProperty("role", "muted")
+
+        # Layout vertical: label + combo (com botão futuro side-by-side).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+        outer.addWidget(self._label)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._combo, stretch=1)
+        outer.addLayout(row)
+
+        outer.addWidget(self._hint)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def value(self) -> str:
+        """Retorna símbolo atual (uppercase, trimmed)."""
+        return (self._combo.currentText() or "").strip().upper()
+
+    def set_value(self, symbol: str) -> None:
+        """Define símbolo programaticamente."""
+        sym = (symbol or "").strip().upper()
+        # Adiciona se não existir.
+        idx = self._combo.findText(sym)
+        if idx < 0:
+            self._combo.addItem(sym)
+            idx = self._combo.findText(sym)
+        self._combo.setCurrentIndex(idx)
+
+    def set_hint(self, text: str) -> None:
+        """Atualiza o hint embaixo (ex: 'WDOJ26 sugerido — vigente até ...')."""
+        self._hint.setText(text)
+
+    def save_to_cache(self) -> None:
+        """Persiste o valor atual em ``~/.data_downloader/cache/last_symbol.txt``."""
+        try:
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            _CACHE_FILE.write_text(self.value(), encoding="utf-8")
+        except OSError:
+            # Best-effort — UX cache é opcional.
+            pass
+
+    # ------------------------------------------------------------------
+    # Helpers internos
+    # ------------------------------------------------------------------
+
+    def _load_from_cache(self) -> str:
+        try:
+            if _CACHE_FILE.exists():
+                return _CACHE_FILE.read_text(encoding="utf-8").strip().upper()
+        except OSError:
+            pass
+        return ""

@@ -1,9 +1,9 @@
 # EPIC 3 — Desktop UI
 
-**Status:** ready (preparatório completo via COUNCIL-12 — aguarda autorização Morgan/PO para abertura)
+**Status:** in_progress (Story 3.1 Done — primeira tela real entregue via COUNCIL-23)
 **Owner:** 📋 Morgan
 **Data criação:** 2026-05-03
-**Última atualização:** 2026-05-03 (COUNCIL-12 — Epic 3 prep)
+**Última atualização:** 2026-05-03 (COUNCIL-23 — Story 3.1 Done; transição prep → in_progress)
 **Target:** entregar UI desktop nativa (PySide6) consumindo public_api estável (Epic 1) — golden path de download via clique, não terminal. Pós-Epic 2.
 
 ## Preparatório completo (COUNCIL-12)
@@ -62,8 +62,8 @@ Empacotar foundation + qualidade (Epics 1 + 2) em uma UI desktop usável por qua
 
 | ID | Título | Owner | Estimativa | Artefatos prep ready |
 |----|--------|-------|------------|----------------------|
-| 3.1 | PySide6 shell + main window + navigation | 🖼️ Felix | 2d | WIREFRAMES MainWindow + skeleton main_window.py + shortcuts.py + style.qss seções 1/7/8 |
-| 3.2 | Tela Download (golden path completo) | 🖼️ Felix + 🎨 Uma | 3d | WIREFRAMES Tela 1 + FLOWS 1/3/4 + skeleton download_screen.py + symbol/period/progress widgets + download_adapter |
+| 3.1 | **DONE** — MainWindow + DownloadScreen funcional consumindo public_api (COUNCIL-23) | 🖼️ Felix | 3d (real) | WIREFRAMES MainWindow + Tela 1 + skeleton + style.qss seções 1/7/8 |
+| 3.2 | (consolidado em 3.1) Tela Download — refinements + drawer Avançado | 🖼️ Felix + 🎨 Uma | 1d | (Story 3.1 entregou primeira versão funcional) |
 | 3.3 | Tela Catálogo (lista partições + filtros) | 🖼️ Felix + 💾 Sol | 2d | WIREFRAMES Tela 2 + FLOWS 2 + skeleton catalog_screen.py + catalog_adapter |
 | 3.4 | Tela Settings (env vars, paths, theme) | 🖼️ Felix + 🎨 Uma | 1d | WIREFRAMES Tela 3 + skeleton settings_screen.py + microcopy §17b.3 |
 | 3.5 | Theming (light/dark, QSS, DontUseNativeDialog) | 🖼️ Felix + 🎨 Uma | 1d | style.qss esqueleto completo (Felix refina/expande) |
