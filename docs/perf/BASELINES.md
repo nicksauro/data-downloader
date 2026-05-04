@@ -409,3 +409,64 @@ Não no escopo de Story 1.4.5. Esqueleto vazio.
 - Override **DEVE** ser registrado em `docs/qa/WAIVERS/{story}-{date}.md`.
 
 — Pyro ⚡
+
+---
+
+## Storage Tuning Pareto Matrix (Story 2.8 — measured-pareto)
+
+**Owner:** Sol + Pyro mini-council COUNCIL-21 (2026-05-04).
+**Status:** measured-pareto.
+**Refs:** `docs/decisions/COUNCIL-21-storage-pareto-defaults.md` —
+sign-off completo + tabela cell-a-cell.
+
+### `bench_parquet_pareto` — Story 2.8 v1
+
+**Workload:** 500_000 trades sintéticos WDOJ26 seed=42; 4 compressions ×
+5 row_groups = 20 cells; 2 runs/cell.
+**git_sha:** `14ecdf3-dirty` (Story 2.8 measurement run).
+**JSON:** `benchmarks/results/baselines_v1_mock/bench_parquet_pareto-2026-05-04-14ecdf3-dirty.json`.
+
+**Pareto frontier (não-dominados):** 11 de 20 cells. Cell `snappy + 100k`
+(default ADR-002) é PARETO-ÓTIMO — confirmado empiricamente.
+
+**Resumo por compression@row_group=100k (cell de defaults):**
+
+| compression | write_tps | read_full_tps | read_filt_tps | file_MB | Pareto? |
+|-------------|----------:|--------------:|--------------:|--------:|---------|
+| **snappy (default)** | 875_029 | 73_104_702 | 87_499_283 | 18.2 | **PARETO ✓** |
+| zstd-1      | 648_433 | 51_716_696 | 64_206_893 | 13.3 | PARETO  |
+| zstd-3      | 624_322 | 63_036_629 | 73_318_790 | 12.1 | PARETO  |
+| none        | 898_933 | 79_949_438 | 104_593_030 | 28.8 | PARETO |
+
+**Decisão Sol+Pyro (COUNCIL-21):** **MANTER snappy + 100k.** Substituir
+por ZSTD-1 trocaria 27% de file_size por 26-30% de read throughput —
+perda real para workload read-heavy do data-downloader. ZSTD-3 fica
+disponível como ferramenta opcional para cold-storage (`*recompress`,
+Story futura).
+
+### `bench_sqlite_profiles` — Story 2.8 v1
+
+**Workload:** 500 register_partition + 200 get_completed_partitions + 1
+reconcile, 3 perfis × 2 runs.
+**git_sha:** `efd8be4-dirty`.
+**JSON:** `benchmarks/results/baselines_v1_mock/bench_sqlite_profiles-2026-05-04-efd8be4-dirty.json`.
+
+| Profile      | cache_size  | mmap_size | register_p50_ms | query_p50_ms | reconcile_ms |
+|--------------|------------:|----------:|----------------:|-------------:|-------------:|
+| low_memory   | -10_000 (10MB) | 16 MB |          3.54   |       0.103  |       165.4  |
+| **default**  | **-50_000 (50MB)** | **64 MB** | **3.39** |  **0.072** |    **161.5** |
+| aggressive   | -200_000 (200MB) | 256 MB |          3.51   |       0.072  |       152.9  |
+
+**Decisão Sol+Pyro (COUNCIL-21):** **MANTER default (50MB cache + 64MB
+mmap).** Composite score (0.7 register + 0.3 query×100) coloca default
+~2% à frente de aggressive (que custa 150MB extra de RAM) e ~19% à
+frente de low_memory. Profiles `low_memory` e `aggressive` ficam opt-in
+via env var `DATA_DOWNLOADER_SQLITE_PROFILE` ou arg
+`Catalog(sqlite_profile=...)`. M6 (OOM em laptops 16GB) fechado: total
+default = 114MB vs 456MB anteriores ao M6-fix de Story 1.5.
+
+**Status Story 2.8:** ✅ Pareto matrix MEASURED; defaults VALIDATED
+empiricamente; nenhuma mudança de default necessária; mudança aditiva
+(profile registry permite override sem code change).
+
+— Pyro + Sol, validando o Pareto ⚡💾

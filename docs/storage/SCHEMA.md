@@ -190,8 +190,8 @@ Toda escrita popula essas chaves no metadata custom do Parquet (acessível via `
 | `created_at`           | ISO8601 UTC          | YES         | `"2026-05-03T14:32:11Z"` — quando o arquivo foi finalizado.     |
 | `chunk_id`             | UUID                 | NO          | Último chunk que escreveu. NULL se merge de múltiplos chunks.   |
 | `download_job_id`      | UUID                 | YES         | Job de download que gerou (referencia `downloads.job_id`).      |
-| `compression`          | `"snappy"`           | YES         | Para auditoria; lido também do footer.                          |
-| `row_group_size`       | `"100000"`           | YES         | Configuração usada na escrita.                                  |
+| `compression`          | `"snappy"`           | YES         | Para auditoria; lido também do footer. Default validado Pareto-ótimo em COUNCIL-21 (Story 2.8). |
+| `row_group_size`       | `"100000"`           | YES         | Configuração usada na escrita. Default validado Pareto-ótimo em COUNCIL-21 (Story 2.8). |
 | `sha256_self`          | hex(64)              | YES         | SHA256 dos bytes do arquivo (calculado antes do close — ver INTEGRITY §3). |
 
 > **NOTA IMPORTANTE:** `sha256_self` é uma "chicken-and-egg": o hash é dos bytes do arquivo final, mas precisa estar dentro do arquivo. Resolução em INTEGRITY §3 (escrita em duas passadas: write tmp → hash tmp → reescrever metadata + atomic replace).
@@ -202,15 +202,39 @@ Toda escrita popula essas chaves no metadata custom do Parquet (acessível via `
 
 Localização: `data/history/catalog.db`.
 
-PRAGMAs no boot (finding M6 — defaults reduzidos):
+### PRAGMAs — 3 perfis selecionáveis (Story 2.8 / COUNCIL-21)
+
+PRAGMAs aplicados via `data_downloader.storage.sqlite_profiles`. Default
+é `default` profile (M6-reduzido, ratificado empiricamente):
+
 ```sql
+-- Profile 'default' (default em produção):
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA cache_size = -50000;       -- 50 MB (era -200000 = 200 MB)
-PRAGMA mmap_size = 67108864;      -- 64 MB (era 268435456 = 256 MB)
+PRAGMA synchronous  = NORMAL;
+PRAGMA cache_size   = -50000;      -- 50 MB
+PRAGMA mmap_size    = 67108864;    -- 64 MB
 PRAGMA foreign_keys = ON;
-PRAGMA temp_store = MEMORY;
+PRAGMA temp_store   = MEMORY;
 ```
+
+| Profile        | cache_size           | mmap_size | Use case                              |
+|----------------|---------------------:|----------:|---------------------------------------|
+| `low_memory`   | -10000 (10 MB)       |    16 MB  | CI / containers / laptops apertados   |
+| **`default`**  | **-50000 (50 MB)**   | **64 MB** | Padrão produção (M6-reduzido)         |
+| `aggressive`   | -200000 (200 MB)     |   256 MB  | Workstation 32GB+ / cargas pesadas    |
+
+**Selection precedence** (alta → baixa):
+
+1. Argumento explícito: `Catalog(sqlite_profile="aggressive")` ou
+   `Catalog(sqlite_profile=SQLiteProfile(...))`.
+2. Env var: `DATA_DOWNLOADER_SQLITE_PROFILE=low_memory|default|aggressive`.
+3. Default: `"default"`.
+
+Sol decisão (COUNCIL-21): defaults validados por
+`benchmarks/bench_sqlite_profiles.py` — `default` vence o composite
+score (0.7 × register + 0.3 × query × 100); `aggressive` ganha apenas
+~2% por 4x mais RAM (não compensa). Mudar profile a qualquer momento é
+seguro (só afeta cache da sessão atual; schema imutável).
 
 ### 5.1 `_schema_meta` — versão do próprio catálogo
 

@@ -59,8 +59,14 @@ def test_init_is_idempotent_no_duplicate_schema(db_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_init_pragmas_configured(db_path: Path) -> None:
-    """PRAGMAs canônicos (SCHEMA.md §5 + finding M6 reduzido)."""
+def test_init_pragmas_configured(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PRAGMAs canônicos do perfil ``default`` (Story 2.8 / COUNCIL-21).
+
+    Default profile = M6-reduzido (50 MB cache, 64 MB mmap).
+    Garante que env var ``DATA_DOWNLOADER_SQLITE_PROFILE`` não polui
+    o teste (delete antes de instanciar).
+    """
+    monkeypatch.delenv("DATA_DOWNLOADER_SQLITE_PROFILE", raising=False)
     cat = Catalog(db_path=db_path)
     conn = cat._conn_or_raise()
     journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -73,8 +79,8 @@ def test_init_pragmas_configured(db_path: Path) -> None:
 
     assert journal_mode.lower() == "wal"
     assert int(synchronous) == 1  # NORMAL
-    assert int(cache_size) == -50000  # 50 MB (M6)
-    assert int(mmap_size) == 67108864  # 64 MB (M6)
+    assert int(cache_size) == -50000  # 50 MB (default profile)
+    assert int(mmap_size) == 67108864  # 64 MB (default profile)
     assert int(foreign_keys) == 1
     assert int(temp_store) == 2  # MEMORY
 

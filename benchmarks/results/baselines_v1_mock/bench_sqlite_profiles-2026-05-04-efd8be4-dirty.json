@@ -1,0 +1,139 @@
+{
+  "benchmark": "bench_sqlite_profiles",
+  "version": "1.0.0",
+  "git_sha": "efd8be4",
+  "git_dirty": true,
+  "date": "2026-05-04T10:53:42Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "mock-1.0",
+  "config": {
+    "n_partitions": 500,
+    "n_queries": 200,
+    "n_runs_per_profile": 2,
+    "profiles_tested": [
+      "low_memory",
+      "default",
+      "aggressive"
+    ]
+  },
+  "scenarios": [
+    {
+      "profile": "low_memory",
+      "cache_size": -10000,
+      "mmap_size_mb": 16,
+      "n_partitions": 500,
+      "n_queries": 200,
+      "register_partition": {
+        "operation": "register_partition",
+        "n_runs": 2,
+        "p50_ms_p50_across_runs": 3.5401,
+        "p99_ms_p50_across_runs": 5.638549499999996,
+        "throughput_ops_per_sec_p50": 251.21357007356295,
+        "peak_rss_delta_mb_max": 0.114688
+      },
+      "get_completed_partitions": {
+        "operation": "get_completed_partitions",
+        "n_runs": 2,
+        "p50_ms_p50_across_runs": 0.103425,
+        "p99_ms_p50_across_runs": 0.15452649999999898,
+        "throughput_ops_per_sec_p50": 8211.85430980752,
+        "peak_rss_delta_mb_max": 0.323584
+      },
+      "reconcile": {
+        "operation": "reconcile",
+        "n_runs": 2,
+        "elapsed_ms_p50": 165.41465,
+        "elapsed_ms_p99": 167.721913,
+        "peak_rss_delta_mb_max": 0.155648
+      }
+    },
+    {
+      "profile": "default",
+      "cache_size": -50000,
+      "mmap_size_mb": 64,
+      "n_partitions": 500,
+      "n_queries": 200,
+      "register_partition": {
+        "operation": "register_partition",
+        "n_runs": 2,
+        "p50_ms_p50_across_runs": 3.3942750000000004,
+        "p99_ms_p50_across_runs": 25.553842999999997,
+        "throughput_ops_per_sec_p50": 230.2123211436242,
+        "peak_rss_delta_mb_max": 0
+      },
+      "get_completed_partitions": {
+        "operation": "get_completed_partitions",
+        "n_runs": 2,
+        "p50_ms_p50_across_runs": 0.07242499999999999,
+        "p99_ms_p50_across_runs": 0.2186209999999998,
+        "throughput_ops_per_sec_p50": 12582.249110165307,
+        "peak_rss_delta_mb_max": 0
+      },
+      "reconcile": {
+        "operation": "reconcile",
+        "n_runs": 2,
+        "elapsed_ms_p50": 161.53789999999998,
+        "elapsed_ms_p99": 166.857732,
+        "peak_rss_delta_mb_max": 0.012288
+      }
+    },
+    {
+      "profile": "aggressive",
+      "cache_size": -200000,
+      "mmap_size_mb": 256,
+      "n_partitions": 500,
+      "n_queries": 200,
+      "register_partition": {
+        "operation": "register_partition",
+        "n_runs": 2,
+        "p50_ms_p50_across_runs": 3.5072,
+        "p99_ms_p50_across_runs": 47.3877645,
+        "throughput_ops_per_sec_p50": 168.82338985914228,
+        "peak_rss_delta_mb_max": 0
+      },
+      "get_completed_partitions": {
+        "operation": "get_completed_partitions",
+        "n_runs": 2,
+        "p50_ms_p50_across_runs": 0.07214999999999999,
+        "p99_ms_p50_across_runs": 0.203916,
+        "throughput_ops_per_sec_p50": 12384.075586750758,
+        "peak_rss_delta_mb_max": 0
+      },
+      "reconcile": {
+        "operation": "reconcile",
+        "n_runs": 2,
+        "elapsed_ms_p50": 152.9498,
+        "elapsed_ms_p99": 154.40216,
+        "peak_rss_delta_mb_max": 0.012288
+      }
+    }
+  ],
+  "summary": {
+    "n_profiles": 3,
+    "n_partitions_workload": 500,
+    "n_queries_workload": 200,
+    "scoring": "0.7 * register_p50_ms + 0.3 * query_p50_ms*100 (lower=better)",
+    "fastest_profile": "default",
+    "current_default": "default",
+    "started_at": "2026-05-04T10:53:23.421190+00:00",
+    "completed_at": "2026-05-04T10:53:42.289648+00:00",
+    "verdict": "MEASURED"
+  },
+  "notes": "Story 2.8 AC3 \u2014 bench dos 3 perfis SQLite canonicos. Workload sintetico deterministico (sem dependencia de DLL). Decisao default em COUNCIL-21 \u2014 Sol+Pyro sign-off."
+}

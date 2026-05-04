@@ -57,22 +57,18 @@ from data_downloader.storage.catalog_models import (
 )
 from data_downloader.storage.parquet_writer import WriteResult, _sha256_file
 from data_downloader.storage.partition import PartitionKey
+from data_downloader.storage.sqlite_profiles import (
+    DEFAULT_PROFILE,
+    SQLiteProfile,
+    apply_profile,
+    resolve_profile,
+)
 
 _LOG = logging.getLogger(__name__)
 
 # Versão do catálogo SQLite (independente do schema Parquet).
 # v1.1.0 (Story 2.3): adiciona `_migration_log` para framework de migrations.
 CATALOG_VERSION: str = "1.1.0"
-
-# PRAGMAs (SCHEMA.md §5 — finding M6, defaults reduzidos).
-_PRAGMAS: tuple[str, ...] = (
-    "PRAGMA journal_mode = WAL",
-    "PRAGMA synchronous = NORMAL",
-    "PRAGMA cache_size = -50000",  # 50 MB
-    "PRAGMA mmap_size = 67108864",  # 64 MB
-    "PRAGMA foreign_keys = ON",
-    "PRAGMA temp_store = MEMORY",
-)
 
 # DDL inicial — schema v1.0.0 (SCHEMA.md §5.1..5.7).
 # Nota: ``_schema_meta`` usa o formato chave/valor (SCHEMA.md §5.1)
@@ -307,13 +303,20 @@ class Catalog:
             desligado em testes que querem inspecionar o estado pré-reconcile.
         auto_cleanup_orphans: Se ``True`` (default), executa
             ``cleanup_orphans()`` em ``__init__`` (AC7).
+        sqlite_profile: Perfil de PRAGMAs SQLite (Story 2.8 / COUNCIL-21).
+            ``None`` = resolução automática via env var
+            ``DATA_DOWNLOADER_SQLITE_PROFILE`` (``low_memory``,
+            ``default``, ``aggressive``) ou ``DEFAULT_PROFILE``.
+            Pode receber instância ``SQLiteProfile`` ou nome string.
     """
 
     db_path: Path
     data_dir: Path | None = None
     auto_reconcile: bool = True
     auto_cleanup_orphans: bool = True
+    sqlite_profile: SQLiteProfile | str | None = None
     _conn: sqlite3.Connection | None = field(default=None, init=False, repr=False)
+    _resolved_profile: SQLiteProfile = field(default=DEFAULT_PROFILE, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path)
@@ -325,6 +328,9 @@ class Catalog:
             self.data_dir = Path(self.data_dir)
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Story 2.8 — resolve perfil PRAGMA (explicit > env > default).
+        self._resolved_profile = resolve_profile(self.sqlite_profile)
 
         self._conn = self._open_connection()
         self._apply_pragmas()
@@ -382,10 +388,15 @@ class Catalog:
         return self._conn
 
     def _apply_pragmas(self) -> None:
-        """Aplica PRAGMAs canônicos (SCHEMA.md §5)."""
+        """Aplica PRAGMAs do perfil resolvido (Story 2.8 / COUNCIL-21).
+
+        Profile (default, low_memory, aggressive) é resolvido em
+        ``__post_init__`` e armazenado em ``self._resolved_profile``.
+        Documentação completa em
+        :mod:`data_downloader.storage.sqlite_profiles`.
+        """
         conn = self._conn_or_raise()
-        for pragma in _PRAGMAS:
-            conn.execute(pragma)
+        apply_profile(conn, self._resolved_profile)
 
     def _apply_migrations(self) -> None:
         """Aplica migrations pendentes (idempotente — AC2).
