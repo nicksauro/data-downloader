@@ -35,13 +35,14 @@ def main_window(qtbot):
     window.show()
     yield window
 
-    # Shutdown adapter explícito antes do teardown do qtbot.
-    try:
-        download_screen = window._screens.get("download")
-        if download_screen is not None and hasattr(download_screen, "_adapter"):
-            download_screen._adapter.shutdown()
-    except Exception:
-        pass
+    # Shutdown adapters explícito antes do teardown do qtbot.
+    for screen_id in ("download", "catalog", "settings"):
+        try:
+            screen = window._screens.get(screen_id)
+            if screen is not None and hasattr(screen, "_adapter"):
+                screen._adapter.shutdown()
+        except Exception:
+            pass
 
 
 # =====================================================================

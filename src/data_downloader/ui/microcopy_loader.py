@@ -496,10 +496,164 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "LBL_STATUSBAR_APP_VERSION": MicrocopyEntry(msg_type="label", title="v{version}"),
     "LBL_STATUSBAR_SHORTCUTS": MicrocopyEntry(msg_type="label", title="Ctrl+/"),
     "LBL_NAV_BADGE_DOWNLOADING": MicrocopyEntry(msg_type="label", title="↻"),
-    # §17b.2 — CatalogScreen (placeholders mínimos para Story 3.1)
+    # §17b.2 — CatalogScreen (Story 3.2)
     "LBL_CATALOG_SCREEN_TITLE": MicrocopyEntry(msg_type="label", title="Catálogo"),
-    # §17b.3 — SettingsScreen (placeholder mínimo para Story 3.1)
+    "LBL_CATALOG_LOADING": MicrocopyEntry(msg_type="label", title="Carregando catálogo..."),
+    "LBL_CATALOG_FOOTER_SUMMARY": MicrocopyEntry(
+        msg_type="label", title="{n_partitions} partições  •  {total_mb} MB total"
+    ),
+    "LBL_CATALOG_FOOTER_DRIFT": MicrocopyEntry(msg_type="label", title="⚠ {n_drift} com drift"),
+    "LBL_FILTERS_DROPDOWN": MicrocopyEntry(msg_type="label", title="Filtros"),
+    "LBL_DETAIL_PANEL_HEADER": MicrocopyEntry(
+        msg_type="label", title="Detalhes: {symbol} (selecionado)"
+    ),
+    "LBL_DETAIL_FOLDER": MicrocopyEntry(msg_type="label", title="Pasta"),
+    "LBL_DETAIL_SCHEMA": MicrocopyEntry(msg_type="label", title="Schema"),
+    "LBL_DETAIL_DLL_VERSION": MicrocopyEntry(msg_type="label", title="DLL"),
+    "LBL_DETAIL_CHECKSUM": MicrocopyEntry(msg_type="label", title="Checksum"),
+    "LBL_DETAIL_CHECKSUM_VALID": MicrocopyEntry(
+        msg_type="label", title="✓ válido (sha256: {prefix}...)"
+    ),
+    "LBL_DETAIL_CHECKSUM_INVALID": MicrocopyEntry(
+        msg_type="label", title="✗ inválido — re-baixar recomendado"
+    ),
+    "LBL_DETAIL_ROW_COUNT": MicrocopyEntry(msg_type="label", title="Row count"),
+    "BTN_REVALIDATE_CHECKSUM": MicrocopyEntry(msg_type="button", title="Re-validar Checksum"),
+    "BTN_RECONCILE": MicrocopyEntry(msg_type="button", title="Reconciliar"),
+    "BTN_CLEAR_FILTERS": MicrocopyEntry(msg_type="button", title="Limpar Filtros"),
+    "BTN_REFRESH_CATALOG": MicrocopyEntry(msg_type="button", title="↻ Atualizar (Ctrl+R)"),
+    "BTN_DELETE": MicrocopyEntry(msg_type="button", title="Apagar Histórico"),
+    "BTN_DELETE_CONFIRM": MicrocopyEntry(msg_type="button", title="Apagar permanentemente"),
+    "BTN_OPEN_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta"),
+    "BTN_VALIDATE_CONTRACT": MicrocopyEntry(msg_type="button", title="Validar Contrato"),
+    "BTN_REPEAT_LAST": MicrocopyEntry(msg_type="button", title="Repetir Último Download"),
+    "EMP_CATALOG_FIRST_RUN_TITLE": MicrocopyEntry(
+        msg_type="empty", title="Nenhum histórico baixado ainda."
+    ),
+    "EMP_CATALOG_FIRST_RUN_SUBTITLE": MicrocopyEntry(
+        msg_type="empty", title="Comece baixando um símbolo."
+    ),
+    "EMP_CATALOG_FILTER_NO_MATCH_TITLE": MicrocopyEntry(
+        msg_type="empty", title='Nenhum histórico encontrado para "{filter}".'
+    ),
+    "EMP_CATALOG_FILTER_NO_MATCH_SUBTITLE": MicrocopyEntry(
+        msg_type="empty", title="Tente outros filtros ou liste tudo."
+    ),
+    "WAR_CATALOG_DRIFT_ROW": MicrocopyEntry(
+        msg_type="warning",
+        title="Diferença detectada entre catálogo e arquivos. Reconcilie para corrigir.",
+    ),
+    "WAR_CATALOG_DELETE_ACTIVE_DOWNLOAD": MicrocopyEntry(
+        msg_type="warning",
+        title="Download em progresso para este símbolo. Aguarde ou cancele primeiro.",
+    ),
+    "MOD_DELETE_PERMANENT_BODY": MicrocopyEntry(
+        msg_type="prompt",
+        title=(
+            "Apagar PERMANENTEMENTE histórico de {symbol}? "
+            "Esta operação é irreversível. Trades serão removidos do disco e do catálogo."
+        ),
+    ),
+    "MOD_DELETE_PERMANENT_HINT": MicrocopyEntry(
+        msg_type="label", title="Digite APAGAR para confirmar"
+    ),
+    "TST_RECONCILE_DONE": MicrocopyEntry(
+        msg_type="success",
+        title="✓ Catálogo reconciliado. {n_added} adicionadas, {n_removed} removidas.",
+    ),
+    "TST_DELETE_DONE_TOAST": MicrocopyEntry(
+        msg_type="info", title="Histórico de {symbol} apagado."
+    ),
+    # CatalogScreen — column headers
+    "LBL_COL_SYMBOL": MicrocopyEntry(msg_type="label", title="Símbolo"),
+    "LBL_COL_EXCHANGE": MicrocopyEntry(msg_type="label", title="Bolsa"),
+    "LBL_COL_PERIOD": MicrocopyEntry(msg_type="label", title="Período"),
+    "LBL_COL_TRADES": MicrocopyEntry(msg_type="label", title="Trades"),
+    "LBL_COL_SIZE_MB": MicrocopyEntry(msg_type="label", title="Tamanho (MB)"),
+    "LBL_COL_LAST_UPDATE": MicrocopyEntry(msg_type="label", title="Atualizado"),
+    "LBL_COL_SCHEMA": MicrocopyEntry(msg_type="label", title="Schema"),
+    "PLH_SEARCH_CATALOG": MicrocopyEntry(msg_type="placeholder", title="Buscar por símbolo..."),
+    # §17b.3 — SettingsScreen (Story 3.2)
     "LBL_SETTINGS_SCREEN_TITLE": MicrocopyEntry(msg_type="label", title="Configurações"),
+    "LBL_SETTINGS_SECTION_DLL": MicrocopyEntry(msg_type="label", title="ProfitDLL"),
+    "LBL_SETTINGS_SECTION_STORAGE": MicrocopyEntry(msg_type="label", title="Storage"),
+    "LBL_SETTINGS_SECTION_PERFORMANCE": MicrocopyEntry(
+        msg_type="label", title="Performance (read-only)"
+    ),
+    "LBL_SETTINGS_SECTION_ABOUT": MicrocopyEntry(msg_type="label", title="About"),
+    "LBL_DLL_STATUS_CONNECTED": MicrocopyEntry(
+        msg_type="label", title="✓ Conectada (versão {version})"
+    ),
+    "LBL_DLL_STATUS_DISCONNECTED": MicrocopyEntry(msg_type="label", title="✗ Não conectou"),
+    "LBL_DLL_STATUS_TESTING": MicrocopyEntry(msg_type="label", title="↻ Testando conexão..."),
+    "LBL_DLL_STATUS_NOT_CONFIGURED": MicrocopyEntry(msg_type="label", title="⚠ Não configurado"),
+    "LBL_DLL_PATH": MicrocopyEntry(msg_type="label", title="DLL path"),
+    "LBL_ENV_VARS": MicrocopyEntry(msg_type="label", title="Variáveis .env"),
+    "LBL_STORAGE_DATA_DIR": MicrocopyEntry(msg_type="label", title="Pasta data"),
+    "LBL_STORAGE_FREE_SPACE": MicrocopyEntry(
+        msg_type="label", title="{free_gb} GB livres de {total_gb} GB total"
+    ),
+    "LBL_STORAGE_CATALOG_OK": MicrocopyEntry(
+        msg_type="label", title="✓ íntegro ({n_partitions} partições registradas)"
+    ),
+    "LBL_STORAGE_CATALOG_DRIFT": MicrocopyEntry(
+        msg_type="label",
+        title="⚠ {n_drift} diferenças detectadas — rode reconciliar",
+    ),
+    "LBL_PERF_DLL_QUEUE_SIZE": MicrocopyEntry(msg_type="label", title="DLL queue size"),
+    "LBL_PERF_STORAGE_QUEUE_SIZE": MicrocopyEntry(msg_type="label", title="Storage queue size"),
+    "LBL_PERF_CHUNK_SIZE": MicrocopyEntry(msg_type="label", title="Chunk size"),
+    "LBL_PERF_MAX_RETRIES": MicrocopyEntry(msg_type="label", title="Max retries"),
+    "LBL_PERF_NOTE_ADVANCED": MicrocopyEntry(
+        msg_type="label",
+        title="(Mudanças requerem advanced flags — consulte docs/perf/)",
+    ),
+    "LBL_PERF_SQLITE_PROFILE": MicrocopyEntry(msg_type="label", title="SQLite profile"),
+    "LBL_ABOUT_APP_VERSION": MicrocopyEntry(msg_type="label", title="data-downloader v{version}"),
+    "LBL_ABOUT_DLL_VERSION": MicrocopyEntry(msg_type="label", title="ProfitDLL: {version}"),
+    "LBL_ABOUT_SCHEMA_VERSION": MicrocopyEntry(msg_type="label", title="Schema: {version}"),
+    "LBL_ABOUT_DOCS_LINK": MicrocopyEntry(msg_type="label", title="📖 Documentação"),
+    "LBL_ABOUT_BUG_LINK": MicrocopyEntry(msg_type="label", title="🐛 Reportar bug"),
+    "BTN_TEST_CONNECTION": MicrocopyEntry(msg_type="button", title="Testar Conexão"),
+    "BTN_OPEN_DLL_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta DLL"),
+    "BTN_CHANGE_DATA_DIR": MicrocopyEntry(msg_type="button", title="Mudar Pasta"),
+    "BTN_OPEN_DATA_DIR": MicrocopyEntry(msg_type="button", title="Abrir no Explorer"),
+    "BTN_INTEGRITY_CHECK": MicrocopyEntry(msg_type="button", title="Verificar Integridade"),
+    "BTN_DOCTOR_FULL": MicrocopyEntry(msg_type="button", title="Diagnóstico Completo (doctor)"),
+    "BTN_SAVE_SETTINGS": MicrocopyEntry(msg_type="button", title="Salvar"),
+    "BTN_OPEN_ENV_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta .env"),
+    "BTN_EDIT_ENV": MicrocopyEntry(msg_type="button", title="Editar .env"),
+    "BTN_SHOW_SECRET": MicrocopyEntry(msg_type="button", title="Mostrar"),
+    "BTN_HIDE_SECRET": MicrocopyEntry(msg_type="button", title="Esconder"),
+    "EMP_SETTINGS_DLL_FIRST_RUN_TITLE": MicrocopyEntry(
+        msg_type="empty",
+        title="Para começar, configure suas credenciais ProfitDLL",
+    ),
+    "EMP_SETTINGS_DLL_FIRST_RUN_STEP1": MicrocopyEntry(
+        msg_type="empty",
+        title="1. Obtenha sua chave em https://nelogica.com.br",
+    ),
+    "EMP_SETTINGS_DLL_FIRST_RUN_STEP2": MicrocopyEntry(
+        msg_type="empty",
+        title=(
+            "2. Crie/edite ~/.data-downloader/.env com PROFITDLL_KEY, " "PROFIT_USER, PROFIT_PASS"
+        ),
+    ),
+    "EMP_SETTINGS_DLL_FIRST_RUN_STEP3": MicrocopyEntry(
+        msg_type="empty", title="3. Clique em Testar Conexão"
+    ),
+    "SUC_SETTINGS_SAVED": MicrocopyEntry(msg_type="success", title="Configurações salvas."),
+    "TST_SETTINGS_SAVED": MicrocopyEntry(msg_type="success", title="✓ Configurações salvas."),
+    "TST_TEST_CONNECTION_OK": MicrocopyEntry(msg_type="success", title="✓ Conexão OK."),
+    "TST_TEST_CONNECTION_FAIL": MicrocopyEntry(
+        msg_type="error", title="✗ Conexão falhou. Veja detalhes."
+    ),
+    "TST_VALIDATION_PASSED": MicrocopyEntry(
+        msg_type="success", title="✓ Validação OK: nenhuma inconsistência."
+    ),
+    "TST_VALIDATION_FAILED": MicrocopyEntry(
+        msg_type="error", title="✗ Validação encontrou {n_issues} problemas."
+    ),
     # §17b.5 — Toasts e modais
     "TST_DOWNLOAD_DONE": MicrocopyEntry(
         msg_type="success",

@@ -138,32 +138,30 @@ class MainWindow(QMainWindow):
         return sidebar
 
     def _build_screens(self) -> None:
-        """Instancia as telas e popula o ``QStackedWidget``."""
-        # Story 3.1 — DownloadScreen funcional.
+        """Instancia as telas e popula o ``QStackedWidget``.
+
+        Story 3.1 (Done) — DownloadScreen funcional.
+        Story 3.2 (esta) — CatalogScreen + SettingsScreen funcionais.
+        """
+        from data_downloader.ui.screens.catalog_screen import CatalogScreen
         from data_downloader.ui.screens.download_screen import DownloadScreen
+        from data_downloader.ui.screens.settings_screen import SettingsScreen
 
         download_screen = DownloadScreen(self)
         self._add_screen(SCREEN_DOWNLOAD, download_screen)
 
-        # Catálogo / Settings — placeholders mínimos com label central. Não
-        # bloqueiam nav; serão substituídos em Stories 3.3 e 3.4.
-        for screen_id, label_id in (
-            (SCREEN_CATALOG, "LBL_CATALOG_SCREEN_TITLE"),
-            (SCREEN_SETTINGS, "LBL_SETTINGS_SCREEN_TITLE"),
-        ):
-            placeholder = QWidget(self)
-            ph_layout = QVBoxLayout(placeholder)
-            title = QLabel(format_msg(label_id), placeholder)
-            title.setProperty("role", "title")
-            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph_layout.addStretch(1)
-            ph_layout.addWidget(title)
-            hint = QLabel("(em construção — Story 3.x)", placeholder)
-            hint.setProperty("role", "muted")
-            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph_layout.addWidget(hint)
-            ph_layout.addStretch(1)
-            self._add_screen(screen_id, placeholder)
+        catalog_screen = CatalogScreen(parent=self)
+        self._add_screen(SCREEN_CATALOG, catalog_screen)
+
+        settings_screen = SettingsScreen(self)
+        self._add_screen(SCREEN_SETTINGS, settings_screen)
+
+        # Cross-screen wiring — quando Settings muda data_dir, Catalog re-carrega.
+        with contextlib.suppress(Exception):
+            settings_screen.data_dir_changed.connect(catalog_screen.set_data_dir)
+        # StatusBar reflete DLL status quando Settings testa conexão.
+        with contextlib.suppress(Exception):
+            settings_screen.dll_status_changed.connect(self._on_dll_status_changed)
 
     def _add_screen(self, screen_id: str, widget: QWidget) -> None:
         idx = self._stack.addWidget(widget)
@@ -284,6 +282,22 @@ class MainWindow(QMainWindow):
                 with contextlib.suppress(Exception):
                     download_screen.request_cancel()  # type: ignore[attr-defined]
             self.close()
+
+    def _on_dll_status_changed(self, status: str) -> None:
+        """Atualiza statusbar com novo DLL status (vindo de SettingsScreen)."""
+        if status == "connected":
+            text = format_msg("LBL_STATUSBAR_DLL_CONNECTED", version="?")
+            qss_status = "connected"
+        elif status == "testing":
+            text = format_msg("LBL_STATUSBAR_DLL_CONNECTING")
+            qss_status = "connecting"
+        else:
+            text = format_msg("LBL_STATUSBAR_DLL_DISCONNECTED")
+            qss_status = "disconnected"
+        self._dll_status_label.setText(text)
+        self._dll_status_label.setProperty("status", qss_status)
+        self._dll_status_label.style().unpolish(self._dll_status_label)
+        self._dll_status_label.style().polish(self._dll_status_label)
 
     # ------------------------------------------------------------------
     # Esc context-aware (THEME §6 — ordem de prioridade)

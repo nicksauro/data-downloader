@@ -1,9 +1,9 @@
 # EPIC 3 — Desktop UI
 
-**Status:** in_progress (Story 3.1 Done — primeira tela real entregue via COUNCIL-23)
+**Status:** in_progress (Stories 3.1 + 3.2 Done — 3 telas reais entregues via COUNCIL-23 + COUNCIL-24)
 **Owner:** 📋 Morgan
 **Data criação:** 2026-05-03
-**Última atualização:** 2026-05-03 (COUNCIL-23 — Story 3.1 Done; transição prep → in_progress)
+**Última atualização:** 2026-05-03 (COUNCIL-24 — Story 3.2 Done; CatalogScreen + SettingsScreen reais)
 **Target:** entregar UI desktop nativa (PySide6) consumindo public_api estável (Epic 1) — golden path de download via clique, não terminal. Pós-Epic 2.
 
 ## Preparatório completo (COUNCIL-12)
@@ -63,9 +63,9 @@ Empacotar foundation + qualidade (Epics 1 + 2) em uma UI desktop usável por qua
 | ID | Título | Owner | Estimativa | Artefatos prep ready |
 |----|--------|-------|------------|----------------------|
 | 3.1 | **DONE** — MainWindow + DownloadScreen funcional consumindo public_api (COUNCIL-23) | 🖼️ Felix | 3d (real) | WIREFRAMES MainWindow + Tela 1 + skeleton + style.qss seções 1/7/8 |
-| 3.2 | (consolidado em 3.1) Tela Download — refinements + drawer Avançado | 🖼️ Felix + 🎨 Uma | 1d | (Story 3.1 entregou primeira versão funcional) |
-| 3.3 | Tela Catálogo (lista partições + filtros) | 🖼️ Felix + 💾 Sol | 2d | WIREFRAMES Tela 2 + FLOWS 2 + skeleton catalog_screen.py + catalog_adapter |
-| 3.4 | Tela Settings (env vars, paths, theme) | 🖼️ Felix + 🎨 Uma | 1d | WIREFRAMES Tela 3 + skeleton settings_screen.py + microcopy §17b.3 |
+| 3.2 | **DONE** — CatalogScreen + SettingsScreen reais (consolida 3.3+3.4 — COUNCIL-24) | 🖼️ Felix + 🎨 Uma | 2d (real) | WIREFRAMES Tela 2 + Tela 3 + skeleton + microcopy §17b.2 + §17b.3 |
+| 3.3 | (consolidado em 3.2) Tela Catálogo (lista partições + filtros) | 🖼️ Felix + 💾 Sol | — | (Story 3.2 entregou) |
+| 3.4 | (consolidado em 3.2) Tela Settings (env vars, paths, theme) | 🖼️ Felix + 🎨 Uma | — | (Story 3.2 entregou) |
 | 3.5 | Theming (light/dark, QSS, DontUseNativeDialog) | 🖼️ Felix + 🎨 Uma | 1d | style.qss esqueleto completo (Felix refina/expande) |
 | 3.6 | pytest-qt setup (finding L6) + UI tests | 🧪 Quinn + 🖼️ Felix | 1d | (depende de stories implementadas) |
 | 3.7 | Packaging PyInstaller `--onedir` | 🖼️ Felix + ⚙️ Gage | 2d | ADR-003 amendment + COUNCIL-12 D8 |
