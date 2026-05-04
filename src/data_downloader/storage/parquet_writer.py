@@ -8,30 +8,37 @@ Refs:
 - ``docs/adr/ADR-002-storage-stack.md`` (Snappy, row_group=100k)
 - ``docs/adr/ADR-004-partition-layout.md`` (path layout)
 - ``docs/adr/ADR-011-exception-hierarchy.md`` (IntegrityError)
+- ``docs/decisions/COUNCIL-10-perf-optimization-roadmap.md`` (vectorização Story 2.2)
 
-Pipeline canônico de :meth:`ParquetWriter.write`:
+Pipeline canônico de :meth:`ParquetWriter.write` (Story 2.2 — vectorizado):
 
-    1. validar registros (storage.schema.validate_record)
-    2. enriquecer com ingestion_ts_ns + dll_version + chunk_id
-    3. assign_sequence_within_ns se algum trade não tem trade_id
-    4. dedup do batch
-    5. se arquivo existe: ler -> union -> dedup -> verificar threshold 5M
-    6. resolve path; mkdir -p
-    7. escreve em ``{path}.tmp.{uuid4}`` com metadata canônico
-    8. fsync(file)
-    9. SHA256 do tmp
-    10. fsync(parent_dir) — best-effort (Linux semantics; Windows no-op)
-    11. os.replace(tmp, final) — atômico Windows + Linux
-    12. retorna ``WriteResult``
+    1. converter list[TradeRecord] -> pa.Table (vectorizado, single-pass)
+    2. validar registros via pa.compute boolean masks
+    3. enriquecer com ingestion_ts_ns + dll_version + chunk_id (pa.array constantes)
+    4. assign_sequence_within_ns se algum trade não tem trade_id (DuckDB ROW_NUMBER)
+    5. dedup do batch (DuckDB ROW_NUMBER OVER chave canônica)
+    6. se arquivo existe: ler -> union -> dedup -> verificar threshold 5M
+    7. resolve path; mkdir -p
+    8. escreve em ``{path}.tmp.{uuid4}`` com metadata canônico
+    9. fsync(file)
+    10. SHA256 streaming (chunks 1MB)
+    11. fsync(parent_dir) — best-effort (Linux semantics; Windows no-op)
+    12. os.replace(tmp, final) — atômico Windows + Linux
+    13. retorna ``WriteResult``
 
 Threshold rewrite (finding H6, deferred): se ``existing_rows + new_rows
 > 5_000_000``, raise ``IntegrityError`` — sub-particionamento é Story
 2.X.
+
+Story 2.2 — refactor interno para fechar gap perf de -72% vs target V1
+(100k trades/s sustained). Comportamento externo INTACTO: mesmo schema,
+mesma idempotência (R5), mesma atomicidade (INV-3), mesmo SHA256.
+Validado por property tests Hypothesis em
+``tests/property/test_vectorized_equivalence.py``.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import time
@@ -39,16 +46,18 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 
-import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from data_downloader.public_api.exceptions import IntegrityError
-from data_downloader.storage.dedup import (
-    assign_sequence_within_ns,
-    dedup,
+from data_downloader.storage._vectorized import (
+    assign_sequence_within_ns_vectorized,
+    compute_sha256_streaming,
+    dedup_table_vectorized,
+    enrich_table_vectorized,
+    trades_to_table_vectorized,
+    validate_records_vectorized,
 )
 from data_downloader.storage.partition import (
     PartitionKey,
@@ -58,7 +67,6 @@ from data_downloader.storage.schema import (
     SCHEMA_VERSION,
     TradeRecord,
     pyarrow_schema,
-    validate_record,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -95,15 +103,14 @@ class WriteResult:
 
 
 def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
-    """SHA256 hex de um arquivo, lido em chunks de 1MB."""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+    """SHA256 hex de um arquivo, lido em chunks (1MB default).
+
+    Wrapper backwards-compatible para
+    :func:`data_downloader.storage._vectorized.compute_sha256_streaming`
+    — Story 2.2 moveu a implementação para o módulo vectorized; este nome
+    permanece exportado para callers externos (``catalog.py``).
+    """
+    return compute_sha256_streaming(path, chunk_size=chunk_size)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -127,30 +134,19 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
-def _trades_to_table(trades: list[TradeRecord]) -> pa.Table:
-    """Converte ``list[TradeRecord]`` em ``pa.Table`` aderente ao schema."""
-    schema = pyarrow_schema()
-    # Constrói arrays coluna a coluna respeitando o schema.
-    columns: dict[str, list[object]] = {f.name: [] for f in schema}
-    for trade in trades:
-        for f in schema:
-            columns[f.name].append(trade.get(f.name))
-    arrays = [pa.array(columns[f.name], type=f.type) for f in schema]
-    return pa.Table.from_arrays(arrays, schema=schema)
+def _read_existing_table(path: Path) -> pa.Table:
+    """Lê arquivo Parquet existente como ``pa.Table`` (para merge vectorizado).
 
-
-def _table_to_trades(table: pa.Table) -> list[TradeRecord]:
-    """Inverso de :func:`_trades_to_table` — para o caminho de merge."""
-    rows: list[dict[str, object]] = table.to_pylist()
-    # to_pylist() retorna list[dict[str, Any]]; tratamos como TradeRecord
-    # (TypedDict total=False aceita campos opcionais).
-    return [cast(TradeRecord, row) for row in rows]
-
-
-def _read_existing(path: Path) -> list[TradeRecord]:
-    """Lê arquivo Parquet existente e retorna trades (para merge+dedup)."""
+    Retorna table com schema canônico forçado — re-impõe campos na ordem
+    correta caso Parquet tenha sido escrito por versão anterior com
+    ordem diferente.
+    """
     table = pq.read_table(path)
-    return _table_to_trades(table)
+    schema = pyarrow_schema()
+    # Re-impõe schema canônico (mesma ordem de fields). Garante que
+    # concat_tables com nova batch funcione sem mismatch.
+    arrays = [table.column(f.name).cast(f.type) for f in schema]
+    return pa.Table.from_arrays(arrays, schema=schema)
 
 
 def _build_metadata(
@@ -239,61 +235,64 @@ class ParquetWriter:
                 details={"partition": str(partition)},
             )
 
-        # 1. Valida cada registro (filtro de "obviamente quebrado").
-        for trade in trades:
-            validate_record(trade)
-
-        # 2. Enriquece com metadata por trade.
+        # 1. Converte para pa.Table imediatamente (vectorizado).
         ingestion_ts_ns = time.time_ns()
-        for trade in trades:
-            trade.setdefault("ingestion_ts_ns", ingestion_ts_ns)
-            trade["dll_version"] = dll_version
-            if chunk_id is not None:
-                trade.setdefault("chunk_id", chunk_id)
-            else:
-                trade.setdefault("chunk_id", None)
+        new_table = trades_to_table_vectorized(trades)
 
-        # 3. assign_sequence_within_ns se ALGUM trade não tem trade_id.
-        needs_sequence = any(t.get("trade_id") is None for t in trades)
+        # 2. Valida via pa.compute boolean masks.
+        validate_records_vectorized(new_table)
+
+        # 3. Enriquece via pa.array constantes (sem loop Python).
+        new_table = enrich_table_vectorized(
+            new_table,
+            ingestion_ts_ns=ingestion_ts_ns,
+            dll_version=dll_version,
+            chunk_id=chunk_id,
+        )
+
+        # 4. assign_sequence_within_ns vectorizado se algum trade não tem trade_id.
+        trade_id_col = new_table.column("trade_id")
+        # null_count está disponível em ChunkedArray sem materializar.
+        needs_sequence = trade_id_col.null_count > 0
         if needs_sequence:
-            assign_sequence_within_ns(trades)
-        else:
-            # Mesmo no caminho V2, sequence_within_ns é NOT NULL — preencher 0.
-            for trade in trades:
-                trade.setdefault("sequence_within_ns", 0)
+            new_table = assign_sequence_within_ns_vectorized(new_table)
+        # Caminho V2 puro: sequence_within_ns já está 0 default
+        # (pyarrow_schema é uint16 NOT NULL; trades_to_table_vectorized
+        # converte trade.get('sequence_within_ns', 0) -> 0).
 
-        # 4. dedup do batch.
-        deduped_new = dedup(trades)
+        # 5. dedup vectorizado (DuckDB ROW_NUMBER particionado pela chave).
+        deduped_new_table = dedup_table_vectorized(new_table)
 
-        # 5. Path + merge se já existe.
+        # 6. Path + merge se já existe.
         path = resolve_partition_path(partition, self.data_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if path.exists():
-            existing = _read_existing(path)
+            existing_table = _read_existing_table(path)
             # Threshold deferred (finding H6).
-            projected_rows = len(existing) + len(deduped_new)
+            projected_rows = existing_table.num_rows + deduped_new_table.num_rows
             if projected_rows > _PARTITION_ROW_LIMIT:
                 raise IntegrityError(
                     f"Partition exceeds {_PARTITION_ROW_LIMIT:_} rows; "
                     f"needs sub-partitioning — Story 2.X",
                     details={
                         "partition": str(partition),
-                        "existing_rows": len(existing),
-                        "new_rows": len(deduped_new),
+                        "existing_rows": existing_table.num_rows,
+                        "new_rows": deduped_new_table.num_rows,
                         "projected_rows": projected_rows,
                         "limit": _PARTITION_ROW_LIMIT,
                     },
                 )
-            # Union e re-dedup. Existing primeiro (preserva ordem e dedup
-            # mantém primeira ocorrência).
-            merged = dedup(existing + deduped_new)
+            # Union e re-dedup. Existing primeiro (preserva ordem; dedup
+            # mantém primeira ocorrência — INV-2).
+            merged_pre = pa.concat_tables(
+                [existing_table, deduped_new_table], promote_options="default"
+            )
+            table = dedup_table_vectorized(merged_pre)
         else:
-            merged = deduped_new
+            table = deduped_new_table
 
-        # 6. Constrói tabela.
-        table = _trades_to_table(merged)
-        # Ordena por (timestamp_ns, sequence_within_ns) — INV-3.
+        # 7. Ordena por (timestamp_ns, sequence_within_ns) — INV-3.
         table = table.sort_by([("timestamp_ns", "ascending"), ("sequence_within_ns", "ascending")])
 
         metadata = _build_metadata(table, dll_version=dll_version, chunk_id=chunk_id)
@@ -323,8 +322,8 @@ class ParquetWriter:
             finally:
                 os.close(fd)
 
-            # 9. SHA256 do tmp (= SHA256 do final, já que replace é atômico).
-            checksum = _sha256_file(tmp_path)
+            # 9. SHA256 streaming do tmp (= SHA256 do final, já que replace é atômico).
+            checksum = compute_sha256_streaming(tmp_path)
             file_size = tmp_path.stat().st_size
 
             # 10. fsync(parent_dir) — best-effort.
@@ -365,12 +364,6 @@ class ParquetWriter:
             checksum_sha256=checksum,
             file_size_bytes=file_size,
         )
-
-
-# Suprime "unused import" para duckdb — reservado para anti-join futuro
-# (SCHEMA.md §2.3) na Story 2.X. Mantemos o import pois orchestrator
-# pode passar a usar este path no merge avançado.
-_ = duckdb
 
 
 __all__ = [

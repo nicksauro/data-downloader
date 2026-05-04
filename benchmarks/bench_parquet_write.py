@@ -199,8 +199,15 @@ def measure_production_writer(
     elapsed_ms = [r["elapsed_ns"] / 1e6 for r in runs]
     throughputs = [r["trades_per_sec"] for r in runs]
     return {
-        "scenario": "production_writer_canonical",
-        "config": "ParquetWriter (snappy + row_group=100k + validate + dedup + fsync + sha256)",
+        # Story 2.2: scenario name reflete que o writer é vectorizado
+        # (pa.compute + DuckDB) em vez de loop Python puro. Comparações
+        # diretas vs v1.1.0-mock baselines (production_writer_canonical
+        # com loop) em BASELINES.md mostram speedup.
+        "scenario": "production_writer_v2_vectorized",
+        "config": (
+            "ParquetWriter v2 vectorizado (snappy + row_group=100k + "
+            "pa.compute validate + DuckDB dedup + fsync + sha256 streaming)"
+        ),
         "n_runs": n_runs,
         "n_trades_input": n_trades,
         "row_count_after_dedup_p50": statistics.median(r["row_count_after_dedup"] for r in runs),

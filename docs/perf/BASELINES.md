@@ -3,9 +3,10 @@
 **Owner:** Pyro (perf-engineer) — autoridade exclusiva para criar/atualizar baseline.
 **Status:**
 - v1.0.0-synthetic registrado em **Story 1.4.5**.
-- **v1.1.0-mock registrado em Story 1.8** (mock pipeline E2E — Orchestrator + ParquetWriter + Catalog reais, mock DLL inline). Substitui v1.0.0-synthetic onde aplicável (nova versão majoritária pós COUNCIL-10).
+- v1.1.0-mock registrado em Story 1.8 (mock pipeline E2E — Orchestrator + ParquetWriter + Catalog reais, mock DLL inline).
+- **v2.0.0-vectorized registrado em Story 2.2** (ParquetWriter vectorizado via pa.compute + DuckDB ROW_NUMBER; refactor interno; comportamento INTACTO; **target V1 100k trades/s ATINGIDO** — 121_565 trades/s p50, +21.6% acima do target, speedup 4.40x vs v1.1.0-mock).
 **Próximo:** v1.0.0-real será registrado em **Story 1.7b-followup** (humano roda smoke com `PROFITDLL_KEY`).
-**Política:** baselines reais aguardam Story 1.7b-followup (humano roda smoke). Quando smoke real verde, baselines `v1.0.0-real` substituem `v1.1.0-mock`.
+**Política:** baselines reais aguardam Story 1.7b-followup (humano roda smoke). Quando smoke real verde, baselines `v1.0.0-real` substituem `v1.1.0-mock` como referência canônica de pipeline E2E. v2.0.0-vectorized continua como referência canônica do **standalone ParquetWriter** (independente de pipeline).
 
 ---
 
@@ -99,6 +100,53 @@ JSONs canônicos completos em `benchmarks/results/baselines/`.
 **Target V1:** >= 100_000 trades/s sustained → **gap (-72%)** vs production writer.
 
 **Status:** ❌ não atinge (production writer); ✅ atinge (raw write_table). Ver `docs/decisions/COUNCIL-02-parquet-writer-streaming-overhead.md` para análise de causa raiz e roadmap de otimização (Story 2.X).
+
+---
+
+### `bench_parquet_write` — v2.0.0-vectorized (Story 2.2)
+
+**Workload:** 1M trades sintéticos (WDOJ26), 5 runs, ParquetWriter vectorizado.
+**git_sha:** `36709de-dirty` (Story 2.2 implementação 2026-05-04).
+**Resultado JSON:** `benchmarks/results/baselines_v2_vectorized/bench_parquet_write-2.0.0-vectorized.json`.
+
+**Production writer (v2 vectorizado — pa.compute validate + DuckDB dedup + sha256 streaming + fsync):**
+
+| Métrica | Valor v2.0.0-vectorized | Valor v1.1.0-mock | Delta |
+|---------|-------------------------|--------------------|-------|
+| trades/s p50 | **121_565** | 27_638 | **+339.8%** (4.40x speedup) |
+| trades/s min | 118_443 | 27_420 | +332.0% |
+| trades/s stddev | 1_516 | 117 | +12.97x (mais variável — DuckDB session lifecycle) |
+| disk size MB (1M trades) | 36.3 | 36.3 | +0% (schema preserved — INV) |
+| p50 ms (1M trades) | **8_152** (~8.2s) | 35_857 (~36s) | **-77.3%** (4.40x faster) |
+| p99 ms | 8_359 | 36_134 | -76.9% |
+| peak RSS delta MB | 132 | 227 | -41.8% (sha256 streaming + DuckDB lazy init) |
+
+**Target V1:** >= 100_000 trades/s sustained → ✅ **PASS** (+21.6% acima, gap fechado).
+
+**Status:** ✅ **TARGET ATINGIDO**. Story 2.2 fechou gap de -72% via vectorização interna (sem mudança de schema, sem mudança de fronteira). Referência canônica do **standalone ParquetWriter** v2.
+
+**Vectorizações aplicadas (COUNCIL-10 §2):**
+
+1. **`_trades_to_table` → `trades_to_table_vectorized`** — single-pass column accumulation; eliminado loop coluna-a-coluna por trade.
+2. **`validate_record` → `validate_records_vectorized`** — `pa.compute.greater` / `pa.compute.is_in` boolean masks sobre coluna inteira (vs N chamadas de função Python por trade).
+3. **`assign_sequence_within_ns` → `assign_sequence_within_ns_vectorized`** — DuckDB `ROW_NUMBER() OVER (PARTITION BY symbol, timestamp_ns ORDER BY orig_idx)` (vs defaultdict per-trade).
+4. **`dedup` → `dedup_table_vectorized`** — DuckDB `ROW_NUMBER() OVER (PARTITION BY chave_canonica)` com UNION ALL para variantes V1/V2 (vs dict.setdefault per-trade).
+5. **`_sha256_file` → `compute_sha256_streaming`** — streaming chunks (1MB default; já era streaming, agora explicitamente exportado em `_vectorized` para substituibilidade).
+6. **`_read_existing` → `_read_existing_table`** — retorna `pa.Table` direto (evita 2x conversão list↔table no merge path).
+
+**Property tests (Hypothesis — Aria recomendação 7 COUNCIL-02 §sign-off):**
+
+`tests/property/test_vectorized_equivalence.py` — 7 properties, todas PASS, ≥100 examples cada:
+
+- `test_validate_equivalence`: vectorized raise sse loop puro raise.
+- `test_table_build_equivalence`: `Table.to_pydict()` idêntico.
+- `test_dedup_equivalence`: mesmo conjunto de chaves canônicas (INV-2).
+- `test_dedup_inv2_concat_idempotent`: `dedup(L ++ L) == dedup(L)` no path vectorizado.
+- `test_enrich_equivalence`: enrich vectorized == loop setdefault para trades realistas.
+- `test_sha256_streaming_equals_full_read`: hash byte-idêntico para arquivos até 10MB.
+- `test_inv7_read_after_write_via_vectorized_path`: read-back sorted by (ts_ns, seq) — INV-7 preservada.
+
+**Mini-council COUNCIL-11 (Pyro+Sol — sign-off):** schema canônico v1.0.0 preservado intact (mesmos 17 campos, mesmos types, mesmo metadata custom), idempotência R5 preservada (validada por testes 1.4 sem mudança), atomicidade INV-3 preservada (mesmo fluxo tmp + fsync + os.replace).
 
 ---
 

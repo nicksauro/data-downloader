@@ -1,0 +1,198 @@
+{
+  "benchmark": "bench_parquet_write",
+  "version": "1.0.0",
+  "git_sha": "36709de",
+  "git_dirty": true,
+  "date": "2026-05-04T07:05:39Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "mock-1.0",
+  "config": {
+    "n_trades_per_run": 1000000,
+    "n_runs_per_scenario": 5,
+    "matrix_size": 8
+  },
+  "scenarios": [
+    {
+      "row_group_size": 10000,
+      "compression": "snappy",
+      "n_runs": 5,
+      "trades_per_sec_p50": 739840.3276604844,
+      "trades_per_sec_p95": 731575.8814118673,
+      "trades_per_sec_min": 730935.6451365917,
+      "trades_per_sec_stddev": 11834.54659425393,
+      "mb_per_sec_p50": 27.685548624895777,
+      "peak_rss_delta_mb_max": 0.937984,
+      "peak_traced_mb_max": 0.008189,
+      "disk_size_mb": 37.420978,
+      "p50_ms": 1351.643,
+      "p95_ms": 1366.9163800000001,
+      "p99_ms": 1367.870876
+    },
+    {
+      "row_group_size": 50000,
+      "compression": "snappy",
+      "n_runs": 5,
+      "trades_per_sec_p50": 822045.2815422885,
+      "trades_per_sec_p95": 806146.1303956686,
+      "trades_per_sec_min": 805521.4954216575,
+      "trades_per_sec_stddev": 11910.948766411231,
+      "mb_per_sec_p50": 30.58534802931085,
+      "peak_rss_delta_mb_max": 9.572352,
+      "peak_traced_mb_max": 0.006479,
+      "disk_size_mb": 37.206403,
+      "p50_ms": 1216.478,
+      "p95_ms": 1240.47286,
+      "p99_ms": 1241.240012
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "n_runs": 5,
+      "trades_per_sec_p50": 897407.479532379,
+      "trades_per_sec_p95": 886337.713875206,
+      "trades_per_sec_min": 884777.230788832,
+      "trades_per_sec_stddev": 6090.789105332469,
+      "mb_per_sec_p50": 32.718509298487604,
+      "peak_rss_delta_mb_max": 4.11648,
+      "peak_traced_mb_max": 0.006431,
+      "disk_size_mb": 36.458922,
+      "p50_ms": 1114.321,
+      "p95_ms": 1128.25204,
+      "p99_ms": 1129.832808
+    },
+    {
+      "row_group_size": 250000,
+      "compression": "snappy",
+      "n_runs": 5,
+      "trades_per_sec_p50": 960517.265441924,
+      "trades_per_sec_p95": 951952.0300638449,
+      "trades_per_sec_min": 949838.2805343561,
+      "trades_per_sec_stddev": 8034.288434354163,
+      "mb_per_sec_p50": 32.04908300857445,
+      "peak_rss_delta_mb_max": 25.174016,
+      "peak_traced_mb_max": 0.006383,
+      "disk_size_mb": 33.366483,
+      "p50_ms": 1041.1057,
+      "p95_ms": 1050.49368,
+      "p99_ms": 1052.347376
+    },
+    {
+      "row_group_size": 1000000,
+      "compression": "snappy",
+      "n_runs": 5,
+      "trades_per_sec_p50": 1191428.624191839,
+      "trades_per_sec_p95": 1184751.4621717401,
+      "trades_per_sec_min": 1183438.3950492512,
+      "trades_per_sec_stddev": 4770.058529436709,
+      "mb_per_sec_p50": 36.5137821484675,
+      "peak_rss_delta_mb_max": 0.192512,
+      "peak_traced_mb_max": 0.006343,
+      "disk_size_mb": 30.647058,
+      "p50_ms": 839.3285,
+      "p95_ms": 844.06302,
+      "p99_ms": 844.808924
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 1,
+      "n_runs": 5,
+      "trades_per_sec_p50": 819347.5486309399,
+      "trades_per_sec_p95": 807749.4763966402,
+      "trades_per_sec_min": 807214.4305400862,
+      "trades_per_sec_stddev": 10003.10566546703,
+      "mb_per_sec_p50": 21.873348041714294,
+      "peak_rss_delta_mb_max": 0.577536,
+      "peak_traced_mb_max": 0.006335,
+      "disk_size_mb": 26.696056,
+      "p50_ms": 1220.4833,
+      "p95_ms": 1238.0097799999999,
+      "p99_ms": 1238.6645159999998
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 3,
+      "n_runs": 5,
+      "trades_per_sec_p50": 715618.4002093041,
+      "trades_per_sec_p95": 704426.7088538021,
+      "trades_per_sec_min": 701955.1204993709,
+      "trades_per_sec_stddev": 7952.939872065789,
+      "mb_per_sec_p50": 17.30768113303575,
+      "peak_rss_delta_mb_max": 0.131072,
+      "peak_traced_mb_max": 0.006335,
+      "disk_size_mb": 24.185629,
+      "p50_ms": 1397.3928,
+      "p95_ms": 1419.66328,
+      "p99_ms": 1423.606656
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "none",
+      "n_runs": 5,
+      "trades_per_sec_p50": 955914.7415818325,
+      "trades_per_sec_p95": 945894.1170775885,
+      "trades_per_sec_min": 944523.6847342398,
+      "trades_per_sec_stddev": 26367.472897991513,
+      "mb_per_sec_p50": 55.0574533437133,
+      "peak_rss_delta_mb_max": 0.02048,
+      "peak_traced_mb_max": 0.006335,
+      "disk_size_mb": 57.596615,
+      "p50_ms": 1046.1184,
+      "p95_ms": 1057.20962,
+      "p99_ms": 1058.429684
+    },
+    {
+      "scenario": "production_writer_v2_vectorized",
+      "config": "ParquetWriter v2 vectorizado (snappy + row_group=100k + pa.compute validate + DuckDB dedup + fsync + sha256 streaming)",
+      "n_runs": 5,
+      "n_trades_input": 1000000,
+      "row_count_after_dedup_p50": 991036,
+      "trades_per_sec_p50": 121565.03842898045,
+      "trades_per_sec_min": 118443.86666812474,
+      "trades_per_sec_stddev": 1515.7657044800592,
+      "disk_size_mb_p50": 36.328243,
+      "peak_rss_delta_mb_max": 132.431872,
+      "p50_ms": 8152.311,
+      "p95_ms": 8324.71304,
+      "p99_ms": 8358.651808
+    }
+  ],
+  "summary": {
+    "winner_raw": {
+      "row_group_size": 1000000,
+      "compression": "snappy",
+      "trades_per_sec_p50": 1191428.624191839
+    },
+    "snappy_winner": {
+      "row_group_size": 1000000,
+      "trades_per_sec_p50": 1191428.624191839,
+      "disk_size_mb": 30.647058
+    },
+    "production_writer_p50_trades_per_sec": 121565.03842898045,
+    "vs_target": {
+      "target_metric": "trades_per_sec (production writer)",
+      "target_value": 100000,
+      "measured_value": 121565.03842898045,
+      "delta_pct": 21.565038428980447
+    },
+    "verdict": "PASS"
+  },
+  "notes": "Synthetic write throughput. Matrix: raw pq.write_table; production scenario uses data_downloader.storage.ParquetWriter (validate + dedup + fsync + SHA256)."
+}
