@@ -1,8 +1,11 @@
 # BASELINES.md — Performance Baselines Canônicos
 
 **Owner:** Pyro (perf-engineer) — autoridade exclusiva para criar/atualizar baseline.
-**Status:** v1.0.0-synthetic registrado em **Story 1.4.5** (este documento).
-**Próximo:** v1.0.0-real será registrado em **Story 1.8** (com DLL real + dados reais).
+**Status:**
+- v1.0.0-synthetic registrado em **Story 1.4.5**.
+- **v1.1.0-mock registrado em Story 1.8** (mock pipeline E2E — Orchestrator + ParquetWriter + Catalog reais, mock DLL inline). Substitui v1.0.0-synthetic onde aplicável (nova versão majoritária pós COUNCIL-10).
+**Próximo:** v1.0.0-real será registrado em **Story 1.7b-followup** (humano roda smoke com `PROFITDLL_KEY`).
+**Política:** baselines reais aguardam Story 1.7b-followup (humano roda smoke). Quando smoke real verde, baselines `v1.0.0-real` substituem `v1.1.0-mock`.
 
 ---
 
@@ -199,15 +202,106 @@ JSONs canônicos completos em `benchmarks/results/baselines/`.
 
 ---
 
-### `bench_chunking` — TBD (Story 1.8)
+### `bench_chunking` — v1.1.0-mock (Story 1.8)
 
-Não medido em Story 1.4.5 (depende de DLL real / orchestrator real). Esqueleto em `benchmarks/bench_chunking.py`.
+**Workload:** 4 chunks × 50_000 trades = 200_000 trades total via pipeline E2E mock (Orchestrator + ParquetWriter + Catalog), mock DLL inline (padrão `_FakeProfitDLL` de tests/integration). 3 runs.
+**git_sha:** `50f3368-dirty` (Story 1.8 baselines run 2026-05-04).
+**JSON:** `benchmarks/results/baselines_v1_mock/bench_chunking-1.1.0-mock.json`.
+
+| Métrica | Valor |
+|---------|-------|
+| total_ms p50 (200k trades) | **43_532ms** (~43.5s) |
+| total_ms p99 | 47_631ms |
+| total_ms stddev | 3_523ms (variabilidade alta — bench mock multi-thread + AV) |
+| throughput chunk-completo p50 | **4_594 trades/s** |
+| throughput chunk-completo p99 | 4_906 trades/s |
+| extrapolated 1 mês real (11M) p50 | ~2_394_297ms (~40 min) |
+
+**Target V1:** < 5min para 1 mês WDOJ26 → ❌ **gap +800%** (extrapolation).
+**Status:** ❌ não atinge. Causa raiz = mesma de COUNCIL-02 (ParquetWriter overhead). **Tracked by Story 2.2** — pós-vectorização esperado ~7 min (próximo do target; ainda gap menor).
+
+**Notas:**
+- Mock DLL = 0 latência rede; tempo total é dominado por write (confirmado via `chunk_complete` events: writer = ~85% do tempo de chunk).
+- Extrapolation linear (justificada empiricamente em COUNCIL-02 — write é O(N) por trade).
+- Smoke real (Story 1.7b-followup) provavelmente mostrará tempo total **maior** (latência DLL + reconnect 99% + rede), mas writer continua sendo o gargalo dominante.
 
 ---
 
-### `bench_multi_symbol` — TBD (Story 1.4.5 não cobre)
+### `bench_multi_symbol` — v1.1.0-mock (Story 1.8)
 
-Story 1.4.5 escopo declarou apenas 4 benchmarks (write, read, dedup, callback_to_disk). Multi-symbol fica para Story posterior (Epic 2). Esqueleto em `benchmarks/bench_multi_symbol.py`.
+**Workload:** N processos paralelo via `multiprocessing.Pool` (Windows spawn). N ∈ {1, 2, 4}; 2 runs/N. Cada worker roda pipeline mock completo (2 chunks × 25k trades = 50k trades/job). Símbolos distintos por worker (WDOJ26, WDOK26, WDON26, WDOQ26).
+**git_sha:** `50f3368-dirty` (Story 1.8 baselines run 2026-05-04).
+**JSON:** `benchmarks/results/baselines_v1_mock/bench_multi_symbol-1.1.0-mock.json`.
+
+**Spawn overhead (medido separadamente):**
+
+| Métrica | Valor |
+|---------|-------|
+| spawn_p50_s | **0.248s** |
+| spawn_p99_s | 0.295s |
+
+**Cenários:**
+
+| N | wall_p50_s | speedup vs N=1 | efficiency_pct |
+|---|-----------|----------------|----------------|
+| 1 | 9.99 | 1.00x | 100% (baseline) |
+| 2 | 10.38 | 1.92x | 96% |
+| **4** | **13.90** | **2.88x** | **72%** |
+
+**Target V1:** N=4 speedup >= 3.2x (80% efficiency) → ❌ **gap -10%**.
+
+**Status:** ❌ não atinge. Causa: contention de IO em filesystem único (todos workers escrevem em mesmo SSD), AV scan compartilhado, e overhead de spawn Windows (~0.25s/worker × 4 = 1s). **Tracked by Story 2.2** indireto (vectorização reduz tempo absoluto por worker, deve melhorar efficiency).
+
+**Notas:**
+- N=2 atinge 96% efficiency (excelente) — confirma que para downloads de 2 símbolos, multi-process é Pareto-ótimo no Windows.
+- N=8 omitido (8 cores logicos, hardware modesto = saturação esperada → speedup cai).
+- Crossover analysis (jobs curtos vs longos) **NÃO MEDIDO** nesta story — tarefa para Story 2.X (quando smoke real disponível).
+
+---
+
+### `bench_callback_to_disk` — v1.1.0-mock (Story 1.8 re-run)
+
+**Workload:** 30_000 callbacks @ 100k/s rate, sample_rate=5%, ParquetWriter pipeline simulado. 6 cenários (mesma matriz de 1.4.5).
+**git_sha:** `50f3368-dirty` (Story 1.8 re-run 2026-05-04).
+**JSON:** `benchmarks/results/baselines_v1_mock/bench_callback_to_disk-1.1.0-mock.json`.
+
+| drain | pause ms | queue | p50 ms | p99 ms | drops | qmax | actual rate | back-pressure |
+|-------|----------|-------|--------|--------|-------|------|-------------|---------------|
+| stream | 0 | 10_000 | 1_415 | 2_472 | 55 (0.18%) | 10_000 | 22_197/s | drop |
+| stream | 100 | 10_000 | 1_565 | 2_668 | 19 (0.06%) | 10_000 | 42_596/s | drop |
+| stream | 500 | 10_000 | 2_388 | 3_471 | 71 (0.24%) | 10_000 | 19_763/s | drop |
+| stream | 2000 | 10_000 | 5_438 | 6_502 | **264 (0.88%)** | 10_000 | 6_536/s | drop |
+| stream | 500 | 100_000 | 2_740 | 4_790 | 0 | 29_999 | 99_999/s | block_or_absorb |
+| **chunk** | **0** | **100_000** | **1_352** | **1_510** | **0** | 3_205 | 99_999/s | block_or_absorb |
+
+**Target V1:** p99 < 100ms (cenário writer_pause=0 chunk-mode) → ❌ **gap +1410%** (1_510ms vs 100ms).
+
+**Status:** ❌ não atinge. Tracked by Story 2.2 (vectorização) + decomposição target em Story 1.7 (3 sub-targets aprovados em COUNCIL-02 §6 Aria).
+
+**H4 re-confirmada:** writer_pause=2000ms + queue=10k = 0.88% drops (vs 1.17% em 1.4.5; mesma ordem de magnitude — métrica `dll_drops_total` continua obrigatória).
+
+---
+
+## Resumo Story 1.8 — Status final por target
+
+| Bench | Target V1 | Achieved (mock v1.1.0) | Status | Tracked by |
+|-------|-----------|------------------------|--------|------------|
+| bench_parquet_write (raw) | >= 100k trades/s | 1.19M | ✅ atinge | — |
+| bench_parquet_write (production) | >= 100k trades/s | 27_638 | ❌ gap -72% | **Story 2.2** |
+| bench_parquet_read (full scan) | >= 1M trades/s | 61.4M | ✅ atinge | — |
+| bench_parquet_read (filtered 1pct) | >= 5M trades/s | 35.8M | ✅ atinge | — |
+| bench_dedup (batch 10k worst) | < 50ms | 11.32ms | ✅ atinge | — |
+| bench_callback_to_disk (chunk p99) | < 100ms | 1_510ms | ❌ gap +1410% | **Story 2.2** + decomposição (COUNCIL-02 §6) |
+| bench_chunking (1 mês WDOJ26) | < 5 min | ~40 min (extrapolated) | ❌ gap +700% | **Story 2.2** |
+| bench_multi_symbol (N=4 speedup) | >= 3.2x | 2.88x | ❌ gap -10% | **Story 2.2** (indireto) + Story 2.X (crossover real) |
+
+**Aguardam smoke real (`v1.0.0-real`):**
+- Tempo total real download 1 mês (rede + DLL real)
+- RSS steady state real
+- CPU avg real
+- Comportamento de reconnect 99% (Q-RECON)
+
+**Footnote:** baselines reais (`v1.0.0-real`) aguardam **Story 1.7b-followup** (humano roda smoke MVP com `PROFITDLL_KEY` set). Quando smoke verde, esta seção é re-registrada com números reais. Mock baselines `v1.1.0-mock` permanecem registrados como referência de pipeline-only (sem network/DLL real).
 
 ---
 

@@ -1,0 +1,81 @@
+{
+  "benchmark": "bench_chunking",
+  "version": "1.0.0",
+  "git_sha": "50f3368",
+  "git_dirty": true,
+  "date": "2026-05-04T06:27:37Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "4.0.0.30-mock",
+  "config": {
+    "n_chunks": 4,
+    "trades_per_chunk": 50000,
+    "runs_per_config": 3,
+    "target_total_min": 5.0,
+    "mock_dll": "inline _FakeProfitDLL (test_orchestrator pattern)"
+  },
+  "scenarios": [
+    {
+      "n_chunks_target": 4,
+      "n_chunks_completed": 4,
+      "n_chunks_failed": 0,
+      "trades_per_chunk": 50000,
+      "n_trades_total": 200000,
+      "trades_persisted": 200000,
+      "total_ms": 43532.675,
+      "throughput_trades_per_sec": 4594.250181042171,
+      "status": "completed"
+    },
+    {
+      "n_chunks_target": 4,
+      "n_chunks_completed": 4,
+      "n_chunks_failed": 0,
+      "trades_per_chunk": 50000,
+      "n_trades_total": 200000,
+      "trades_persisted": 200000,
+      "total_ms": 47714.4574,
+      "throughput_trades_per_sec": 4191.601684230826,
+      "status": "completed"
+    },
+    {
+      "n_chunks_target": 4,
+      "n_chunks_completed": 4,
+      "n_chunks_failed": 0,
+      "trades_per_chunk": 50000,
+      "n_trades_total": 200000,
+      "trades_persisted": 200000,
+      "total_ms": 40712.4051,
+      "throughput_trades_per_sec": 4912.507613066563,
+      "status": "completed"
+    }
+  ],
+  "summary": {
+    "trades_per_chunk_mock": 50000,
+    "n_chunks": 4,
+    "total_ms_p50": 43532.675,
+    "total_ms_p99": 47630.821751999996,
+    "total_ms_stddev": 3523.018657385807,
+    "throughput_chunk_complete_p50": 4594.250181042171,
+    "throughput_chunk_complete_p99": 4906.142464426075,
+    "extrapolated_to_1month_real_ms_p50": 2394297.125,
+    "extrapolated_minutes_p50": 39.904952083333335,
+    "verdict_extrapolation": "FAIL",
+    "verdict_basis": "Linear extrapolation from 200_000 trades to 11M trades (1 month real); ParquetWriter is dominant cost \u2014 matches COUNCIL-02 finding."
+  },
+  "notes": "End-to-end mock pipeline (Orchestrator + ParquetWriter + Catalog). Mock DLL inline (sem latencia rede). Baseline v1.1.0-mock \u2014 aguarda smoke real (Story 1.7b-followup) para baselines reais."
+}

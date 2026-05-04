@@ -25,8 +25,8 @@ Cada benchmark pode ter budget customizado, justificado abaixo:
 | `bench_parquet_read_filtered` | **10%** | default | Pyro |
 | `bench_dedup` | **10%** | default | Pyro |
 | `bench_callback_to_disk` | **5%** ⚠️ | latência callback é mais sensível; 5% em p99 já é perceptível | Pyro |
-| `bench_chunking` | **15%** | tempo total tem variação de rede inerente; budget mais largo | Pyro |
-| `bench_multi_symbol` | **20%** | speedup depende de carga do sistema, AV, schedule do OS | Pyro |
+| `bench_chunking` | **30%** ⚠️ | **OVERRIDE EXPLÍCITO Story 1.8** — mock E2E pipeline tem variabilidade alta por nature (multi-thread + writer + catalog + spawn de IngestorThread + AV scan compartilhado). Story 1.8 mediu stddev = 8% sobre 3 runs, mas budget conservador 30% para acomodar variação entre hosts e versões DLL diferentes (real pode ter swing maior). Reduzir para 15% só após smoke real estabilizar. | Pyro |
+| `bench_multi_symbol` | **20%** | speedup depende de carga do sistema, AV, schedule do OS, IO contention | Pyro |
 | `bench_boot_cleanup` | **30%** | < 1s já é alvo confortável; ruído do filesystem grande | Pyro |
 | `bench_subprocess_spawn` | **30%** | Windows spawn varia muito por estado do sistema (page cache, AV, paths) | Pyro |
 | `bench_log_overhead` | **15%** | CPU% medido tem ruído por scheduling | Pyro |

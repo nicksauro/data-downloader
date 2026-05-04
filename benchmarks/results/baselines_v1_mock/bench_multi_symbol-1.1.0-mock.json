@@ -1,0 +1,98 @@
+{
+  "benchmark": "bench_multi_symbol",
+  "version": "1.0.0",
+  "git_sha": "50f3368",
+  "git_dirty": true,
+  "date": "2026-05-04T06:30:29Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "4.0.0.30-mock",
+  "config": {
+    "n_processes_list": [
+      1,
+      2,
+      4
+    ],
+    "runs_per_n": 2,
+    "trades_per_chunk": 25000,
+    "n_chunks_per_job": 2,
+    "spawn_strategy": "multiprocessing.Pool (Windows spawn)",
+    "target_speedup_n4": 3.2
+  },
+  "scenarios": [
+    {
+      "n_processes": 1,
+      "wall_time_s_p50": 9.988364350007032,
+      "wall_time_s_p99": 10.006229505006631,
+      "agg_throughput_p50": 5005.841276681938,
+      "speedup_vs_n1": 1.0,
+      "efficiency_pct": 100.0,
+      "all_runs_completed": true
+    },
+    {
+      "n_processes": 2,
+      "wall_time_s_p50": 10.382374950015219,
+      "wall_time_s_p99": 10.392286327016773,
+      "agg_throughput_p50": 9631.716767306225,
+      "speedup_vs_n1": 1.9241001019699044,
+      "efficiency_pct": 96.20500509849522,
+      "all_runs_completed": true
+    },
+    {
+      "n_processes": 4,
+      "wall_time_s_p50": 13.896742599987192,
+      "wall_time_s_p99": 13.89816644199076,
+      "agg_throughput_p50": 14391.862031488698,
+      "speedup_vs_n1": 2.8750232014849977,
+      "efficiency_pct": 71.87558003712495,
+      "all_runs_completed": true
+    }
+  ],
+  "summary": {
+    "spawn_overhead_per_proc_p50_s": 0.24750739999581128,
+    "scenarios_summary": [
+      {
+        "n": 1,
+        "wall_p50_s": 9.99,
+        "speedup": 1.0,
+        "efficiency_pct": 100.0
+      },
+      {
+        "n": 2,
+        "wall_p50_s": 10.38,
+        "speedup": 1.92,
+        "efficiency_pct": 96.2
+      },
+      {
+        "n": 4,
+        "wall_p50_s": 13.9,
+        "speedup": 2.88,
+        "efficiency_pct": 71.9
+      }
+    ],
+    "n4_speedup_vs_target": {
+      "target": 3.2,
+      "measured": 2.88,
+      "verdict": "FAIL"
+    },
+    "n4_speedup": 2.8750232014849977,
+    "trades_per_chunk_mock": 25000,
+    "n_chunks_per_job": 2
+  },
+  "notes": "Mock pipeline N processos paralelo (Windows spawn). Cada worker tem seu DLL mock + Catalog + Writer isolados. Speedup baseline = N=1. Baseline v1.1.0-mock \u2014 aguarda smoke real (Story 1.7b-followup)."
+}

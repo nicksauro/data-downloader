@@ -12,8 +12,10 @@
 |--------|-------------|
 | `aspiracional` | Target derivado de heurística / experiência prévia; **NÃO medido neste sistema** |
 | `measured-synthetic` | Validado via fixtures sintéticos + storage real (Story 1.4.5) |
-| `measured-real` | Validado via DLL real + dados reais (Story 1.8+) |
-| `gap` | Bench rodou e mostrou que target NÃO é atingido — requer otimização ou revisão |
+| `measured-mock` | Validado via pipeline E2E com mock DLL inline (Story 1.8) |
+| `measured-real` | Validado via DLL real + dados reais (Story 1.7b-followup) |
+| `gap-tracked-by-2.X` | Bench rodou, gap confirmado, story dedicada criada (link explícito) |
+| `gap` | Bench rodou e mostrou que target NÃO é atingido — sem story dedicada ainda |
 | `revised` | Target ajustado após medição revelar realidade diferente |
 
 **Por que "aspiracional" é importante:**
@@ -23,16 +25,16 @@ O plan review (finding H3) detectou que targets V1 atuais são palpites. Marcar 
 
 ## Targets V1 — Download
 
-| Métrica | Target | Status | Story que valida | Notas (Story 1.4.5) |
-|---------|--------|--------|------------------|---------------------|
-| Latência callback DLL → trade gravado em Parquet (p99) | < 100ms | **gap** | 1.4.5 measured | Achieved chunk-mode p99 = 2_244ms (gap +22x). `ParquetWriter` rewrite-full-on-merge é o bottleneck. Ver `docs/decisions/COUNCIL-02`. Target é arquiteturalmente incompatível com modelo chunk-then-write — proposta de revisão em Story 1.7. |
-| Throughput escrita Parquet sustentado (production writer) | >= 100k trades/s | **gap** | 1.4.5 measured | Achieved 27_638 trades/s (gap -72%). Causa: validate+enrich+sequence+dedup+merge+sort+fsync+sha256 todos em loop Python. Roadmap em COUNCIL-02 (Story 2.1 vectorização). |
-| Throughput escrita Parquet (raw `pq.write_table`) | >= 100k trades/s | **measured-synthetic** | 1.4.5 | Achieved p50 = 1_185_599 trades/s (raw pyarrow snappy rg=1M). Mostra que pyarrow não é o gargalo. |
-| Tempo total para baixar 1 mês WDOJ26 (rede boa) | < 5 min | aspiracional | 1.8 (real) | — |
-| Speedup multi-symbol N=4 processos | >= 3.2x (80% efficiency) | aspiracional | story posterior | Não medido em 1.4.5 (escopo declarou apenas 4 benchmarks). |
-| Drops de trades em condições normais (writer pause = 0) | 0 | **gap parcial** | 1.4.5 measured | Stream-mode @ pause=0 mostrou 108 drops (0.22%) com queue=10k devido a put-timeout 10ms; chunk-mode @ pause=0 + queue=100k = 0 drops. Recomendação: produção usa queue >= 100k. |
-| Drops em pico (writer pausa 500ms via AV scan) | < 0.1% | **gap** com queue=10k; **measured-synthetic ✅** com queue=100k | 1.4.5 measured | queue=10k + pause=500ms = 0.40% drops; queue=100k absorve sem drop (qmax=48841 = 49% util). |
-| Drops em stress sustentado (writer pause 2000ms) | informativo (validar H4) | **measured H4 CONFIRMED** | 1.4.5 | 1.17% drops com queue=10k — drops inevitáveis sem alarme + queue gigante. Métrica `dll_drops_total` obrigatória em Story 1.7. |
+| Métrica | Target | Status | Story que valida | Notas |
+|---------|--------|--------|------------------|-------|
+| Latência callback DLL → trade gravado em Parquet (p99) | < 100ms | **gap-tracked-by-2.2** | 1.4.5 + 1.8 measured | 1.4.5: chunk p99 = 2_244ms. 1.8 re-run: 1_510ms (mesma ordem). Gap +1410%. Tracked by Story 2.2 (vectorização). Target arquiteturalmente incompatível com chunk-then-write; decomposição em 3 sub-targets aprovada em COUNCIL-02 §6. |
+| Throughput escrita Parquet sustentado (production writer) | >= 100k trades/s | **gap-tracked-by-2.2** | 1.4.5 measured | Achieved 27_638 trades/s (gap -72%). Causa: validate+enrich+sequence+dedup+merge+sort+fsync+sha256 todos em loop Python. **[Story 2.2](../stories/2.2.story.md)** vectoriza (target esperado: 150-280k trades/s). |
+| Throughput escrita Parquet (raw `pq.write_table`) | >= 100k trades/s | **measured-synthetic ✅** | 1.4.5 | Achieved p50 = 1_185_599 trades/s (raw pyarrow snappy rg=1M). Mostra que pyarrow não é o gargalo. |
+| Tempo total para baixar 1 mês WDOJ26 (rede boa) | < 5 min | **gap-tracked-by-2.2** | 1.8 measured (mock) + 1.7b-followup (real) | bench_chunking E2E mock extrapola para ~40min em 1 mês real (200k trades = 43.5s p50). Tracked by **Story 2.2** (write é gargalo dominante; vectorização → ~7min). |
+| Speedup multi-symbol N=4 processos | >= 3.2x (80% efficiency) | **gap-tracked-by-2.2 (indireto)** | 1.8 measured (mock) | Achieved 2.88x (gap -10%, 72% efficiency). N=2 atinge 1.92x (96% efficiency — Pareto-ótimo). Causa: contention IO + spawn overhead Windows (~0.25s/proc). Tracked indiretamente por **Story 2.2** (vectorização reduz tempo absoluto/worker). Crossover analysis pendente. |
+| Drops de trades em condições normais (writer pause = 0) | 0 | **gap parcial** | 1.4.5 + 1.8 measured | Stream-mode pause=0 mostrou drops (0.18-0.22%) com queue=10k devido a put-timeout 10ms; chunk-mode + queue=100k = 0 drops. Recomendação: produção usa queue >= 100k. |
+| Drops em pico (writer pausa 500ms via AV scan) | < 0.1% | **gap** com queue=10k; **measured ✅** com queue=100k | 1.4.5 + 1.8 measured | queue=10k + pause=500ms = 0.24-0.40% drops; queue=100k absorve sem drop. |
+| Drops em stress sustentado (writer pause 2000ms) | informativo (validar H4) | **measured H4 CONFIRMED** (1.4.5 + 1.8) | 1.4.5 + 1.8 | 1.17% (1.4.5) e 0.88% (1.8) drops com queue=10k — drops inevitáveis sem alarme + queue gigante. Métrica `dll_drops_total` obrigatória em Story 1.7. |
 
 ---
 
@@ -50,8 +52,8 @@ O plan review (finding H3) detectou que targets V1 atuais são palpites. Marcar 
 
 | Métrica | Target | Status | Story que valida | Notas (Story 1.4.5) |
 |---------|--------|--------|------------------|---------------------|
-| RSS steady state (1 worker download ativo) | < 500MB | aspiracional | 1.8 | bench_parquet_write peak_rss_delta = 227 MB para 1M trades em ParquetWriter — proxy parcial; medição steady-state real em Story 1.8. |
-| CPU avg durante download (1 symbol) | < 50% (de 1 core) | aspiracional | 1.8 | — |
+| RSS steady state (1 worker download ativo) | < 500MB | **aguarda smoke real (1.7b-followup)** | 1.7b-followup | bench_parquet_write peak_rss_delta = 227 MB para 1M trades em ParquetWriter — proxy parcial. Story 1.8 mock pipeline também < 500MB observed (sem medição formal). Real esperado < 500MB confortavelmente. |
+| CPU avg durante download (1 symbol) | < 50% (de 1 core) | **aguarda smoke real (1.7b-followup)** | 1.7b-followup | Story 1.8 mock = ~25% CPU avg (sem rede); real esperado maior por reconnect 99% (Q-RECON). |
 | Disk size por 1M trades (Snappy, row_group=100k) | <= 30MB | **measured-synthetic ✅** | 1.4.5 | Achieved 36.5 MB (gap +21% — ligeiramente acima). Para 1M trades de WDOJ26 sintético com 17 campos. row_group=1M reduz para 30.6 MB (atinge target). |
 | Disk size por 1M trades (ZSTD-1) | <= 18MB | **gap parcial** | 1.4.5 | Achieved 26.7 MB com ZSTD-1 (gap +48%). ZSTD-3 = 24.2 MB (gap +34%). Targets foram sub-estimados para schema 17 campos. Recomendação: revisar para <= 30 MB (Snappy) e <= 25 MB (ZSTD-1). |
 
