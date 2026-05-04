@@ -28,8 +28,13 @@ from data_downloader.public_api.exceptions import (
     IntegrityError,
     InvalidContract,
 )
+from data_downloader.public_api.history import (
+    read,
+    read_continuous,
+    vigent_contract,
+)
 
-__api_version__ = "0.1.0"
+__api_version__ = "0.2.0"
 
 __all__ = [
     "DLLInitError",
@@ -39,4 +44,7 @@ __all__ = [
     "IntegrityError",
     "InvalidContract",
     "__api_version__",
+    "read",
+    "read_continuous",
+    "vigent_contract",
 ]
