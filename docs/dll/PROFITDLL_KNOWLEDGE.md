@@ -4,7 +4,7 @@
 **Fonte primária:** `Manual - ProfitDLL pt_br.pdf` (extraído em `manual_profitdll.txt`, 4452 linhas)
 **Fontes secundárias:** `profitdll/Exemplo Python/main.py` (1274L) · `profit_dll.py` (signatures) · `profitTypes.py` (structs/enums)
 **Validação empírica:** whale-detector v2 (live mode 2026-03-09) · Sentinel §12
-**Última atualização:** 2026-05-03
+**Última atualização:** 2026-05-04 (auditoria Nelo — adicionados §2.7 SubscribeTicker pré-requisito + §2.8 argtypes/restype canônicos)
 
 > **Regra de uso:** Este documento é a referência canônica do squad data-downloader. Toda afirmação aqui referencia seção/linha do manual OU está marcada como `[empírico]` / `[ambíguo]` com link ao quirk em `QUIRKS.md`. Quando manual e prática divergem, divergência é registrada — nunca escondida.
 
@@ -139,6 +139,71 @@ Rastreamento: `ClOrderID` (permanente) + `MessageID` (sessão).
 - `TranslateTrade(pTrade, TConnectorTrade*)` → destrincha trade V2
 
 **Cache local obrigatório.** **JAMAIS** chamar de dentro do callback (manual §4).
+
+### 2.7 SubscribeTicker — PRÉ-REQUISITO de QUALQUER trade callback (Q-DRIFT-07)
+
+**Confirmado pelo usuário (autoridade Nelogica direta) em 2026-05-04:**
+> "para baixar WDOJ26, primeiro `SubscribeTicker('WDOJ26', 'F')`. Sem subscribe, callback nunca dispara, mesmo que `GetHistoryTrades` retorne `NL_OK`."
+
+**Sequência canônica para download histórico de 1 chunk:**
+```python
+# 1. Subscribe ANTES de qualquer set_callback ou GetHistory
+ret = dll.SubscribeTicker(c_wchar_p(symbol), c_wchar_p(exchange))  # exchange = 'F' ou 'B'
+if ret < 0: raise DLLError(...)
+
+# 2. Registrar callbacks V2
+dll.SetHistoryTradeCallbackV2(history_cb)  # callback faz APENAS put_nowait((handle, flags))
+
+# 3. Disparar download
+dll.GetHistoryTrades(symbol, exchange, dt_start_str, dt_end_str)
+
+# 4. Drenar fila em IngestorThread; aguardar TC_LAST_PACKET ou progress=100 ou timeout
+
+# 5. Unsubscribe quando chunk completar (limpa estado da sessão para próximo chunk)
+dll.UnsubscribeTicker(c_wchar_p(symbol), c_wchar_p(exchange))
+```
+
+Argtypes obrigatórios (ver §2.8):
+- `dll.SubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]; .restype = c_int`
+- `dll.UnsubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]; .restype = c_int`
+
+Para live trade subscriber (Story futura): mesma `SubscribeTicker` + `SetTradeCallbackV2`.
+
+### 2.8 Argtypes/Restype canônicos (Q-DRIFT-08)
+
+A DLL é Delphi stdcall. Sem `argtypes` configurados, ctypes usa `c_int` por default — quebra com handles `c_size_t` (truncado para 32 bits em x64), com `c_int64` retornos (LocalOrderID), e com `POINTER(struct)` args (Delphi espera Pointer, ctypes manda int).
+
+**Configurar UMA vez no init**, replicar literalmente de `profitdll/Exemplo Python/profit_dll.py:7-101`. Mínimo absoluto para download histórico V1:
+
+```python
+from ctypes import POINTER, c_double, c_int, c_int64, c_size_t, c_wchar_p
+
+# Histórico
+dll.GetHistoryTrades.argtypes = [c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p]
+dll.GetHistoryTrades.restype = c_int
+dll.TranslateTrade.argtypes = [c_size_t, POINTER(TConnectorTrade)]
+dll.TranslateTrade.restype = c_int
+
+# Subscribe
+dll.SubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]
+dll.SubscribeTicker.restype = c_int
+dll.UnsubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]
+dll.UnsubscribeTicker.restype = c_int
+
+# Agentes (Q14-E)
+dll.GetAgentNameLength.argtypes = [c_int, c_int]
+dll.GetAgentNameLength.restype = c_int
+dll.GetAgentName.argtypes = [c_int, c_int, c_wchar_p, c_int]
+dll.GetAgentName.restype = c_int
+
+# Lifecycle
+dll.SetEnabledLogToDebug.argtypes = [c_int]
+dll.SetEnabledLogToDebug.restype = c_int
+dll.DLLInitializeMarketLogin.restype = c_int
+dll.DLLFinalize.restype = c_int
+```
+
+Lista completa para todas as funções da DLL (incluindo trading): `profitdll/Exemplo Python/profit_dll.py`.
 
 ---
 
@@ -328,7 +393,13 @@ while True:
     if conn_type == MARKET_DATA and result in (MARKET_WAITING, MARKET_CONNECTED):
         break  # connected!
 
-# 8. Pronto para SubscribeTicker / GetHistoryTrades
+# 8. Para CADA chunk de download histórico (Q-DRIFT-07 — SubscribeTicker é PRÉ-REQUISITO):
+ret = dll.SubscribeTicker(c_wchar_p(symbol), c_wchar_p(exchange))  # exchange = 'F' ou 'B'
+assert ret >= 0
+dll.SetHistoryTradeCallbackV2(history_cb)
+dll.GetHistoryTrades(symbol, exchange, dt_start_str, dt_end_str)
+# ... drenar callbacks em IngestorThread, chamar TranslateTrade FORA do callback ...
+dll.UnsubscribeTicker(c_wchar_p(symbol), c_wchar_p(exchange))
 
 # 9. Finalize: tenta DLLFinalize (manual §4) → fallback Finalize (Q09-AMB)
 try:

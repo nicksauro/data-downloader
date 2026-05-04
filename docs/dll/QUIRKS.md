@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 (Q-DRIFT-02 CORRIGIDO + Q-DRIFT-05 NOVO — investigação Nelo manual-first após smoke #3 confirmou: hipótese ProfitChart prerequisite REFUTADA pelo usuário; causa raiz real é signatures incorretas dos NoopCallback no wrapper)
+**Última atualização:** 2026-05-04 (Q-DRIFT-07 + Q-DRIFT-08 NOVOS — auditoria manual-first confirmou pelo usuário: SubscribeTicker é PRÉ-REQUISITO de GetHistoryTrades, e argtypes/restype JAMAIS configurados no nosso wrapper)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -41,6 +41,8 @@
 | [Q-DRIFT-04](#q-drift-04) | 🔬 empirical | tooling / encoding | Rich Panel emoji crash em Windows cp1252 — CLI força `PYTHONIOENCODING=utf-8` |
 | [Q-DRIFT-05](#q-drift-05) | 🔬 empirical | init / signatures | NoopCallback signatures expandem TAssetID em 3 args primitivos (errado) — exemplo Nelogica usa TAssetID struct por valor |
 | [Q-DRIFT-06](#q-drift-06) | ⚠️ corrected | init | Q11-E "JAMAIS passar None" REFUTADO pelo exemplo oficial — Nelogica passa `None` em 4 dos 8 slots em `DLLInitializeMarketLogin` |
+| [Q-DRIFT-07](#q-drift-07) | ✅ validated | history / subscription | `SubscribeTicker(ticker, exchange)` é PRÉ-REQUISITO de `GetHistoryTrades` — sem subscribe, callback V2 nunca dispara |
+| [Q-DRIFT-08](#q-drift-08) | 🔬 empirical | ctypes / argtypes | argtypes/restype JAMAIS configurados no wrapper; exemplo oficial configura ~30 funções em `profit_dll.py` — sem isso, x64 stdcall pode truncar handles e desalinhar stack |
 
 ---
 
@@ -729,6 +731,72 @@
   - `profitdll/Exemplo Python/main.py` L738-743 (`DLLInitializeLogin` e `DLLInitializeMarketLogin` com `None` em 4-7 slots).
   - `profitdll/Exemplo Python/main.py` L745-761 (callbacks registrados via `SetXxxCallback` AFTER init).
   - Q11-E (Sentinel §12) — SUPERSEDED.
+
+---
+
+## Q-DRIFT-07
+
+- **ID:** Q-DRIFT-07
+- **Status:** ✅ validated (autoridade Nelogica direta — usuário confirmou em 2026-05-04)
+- **Categoria:** history / subscription
+- **Sintoma:** `GetHistoryTrades(ticker, exchange, dt_start, dt_end)` retorna `NL_OK` mas `HistoryTradeCallbackV2` **nunca dispara** — IngestorThread fica esperando, deadline atinge timeout, chunk falha em `status='timeout'` sem trades.
+- **Causa raiz:** `SubscribeTicker(ticker, exchange)` é **pré-requisito** para qualquer recepção de dados (live OU histórico). Sem o subscribe, a DLL aceita o `GetHistoryTrades` (não retorna erro) mas o feed do asset nunca é estabelecido na sessão, então o callback V2 nunca é chamado.
+- **Evidência:**
+  - Confirmação do usuário (autoridade ProfitDLL real, 2026-05-04): "para baixar WDOJ26, primeiro `SubscribeTicker('WDOJ26', 'F')`".
+  - Exemplo oficial Nelogica `profitdll/Exemplo Python/main.py:590-595` define `subscribeTicker()` separadamente; usuário do REPL invoca `subscribe` ANTES de `GetHistoryTrades`.
+  - Manual §3.1 lista `SubscribeTicker` como obrigatório para receber callbacks de trade do asset.
+- **Workaround:**
+  ```python
+  # ANTES de GetHistoryTrades:
+  ret = dll.SubscribeTicker(c_wchar_p(symbol), c_wchar_p(exchange))
+  if ret < 0:
+      raise DLLError(...)
+
+  # ... configurar callbacks, chamar GetHistoryTrades, drenar ...
+
+  # APÓS o chunk:
+  dll.UnsubscribeTicker(c_wchar_p(symbol), c_wchar_p(exchange))
+  ```
+  Argtypes: `dll.SubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]; dll.SubscribeTicker.restype = c_int`.
+- **Manual diz:** §3.1 documenta `SubscribeTicker` como função pública. Exemplo oficial usa.
+- **Data descoberta:** 2026-05-04 (auditoria Nelo após feedback usuário sobre falha de download MVP).
+- **Aplica a stories:** 1.3 (download_primitive — adicionar subscribe), 1.7b (smoke), todas que envolvam `GetHistoryTrades` ou trade live.
+- **Refs:**
+  - `profitdll/Exemplo Python/main.py` L590-595 (`subscribeTicker`), L753 (`SetTradeCallbackV2` registrado APÓS init).
+  - `docs/qa/AUDIT_REPORTS/dll-full-audit-2026-05-04.md` CRIT-1 + HIGH-5.
+
+---
+
+## Q-DRIFT-08
+
+- **ID:** Q-DRIFT-08
+- **Status:** 🔬 empirical
+- **Categoria:** ctypes / argtypes drift
+- **Sintoma:** `TranslateTrade(handle, struct)` pode retornar lixo OU acessar memória inválida em x64; valores de retorno `c_int64` (e.g. `SendOrder` LocalOrderID) podem chegar truncados; `c_size_t` handles passados a `TranslateTrade` podem ser truncados em 32 bits.
+- **Causa raiz:** Nosso wrapper (`src/data_downloader/dll/wrapper.py`) NUNCA configura `dll.foo.argtypes = [...]` nem `dll.foo.restype = ...` em **nenhuma** função. O exemplo oficial Nelogica em `profitdll/Exemplo Python/profit_dll.py` configura argtypes/restype para ~30 funções. Sem isso, ctypes default usa `c_int` para args/restype, o que:
+  - Trunca `c_int64` (e.g. handles `c_size_t` em x64).
+  - Desalinha o stack frame stdcall em chamadas com `POINTER(struct)` (ctypes vê `int`, Delphi espera `Pointer`).
+- **Evidência:**
+  - `grep -rn "argtypes\|restype" src/data_downloader/dll/` retorna zero ocorrências reais (apenas comentários).
+  - `profitdll/Exemplo Python/profit_dll.py` L7-101 configura 30+ funções incluindo `TranslateTrade.argtypes = [c_size_t, POINTER(TConnectorTrade)]; .restype = c_int`.
+- **Workaround:** criar método `_configure_argtypes(self)` em `ProfitDLL` chamado logo após `WinDLL(path)` e antes de qualquer outra chamada. Replicar literalmente as entradas de `profit_dll.py` (port para nossos tipos em `dll/types.py`). Mínimo absoluto (V1 download):
+  ```python
+  dll.TranslateTrade.argtypes = [c_size_t, POINTER(TConnectorTrade)]; dll.TranslateTrade.restype = c_int
+  dll.GetHistoryTrades.argtypes = [c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p]; dll.GetHistoryTrades.restype = c_int
+  dll.SubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]; dll.SubscribeTicker.restype = c_int
+  dll.UnsubscribeTicker.argtypes = [c_wchar_p, c_wchar_p]; dll.UnsubscribeTicker.restype = c_int
+  dll.GetAgentNameLength.argtypes = [c_int, c_int]; dll.GetAgentNameLength.restype = c_int
+  dll.GetAgentName.argtypes = [c_int, c_int, c_wchar_p, c_int]; dll.GetAgentName.restype = c_int
+  dll.SetEnabledLogToDebug.argtypes = [c_int]; dll.SetEnabledLogToDebug.restype = c_int
+  dll.DLLInitializeMarketLogin.restype = c_int
+  dll.DLLFinalize.restype = c_int
+  ```
+- **Manual diz:** Manual §4 fala de stdcall + tipos Delphi exatos; `profit_dll.py` é a referência canônica concreta.
+- **Data descoberta:** 2026-05-04 (auditoria Nelo manual-first).
+- **Aplica a stories:** 1.2 (init), 1.3 (download), todas que chamem funções da DLL.
+- **Refs:**
+  - `profitdll/Exemplo Python/profit_dll.py` L7-101.
+  - `docs/qa/AUDIT_REPORTS/dll-full-audit-2026-05-04.md` CRIT-2 + MED-4.
 
 ---
 
