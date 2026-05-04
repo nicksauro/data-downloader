@@ -12,14 +12,25 @@ são governadas por SemVer (ADR-007a):
 ``__api_version__`` é a fonte de verdade da versão da API pública (independente
 de ``data_downloader.__version__`` que rastreia o pacote inteiro).
 
-Módulos previstos:
+Módulos:
 
-- ``download.py`` — ``download(symbol, start, end) -> JobResult``
-- ``history.py``  — ``read(symbol, start, end) -> DataFrame``
+- ``download.py`` — :func:`download` (Story 1.7b)
+- ``handle.py``   — :class:`DownloadHandle`, :class:`DownloadProgress`,
+                    :class:`DownloadResult` (Story 1.7b — ADR-007a)
+- ``history.py``  — :func:`read`, :func:`read_continuous`, :func:`vigent_contract`
+                    (Story 1.5b)
+- ``exceptions.py`` — Hierarquia pública de exceções (ADR-011)
+
+Histórico de bumps:
+
+- ``0.1.0`` — Story 1.5b (read, read_continuous, vigent_contract)
+- ``0.2.0`` — Story 1.6 (vigent_contract público + InvalidContract)
+- ``0.3.0`` — Story 1.7b (download + DownloadHandle/Progress/Result) — minor aditivo
 """
 
 from __future__ import annotations
 
+from data_downloader.public_api.download import download
 from data_downloader.public_api.exceptions import (
     DataDownloaderError,
     DiskFull,
@@ -28,22 +39,33 @@ from data_downloader.public_api.exceptions import (
     IntegrityError,
     InvalidContract,
 )
+from data_downloader.public_api.handle import (
+    DownloadHandle,
+    DownloadProgress,
+    DownloadResult,
+    DownloadStatus,
+)
 from data_downloader.public_api.history import (
     read,
     read_continuous,
     vigent_contract,
 )
 
-__api_version__ = "0.2.0"
+__api_version__ = "0.3.0"
 
 __all__ = [
     "DLLInitError",
     "DataDownloaderError",
     "DiskFull",
     "DownloadError",
+    "DownloadHandle",
+    "DownloadProgress",
+    "DownloadResult",
+    "DownloadStatus",
     "IntegrityError",
     "InvalidContract",
     "__api_version__",
+    "download",
     "read",
     "read_continuous",
     "vigent_contract",

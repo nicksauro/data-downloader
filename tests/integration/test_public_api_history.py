@@ -300,7 +300,7 @@ def test_public_api_read_invalid_exchange_raises(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_public_api_api_version_exposed() -> None:
-    """``__api_version__`` está exposto na fronteira."""
+    """``__api_version__`` está exposto na fronteira (Story 1.7b: 0.3.0)."""
     from data_downloader.public_api import __api_version__
 
-    assert __api_version__ == "0.2.0"
+    assert __api_version__ == "0.3.0"

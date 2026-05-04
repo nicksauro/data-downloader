@@ -6,7 +6,8 @@ Ponto de entrada para o comando ``data-downloader`` (definido em
 Story 1.1 entregou ``version``. Story 1.6 adiciona o grupo ``contracts``
 (list / add / validate / vigent) — operações sobre o calendário de
 contratos vigentes. Story 2.1 adiciona o grupo ``integrity`` (check /
-validate-data) — validators executáveis (Sol+Quinn).
+validate-data) — validators executáveis (Sol+Quinn). Story 1.7b adiciona
+o comando ``download`` — gate de smoke MVP (Epic 1).
 
 Microcopy IDs (Uma — ``MICROCOPY_CATALOG.md``):
 - ``CMD_CONTRACTS`` (group label)
@@ -17,12 +18,17 @@ Microcopy IDs (Uma — ``MICROCOPY_CATALOG.md``):
 - ``HLP_VALIDATE`` (validate subcommand summary)
 - ``integrity.check.title`` (panel title — Story 2.1)
 - ``integrity.pass`` / ``integrity.fail`` (verdict labels — Story 2.1)
+- ``HLP_DOWNLOAD``, ``SUC_DOWNLOAD_DONE``, ``SUC_CACHE_HIT``,
+  ``SUC_CANCEL_DONE``, ``WAR_99_RECONNECT``, ``PMT_CANCEL_CONFIRM``,
+  ``ERR_DLL_NO_LICENSE``, ``ERR_INPUT_*`` (Story 1.7b — comando download)
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import signal
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +36,14 @@ from typing import TYPE_CHECKING
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 if TYPE_CHECKING:
@@ -556,6 +570,419 @@ def integrity_validate_data(
     finally:
         with contextlib.suppress(Exception):  # pragma: no cover defensive
             catalog.close()
+
+
+# =====================================================================
+# download command (Story 1.7b — Epic 1 smoke MVP gate)
+# =====================================================================
+
+# Module-level singletons p/ typer.Option (evita ruff B008 conforme Story 2.1).
+_DOWNLOAD_SYMBOL_OPT = typer.Option(
+    None, "--symbol", "-s", help="Símbolo (ex. WDOJ26). Default: última usada."
+)
+_DOWNLOAD_START_OPT = typer.Option(
+    None, "--start", help="Data inicial YYYY-MM-DD. Default: 1º dia do mês corrente."
+)
+_DOWNLOAD_END_OPT = typer.Option(None, "--end", help="Data final YYYY-MM-DD. Default: hoje.")
+_DOWNLOAD_EXCHANGE_OPT = typer.Option(
+    "F", "--exchange", "-e", help="Bolsa: F (BMF, default) ou B (Bovespa)."
+)
+_DOWNLOAD_DATA_DIR_OPT = typer.Option(
+    None, "--data-dir", "-d", help="Raiz dos dados (default: ./data)."
+)
+_DOWNLOAD_RESUME_OPT = typer.Option(
+    None, "--resume", help="(Reservado V2) Continuar download por job_id."
+)
+
+
+# Path do cache de last_symbol (CLI_PATTERNS §10).
+def _last_symbol_cache_path() -> Path:
+    return Path.home() / ".data_downloader" / "cache" / "last_symbol.txt"
+
+
+def _load_last_symbol() -> str | None:
+    """Lê último símbolo usado do cache (CLI_PATTERNS §10)."""
+    p = _last_symbol_cache_path()
+    if not p.exists():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def _save_last_symbol(symbol: str) -> None:
+    """Persiste símbolo no cache (best-effort; falha silenciosa)."""
+    p = _last_symbol_cache_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(symbol, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _default_period() -> tuple[date, date]:
+    """Mês corrente — 1º até hoje (CLI_PATTERNS §10)."""
+    today = date.today()
+    first = date(today.year, today.month, 1)
+    return first, today
+
+
+def _make_console() -> Console:
+    """Console Rich respeitando NO_COLOR env (CLI_PATTERNS §9)."""
+    if os.environ.get("NO_COLOR") is not None:
+        return Console(no_color=True, force_terminal=False, highlight=False)
+    return Console()
+
+
+def _format_microcopy(msg_id: str, field: str = "title", **kwargs: object) -> str:
+    """Wrapper local — ensura R17 sem expor o loader em todo lugar."""
+    from data_downloader.ui.microcopy_loader import format_msg
+
+    return format_msg(msg_id, field=field, **kwargs)
+
+
+@app.command("download")  # type: ignore[misc,unused-ignore]
+def download_cmd(
+    symbol: str | None = _DOWNLOAD_SYMBOL_OPT,
+    start: str | None = _DOWNLOAD_START_OPT,
+    end: str | None = _DOWNLOAD_END_OPT,
+    exchange: str = _DOWNLOAD_EXCHANGE_OPT,
+    data_dir: Path | None = _DOWNLOAD_DATA_DIR_OPT,
+    resume: str | None = _DOWNLOAD_RESUME_OPT,
+) -> None:
+    """Baixa histórico de trades para ``symbol`` em ``[start, end]`` (HLP_DOWNLOAD).
+
+    Story 1.7b — gate de Epic 1 (MVP smoke). Compose:
+      CLI typer → public_api.download → Orchestrator (1.7a) → DLL/writer/catalog.
+
+    Microcopy 100% via ``ui.microcopy_loader`` (R17 — Uma).
+    Ctrl+C produz graceful shutdown (CLI_PATTERNS §7); exit code 130 (POSIX).
+    """
+    console = _make_console()
+    _ = resume  # placeholder V2
+
+    # ---- 1. Defaults inteligentes (CLI_PATTERNS §10) ----
+    if symbol is None or not symbol.strip():
+        cached = _load_last_symbol()
+        if cached:
+            symbol = cached
+            console.print(f"[dim]Símbolo (cache): [bold]{symbol}[/bold][/dim]")
+        else:
+            console.print(
+                f"[red]✗ {_format_microcopy('ERR_INPUT_SYMBOL_REQUIRED', 'title')}[/red]\n"
+                f"  {_format_microcopy('ERR_INPUT_SYMBOL_REQUIRED', 'detail')}\n"
+                f"  {_format_microcopy('ERR_INPUT_SYMBOL_REQUIRED', 'action')}"
+            )
+            raise typer.Exit(code=2)
+
+    if start is None or end is None:
+        first, today = _default_period()
+        if start is None:
+            start = first.isoformat()
+        if end is None:
+            end = today.isoformat()
+
+    # ---- 2. Parse / validação de datas ----
+    try:
+        start_date = date.fromisoformat(start)
+    except ValueError as exc:
+        console.print(
+            f"[red]✗ {_format_microcopy('ERR_INPUT_INVALID_DATE', 'title')}[/red]\n"
+            f"  {_format_microcopy('ERR_INPUT_INVALID_DATE', 'detail', value=start)}\n"
+            f"  {_format_microcopy('ERR_INPUT_INVALID_DATE', 'action')}"
+        )
+        raise typer.Exit(code=2) from exc
+    try:
+        end_date = date.fromisoformat(end)
+    except ValueError as exc:
+        console.print(
+            f"[red]✗ {_format_microcopy('ERR_INPUT_INVALID_DATE', 'title')}[/red]\n"
+            f"  {_format_microcopy('ERR_INPUT_INVALID_DATE', 'detail', value=end)}\n"
+            f"  {_format_microcopy('ERR_INPUT_INVALID_DATE', 'action')}"
+        )
+        raise typer.Exit(code=2) from exc
+
+    if end_date < start_date:
+        console.print(
+            f"[red]✗ {_format_microcopy('ERR_INVALID_PERIOD', 'title')}[/red]\n"
+            "  "
+            + _format_microcopy(
+                "ERR_INVALID_PERIOD",
+                "detail",
+                start=start_date.isoformat(),
+                end=end_date.isoformat(),
+            )
+            + "\n"
+            f"  {_format_microcopy('ERR_INVALID_PERIOD', 'action')}"
+        )
+        raise typer.Exit(code=2)
+
+    today = date.today()
+    if end_date > today:
+        console.print(
+            f"[red]✗ {_format_microcopy('ERR_PERIOD_FUTURE', 'title')}[/red]\n"
+            "  "
+            + _format_microcopy(
+                "ERR_PERIOD_FUTURE",
+                "detail",
+                end=end_date.isoformat(),
+            )
+            + "\n"
+            "  "
+            + _format_microcopy(
+                "ERR_PERIOD_FUTURE",
+                "action",
+                today=today.isoformat(),
+            )
+        )
+        raise typer.Exit(code=2)
+
+    resolved_data_dir = Path(data_dir) if data_dir is not None else Path("data")
+
+    # ---- 3. Header Rich (CLI_PATTERNS §2) ----
+    console.print(
+        Panel(
+            f"[bold]Baixando[/bold] [cyan]{symbol}[/cyan] "
+            f"({start_date.isoformat()} a {end_date.isoformat()}) — exchange={exchange}",
+            title="[cyan]⬇ data-downloader download[/cyan]",
+            border_style="cyan",
+        )
+    )
+
+    # ---- 4. Início do download via public_api ----
+    from data_downloader.public_api.download import download as api_download
+
+    try:
+        handle = api_download(
+            symbol=symbol,
+            start=start_date,
+            end=end_date,
+            exchange=exchange,
+            data_dir=resolved_data_dir,
+        )
+    except ValueError as exc:
+        console.print(f"[red]✗ Erro de input:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    # ---- 5. Cancelamento graceful via SIGINT (CLI_PATTERNS §7, AC4) ----
+    cancel_requested = threading.Event()
+    orig_handler = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(signum: int, frame: object) -> None:
+        # Apenas seta flag; o loop de eventos checa e prompt-confirma.
+        # NÃO chamamos handle.cancel() direto: damos ao usuário a chance de
+        # confirmar (CLI_PATTERNS §7 — pergunta antes de cancelar).
+        _ = signum, frame
+        cancel_requested.set()
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(complete_style="cyan", finished_style="green"),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("• {task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+    )
+
+    task_id = progress.add_task(f"Baixando {symbol}", total=100)
+
+    # Drena eventos em thread separada para que o main loop possa
+    # processar SIGINT confirmação (input prompt bloqueia).
+    progress_state = {
+        "trades": 0,
+        "current_contract": symbol,
+        "is_99": False,
+    }
+
+    def _drain_events() -> None:
+        for ev in handle.events():
+            progress_state["trades"] = ev.trades_received
+            if ev.current_contract:
+                progress_state["current_contract"] = ev.current_contract
+            progress_state["is_99"] = ev.is_99_reconnect
+            # Atualiza barra; se total ainda desconhecido, usa pulse.
+            if ev.total > 0:
+                progress.update(
+                    task_id,
+                    total=ev.total,
+                    completed=ev.done,
+                    description=f"Baixando {progress_state['current_contract']}",
+                )
+            # Quirk Q11-99 — texto LITERAL canônico de Uma.
+            if ev.is_99_reconnect:
+                progress.update(
+                    task_id,
+                    description=_format_microcopy("WAR_99_RECONNECT", "detail"),
+                )
+
+    drain_thread = threading.Thread(target=_drain_events, daemon=True)
+
+    final_result = None
+    try:
+        with progress:
+            drain_thread.start()
+            # Loop de poll no resultado, com checagem de cancel.
+            while True:
+                if cancel_requested.is_set():
+                    # Para o progress temporariamente para fazer prompt limpo.
+                    progress.stop()
+                    confirm = (
+                        typer.prompt(
+                            _format_microcopy("PMT_CANCEL_CONFIRM", "title"),
+                            default="n",
+                            show_default=False,
+                        )
+                        .strip()
+                        .lower()
+                    )
+                    if confirm in ("s", "sim", "y", "yes"):
+                        handle.cancel()
+                        msg = _format_microcopy("INF_GRACEFUL_SHUTDOWN", "title")
+                        console.print(f"[yellow]↻ {msg}[/yellow]")
+                        # Aguarda worker terminar.
+                        final_result = handle.result(timeout=120.0)
+                        break
+                    # Usuário escolheu continuar — limpa flag e re-arma sinal.
+                    cancel_requested.clear()
+                    progress.start()
+                    continue
+                # Tenta pegar resultado em pooling curto.
+                try:
+                    final_result = handle.result(timeout=0.25)
+                    break
+                except TimeoutError:
+                    continue
+    finally:
+        # Restaura handler original.
+        signal.signal(signal.SIGINT, orig_handler)
+        # Drena thread de eventos (já deve ter terminado).
+        drain_thread.join(timeout=2.0)
+
+    if final_result is None:  # pragma: no cover defensive
+        console.print("[red]✗ Erro interno: download não retornou resultado[/red]")
+        raise typer.Exit(code=1)
+
+    # ---- 6. Persiste last_symbol (CLI_PATTERNS §10) ----
+    _save_last_symbol(final_result.symbol)
+
+    # ---- 7. Render final por status ----
+    status = final_result.status
+    if status == "completed":
+        size_mb = _approx_size_mb(final_result.partitions)
+        duration = _format_duration(final_result.duration_seconds)
+        console.print(
+            Panel(
+                "[bold green]✓ "
+                + _format_microcopy("SUC_DOWNLOAD_DONE", "title", symbol=final_result.symbol)
+                + "[/bold green]\n"
+                + _format_microcopy(
+                    "SUC_DOWNLOAD_DONE",
+                    "detail",
+                    trade_count=f"{final_result.trades_count:,}".replace(",", "."),
+                    file_count=len(final_result.partitions),
+                    size_mb=f"{size_mb:.1f}",
+                    duration=duration,
+                )
+                + "\n[cyan underline]"
+                + _format_microcopy("SUC_DOWNLOAD_DONE", "action", symbol=final_result.symbol)
+                + "[/cyan underline]",
+                title="OK",
+                border_style="green",
+            )
+        )
+        raise typer.Exit(code=0)
+    if status == "cache_hit":
+        console.print(
+            Panel(
+                "[bold green]✓ "
+                + _format_microcopy("SUC_CACHE_HIT", "title")
+                + "[/bold green]\n"
+                + _format_microcopy(
+                    "SUC_CACHE_HIT",
+                    "detail",
+                    symbol=final_result.symbol,
+                    period=f"{start_date.isoformat()} a {end_date.isoformat()}",
+                )
+                + "\n[dim]"
+                + _format_microcopy("SUC_CACHE_HIT", "action")
+                + "[/dim]",
+                title="cache",
+                border_style="green",
+            )
+        )
+        raise typer.Exit(code=0)
+    if status == "cancelled":
+        console.print(
+            Panel(
+                "[yellow]✓ "
+                + _format_microcopy("SUC_CANCEL_DONE", "title")
+                + "[/yellow]\n"
+                "Trades preservados: "
+                f"[bold]{final_result.trades_count:,}[/bold]".replace(",", ".")
+                + "\n[cyan]"
+                + _format_microcopy(
+                    "SUC_CANCEL_DONE",
+                    "action",
+                    symbol=final_result.symbol,
+                )
+                + "[/cyan]",
+                title="cancelado",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(code=130)
+    if status in ("partial", "failed"):
+        # Erro humanizado via humanize_nl_error quando possível.
+        from data_downloader.ui.microcopy_loader import humanize_nl_error
+
+        nl_name = None
+        if final_result.error_message:
+            # error_message vem como "NL_NAME: ..." quando DLLInitError.
+            head = final_result.error_message.split(":", 1)[0].strip()
+            if head.startswith("NL_"):
+                nl_name = head
+        entry = humanize_nl_error(nl_name)
+        body = (
+            f"[bold red]✗ {entry.title}[/bold red]\n"
+            f"{entry.detail or final_result.error_message or ''}\n"
+            f"[dim]{entry.action or ''}[/dim]"
+        )
+        console.print(
+            Panel(body, title="erro", border_style="red"),
+        )
+        raise typer.Exit(code=3 if nl_name else 1)
+    # Defensive — status desconhecido.
+    console.print(f"[red]✗ Status desconhecido: {status}[/red]")  # pragma: no cover
+    raise typer.Exit(code=1)
+
+
+def _approx_size_mb(partitions: tuple[Path, ...]) -> float:
+    """Soma file size em MB. Best-effort; ignora arquivos ausentes."""
+    total = 0
+    for p in partitions:
+        with contextlib.suppress(OSError):
+            total += Path(p).stat().st_size
+    return total / (1024 * 1024)
+
+
+def _format_duration(seconds: float) -> str:
+    """Formata duração humana (ex.: '4min 12s', '34s')."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    rem = int(seconds % 60)
+    return f"{minutes}min {rem:02d}s"
+
+
+# =====================================================================
 
 
 if __name__ == "__main__":

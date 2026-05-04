@@ -30,9 +30,9 @@ def test_public_api_exposes_api_version() -> None:
     from data_downloader.public_api import __api_version__
 
     assert isinstance(__api_version__, str)
-    # Story 1.5b — bumpado para 0.2.0 ao adicionar read/read_continuous/vigent_contract
-    # (mudança aditiva — minor bump conforme ADR-007a).
-    assert __api_version__ == "0.2.0"
+    # Story 1.5b — bumpado para 0.2.0 ao adicionar read/read_continuous/vigent_contract.
+    # Story 1.7b — bumpado para 0.3.0 ao adicionar download/DownloadHandle (minor aditivo).
+    assert __api_version__ == "0.3.0"
 
 
 @pytest.mark.smoke
