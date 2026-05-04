@@ -93,6 +93,11 @@ disallow_untyped_defs = true
 module = ["data_downloader.ui.*"]
 ignore_errors = true  # UI é Felix; type-check separado quando Story 3.x
 
+[[tool.mypy.overrides]]
+# pyarrow e duckdb não fornecem py.typed marker — silenciar.
+module = ["pyarrow", "pyarrow.*", "duckdb", "duckdb.*"]
+ignore_missing_imports = true
+
 # =====================================================================
 # pytest
 # =====================================================================
