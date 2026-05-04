@@ -87,7 +87,8 @@ A Nelogica modernizou a API ao longo das versões 4.0.0.18+ adicionando funçõe
 | `SetDayTrade` | 1 (useDayTrade: int) | `int` | 1=True, 0=False |
 | `SetEnabledLogToDebug` | 1 (enabled: int) | `int` | 0=silencia log nativo da DLL (recomendado em produção) |
 | `SetEnabledHistOrder` | 1 (enabled: int) | `int` | Habilita histórico de ordens (chamar após init) |
-| `GetDLLVersion` | 0 (signature TBD via profit_dll.py) | versão | Usado por data-downloader em metadata Parquet |
+| ~~`GetDLLVersion`~~ | — | — | **Q-DRIFT-01 (2026-05-04)**: NÃO exportada pela DLL real (probe via `getattr` em `profitdll/DLLs/Win64/ProfitDLL.dll`). Wrapper retorna `"unknown"` graciosamente; metadata Parquet usa esta string. |
+| ~~`SetProgressCallback`~~ | — | — | **Q-DRIFT-01 (2026-05-04)**: NÃO exportada como função standalone. Per `Exemplo Python/main.py` L740-743, o `progressCallBack` é o **slot 10 de `DLLInitializeMarketLogin`** (já preenchido com Noop pelo wrapper). Para ativar, precisa custom-noop no slot — fora do escopo Story 1.3. Detecção de fim via **`TC_LAST_PACKET`** (V2 flag). |
 
 ### 2.3 Market Data — Subscriptions
 

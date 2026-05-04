@@ -34,10 +34,26 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import typer
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import (
+# Q-DRIFT-04 (smoke 2026-05-04): força UTF-8 para stdout/stderr ANTES de
+# importar Rich/typer. Em Windows, console default cp1252 causa
+# UnicodeEncodeError ao tentar emitir emojis em Rich Panel ("⚡", "✓", etc).
+# Setar via env não basta porque Python 3.12+ pode já ter populado os
+# wrappers — usamos ``reconfigure`` quando disponível (Python 3.7+).
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+# ``reconfigure`` é no-op se streams forem TextIO redirecionado (subprocess);
+# em terminal real reconfigura encoding sem perda de buffer.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None:
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if callable(_reconfigure):
+            with contextlib.suppress(Exception):
+                _reconfigure(encoding="utf-8", errors="replace")
+
+import typer  # noqa: E402  Q-DRIFT-04: encoding setup precisa rodar antes
+from rich.console import Console  # noqa: E402  Q-DRIFT-04
+from rich.panel import Panel  # noqa: E402  Q-DRIFT-04
+from rich.progress import (  # noqa: E402  Q-DRIFT-04
     BarColumn,
     Progress,
     SpinnerColumn,
@@ -45,7 +61,7 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-from rich.table import Table
+from rich.table import Table  # noqa: E402  Q-DRIFT-04
 
 if TYPE_CHECKING:
     from data_downloader.storage.catalog import Catalog
@@ -341,9 +357,14 @@ def contracts_validate(
 ) -> None:
     """Valida contrato via probe DLL (BTN_VALIDATE_CONTRACT, AC6).
 
-    Inicializa a DLL com credenciais de env (PROFITDLL_KEY / PROFIT_USER /
-    PROFIT_PASS) e chama :func:`probe_contract`. Em sucesso atualiza
+    Inicializa a DLL com credenciais de env (PROFITDLL_KEY / PROFITDLL_USER /
+    PROFITDLL_PASS) e chama :func:`probe_contract`. Em sucesso atualiza
     ``validated_at`` no catálogo (AC7).
+
+    Q-DRIFT-03 (smoke 2026-05-04): nomes alinhados com ``.env.example`` que
+    usa o prefixo ``PROFITDLL_*``. Versões anteriores liam ``PROFIT_USER`` /
+    ``PROFIT_PASS`` (sem prefixo) — corrigido para evitar smoke real falhar
+    com "credenciais ausentes" mesmo após preencher o ``.env``.
     """
     from data_downloader.dll.wrapper import ProfitDLL
     from data_downloader.orchestrator.contracts_probe import probe_contract
@@ -351,12 +372,12 @@ def contracts_validate(
     console = Console()
 
     key = os.getenv("PROFITDLL_KEY")
-    user = os.getenv("PROFIT_USER")
-    password = os.getenv("PROFIT_PASS")
+    user = os.getenv("PROFITDLL_USER")
+    password = os.getenv("PROFITDLL_PASS")
     if not (key and user and password):
         console.print(
-            "[red]Credenciais ausentes.[/red] Defina PROFITDLL_KEY, PROFIT_USER, "
-            "PROFIT_PASS em ~/.data-downloader/.env."
+            "[red]Credenciais ausentes.[/red] Defina PROFITDLL_KEY, PROFITDLL_USER, "
+            "PROFITDLL_PASS em ~/.data-downloader/.env."
         )
         raise typer.Exit(code=3)
 
@@ -372,8 +393,10 @@ def contracts_validate(
     try:
         with ProfitDLL() as dll:
             dll.initialize_market_only(key, user, password)
-            if not dll.wait_market_connected(timeout=60):
-                console.print("[red]DLL não conectou em 60s.[/red]")
+            # Q-DRIFT-02: timeout 300s (5 min) — handshake MARKET_DATA pode
+            # levar >60s em ambientes lentos / ProfitChart concorrente.
+            if not dll.wait_market_connected(timeout=300):
+                console.print("[red]DLL não conectou em 300s.[/red]")
                 raise typer.Exit(code=4)
 
             console.print(

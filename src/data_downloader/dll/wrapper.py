@@ -378,7 +378,7 @@ class ProfitDLL:
     # Wait for connected (AC5)
     # =================================================================
 
-    def wait_market_connected(self, timeout: int = 60) -> bool:
+    def wait_market_connected(self, timeout: int = 300) -> bool:
         """Aguarda sequência canônica de connection states até MARKET_DATA conectado.
 
         Drena ``self._state_queue`` em loop (na thread do caller — NÃO no
@@ -393,25 +393,52 @@ class ProfitDLL:
             (2, X) → MARKET_DATA conectado (X ∈ {2, 4})
             (3, 0) → MARKET_LOGIN OK
 
+        Default 300s (5 min) — Q-DRIFT-02 (smoke 2026-05-04): MARKET_DATA pode
+        levar >60s para conectar em ambientes com handshake lento ou quando
+        ProfitChart precisa estar rodando concorrentemente. Progress logado a
+        cada 30s para que o usuário veja que não está travado.
+
         Args:
-            timeout: Timeout total em segundos (default 60).
+            timeout: Timeout total em segundos (default 300 — 5 min).
 
         Returns:
             ``True`` se MARKET_DATA conectou dentro do timeout; ``False``
             em timeout (sem raise — caller decide se aborta ou re-tenta).
         """
-        deadline = time.monotonic() + timeout
+        # Q-DRIFT-02: heartbeat a cada 30s para visibilidade quando o handshake
+        # é lento (silêncio total >60s confunde operador — parece travado).
+        heartbeat_interval = 30.0
+        start = time.monotonic()
+        deadline = start + timeout
+        next_heartbeat = start + heartbeat_interval
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 log.warning("dll.connected_timeout", timeout=timeout)
                 return False
+
+            # Heartbeat — emite log se passou ``heartbeat_interval`` sem state
+            # novo. NÃO consome do queue; apenas informa que ainda estamos
+            # vivos esperando (Q-DRIFT-02: handshake pode levar minutos).
+            if now >= next_heartbeat:
+                elapsed = int(now - start)
+                log.info(
+                    "dll.waiting_market_data",
+                    elapsed_seconds=elapsed,
+                    timeout=timeout,
+                    quirk="Q-DRIFT-02",
+                )
+                next_heartbeat = now + heartbeat_interval
+
+            # Bloqueio limitado ao próximo heartbeat OU deadline (o que vier
+            # antes) — permite emitir o log de progresso mesmo sem state novo.
+            wait_for = min(remaining, max(0.1, next_heartbeat - now))
             try:
-                conn_type, result = self._state_queue.get(timeout=remaining)
+                conn_type, result = self._state_queue.get(timeout=wait_for)
             except Empty:
-                # Timeout dentro do get — segunda checagem de safety.
-                log.warning("dll.connected_timeout", timeout=timeout)
-                return False
+                # Não é timeout final — pode ser apenas hora do heartbeat.
+                continue
 
             alias = self._resolve_state_alias(conn_type, result)
             log.info(
@@ -562,19 +589,47 @@ class ProfitDLL:
         # esta segunda referência é cinto-e-suspensório (custo zero, lista
         # global é append-only durante a vida do processo).
         self._cb_refs.append(callback)
-        self._dll.SetHistoryTradeCallbackV2(callback)
+        try:
+            self._dll.SetHistoryTradeCallbackV2(callback)
+        except AttributeError as exc:
+            # Fail-fast com contexto Q-DRIFT — diferente de SetProgressCallback,
+            # esta função É exportada pela DLL real (probada 2026-05-04). Se
+            # chegou aqui é versão muito antiga / DLL alternativa.
+            raise DLLInitError(
+                -1,
+                "DLL_API_DRIFT",
+                "SetHistoryTradeCallbackV2 não exportada pela ProfitDLL "
+                f"em {self._dll_path}. Esta função é necessária para "
+                "downloads históricos V2 (COUNCIL-03). "
+                "Verifique versão da DLL ou consulte Nelo (docs/dll/QUIRKS.md Q-DRIFT-01).",
+                cause=exc,
+            ) from exc
         log.info("dll.history_trade_callback_v2_registered")
 
     def set_progress_callback(self, callback: Any) -> None:
         """Registra callback de progresso de download histórico (Story 1.3).
 
-        Wraps ``self._dll.SetProgressCallback(callback)``. ``callback`` DEVE
-        vir de :func:`data_downloader.dll.callbacks.make_progress_callback` —
-        já em ``_cb_refs``, faz APENAS ``put_nowait(int)`` (R3).
+        Tenta ``self._dll.SetProgressCallback(callback)`` mas TOLERA AttributeError
+        — Q-DRIFT-01 (smoke 2026-05-04): a ProfitDLL real **NÃO exporta**
+        ``SetProgressCallback`` nem ``SetProgressCallbackV2``. Per o exemplo
+        oficial Nelogica (``profitdll/Exemplo Python/main.py`` L740-743), o
+        ``progressCallBack`` é fornecido como **slot 10 de
+        ``DLLInitializeMarketLogin``** (já preenchido com Noop em ``initialize_market_only``).
+
+        Comportamento defensivo: se a função não existe, loga warning e retorna
+        sem erro — downloads ainda completam via ``TC_LAST_PACKET`` (bit 1 das
+        flags do callback V2 — manual §3.2 L1912). A queue de progresso
+        permanece vazia, mas ``download_primitive`` detecta fim via
+        ``ingestor.last_packet_seen``.
+
+        Para suporte real a progresso em runtime, ver Q-DRIFT-01 — requer
+        re-init com slot 10 customizado (não suportado nesta versão; Story 1.3
+        usa apenas ``last_packet`` como sinal autoritativo).
 
         Args:
             callback: Objeto ``WINFUNCTYPE``-wrapped (signature
-                ``TProgressCallback``).
+                ``TProgressCallback``). Mantido em ``_cb_refs`` mesmo se DLL
+                não expor função (custo zero, anti-GC).
 
         Raises:
             DLLInitError: Se DLL não inicializada.
@@ -585,8 +640,23 @@ class ProfitDLL:
                 "NL_NOT_INITIALIZED",
                 "Chame initialize_market_only antes de set_progress_callback.",
             )
+        # Cinto-e-suspensório: mantém ref Python anti-GC mesmo quando a DLL
+        # não consome o ponteiro. Custo zero (lista append-only).
         self._cb_refs.append(callback)
-        self._dll.SetProgressCallback(callback)
+        try:
+            self._dll.SetProgressCallback(callback)
+        except AttributeError:
+            # Q-DRIFT-01 — função não exportada. Downloads dependem de
+            # TC_LAST_PACKET (V2 flag) para detectar fim, NÃO de progress=100.
+            log.warning(
+                "dll.progress_callback_unsupported",
+                quirk="Q-DRIFT-01",
+                detail=(
+                    "ProfitDLL não exporta SetProgressCallback; "
+                    "fim do download detectado via TC_LAST_PACKET (V2 flag)."
+                ),
+            )
+            return
         log.info("dll.progress_callback_registered")
 
     def get_history_trades(

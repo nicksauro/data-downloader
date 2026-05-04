@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 (Story 4.2 — adicionado Q18-OPEN: WIN H/M/U/Z calendar)
+**Última atualização:** 2026-05-04 (Hotfix B1-B4 — adicionados Q-DRIFT-01..04: divergência manual vs DLL real após smoke executor)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -35,6 +35,10 @@
 | [Q16-VALIDATED](#q16-validated) | ✅ validated | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
 | [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
 | [Q18-OPEN](#q18-open) | ❓ open | history / contract calendar | Vigência exata WIN H/M/U/Z conforme regra B3 oficial (5º dia útil mês X-3 → quarta mais próxima 15/X)? |
+| [Q-DRIFT-01](#q-drift-01) | 🔬 empirical | api drift | `SetProgressCallback` e `GetDLLVersion` **NÃO exportadas** pela DLL real |
+| [Q-DRIFT-02](#q-drift-02) | 🔬 empirical | lifecycle | `wait_market_connected` precisa >60s — default elevado para 300s + heartbeat 30s |
+| [Q-DRIFT-03](#q-drift-03) | ✅ validated | config | Env vars do código divergiam de `.env.example` — padronizado em `PROFITDLL_*` |
+| [Q-DRIFT-04](#q-drift-04) | 🔬 empirical | tooling / encoding | Rich Panel emoji crash em Windows cp1252 — CLI força `PYTHONIOENCODING=utf-8` |
 
 ---
 
@@ -426,6 +430,147 @@
     Hipótese A com `hypothesized` source até probe humano)
   - `docs/qa/WAIVERS/4.2-real-smoke-deferred-2026-05-04.md` (WAIVER que
     cobre esta open question)
+
+---
+
+## Q-DRIFT-01
+
+- **ID:** Q-DRIFT-01
+- **Status:** 🔬 empirical
+- **Categoria:** api drift (manual vs DLL real)
+- **Sintoma:** Wrapper crashava com `AttributeError: function 'SetProgressCallback' not found` ao
+  registrar callback de progresso. `GetDLLVersion` também não existe — wrapper já tinha try/except
+  para retornar `"unknown"`.
+- **Causa raiz:** o documento `PROFITDLL_KNOWLEDGE.md` foi populado a partir de leitura do manual
+  + memória do agente Nelo, mas a DLL Win64 real (`profitdll/DLLs/Win64/ProfitDLL.dll`,
+  inicializada com sucesso usando credenciais reais) NÃO exporta:
+  - `SetProgressCallback` / `SetProgressCallbackV2` / `SetHistoryProgressCallback`
+  - `GetDLLVersion` / `GetVersion`
+- **Evidência:** probe ctypes via `getattr` (smoke 2026-05-04, após init+autenticação OK):
+  ```python
+  dll = ctypes.WinDLL('profitdll/DLLs/Win64/ProfitDLL.dll')
+  for name in ['SetProgressCallback', 'SetProgressCallbackV2', 'GetDLLVersion', 'GetVersion']:
+      try: getattr(dll, name); print(f'{name}: OK')
+      except AttributeError: print(f'{name}: MISSING')
+  # → todos MISSING
+  # Funções OK: SetHistoryTradeCallbackV2, TranslateTrade, GetHistoryTrades,
+  #            DLLInitializeMarketLogin, DLLFinalize, SetStateCallback, SetEnabledLogToDebug,
+  #            SetTradeCallback, SetTradeCallbackV2, SetTinyBookCallback, GetServerClock, etc.
+  ```
+- **Cross-check Nelogica example** (`profitdll/Exemplo Python/main.py` L740-743): o
+  `progressCallBack` é passado como **slot 10** de `DLLInitializeMarketLogin` no init —
+  NÃO via função standalone:
+  ```python
+  result = profit_dll.DLLInitializeMarketLogin(
+      key, user, password, stateCallback, None, newDailyCallback, None,
+      None, None, progressCallBack, tinyBookCallBack
+  )
+  ```
+- **Manual diz:** lista `SetProgressCallback` e `GetDLLVersion` (ou seja, ambíguo — manual e DLL
+  real divergem). Possíveis causas: (a) versão do manual mais nova que a DLL fornecida;
+  (b) função descontinuada entre releases; (c) erro de transcrição no manual.
+- **Workaround:**
+  - **`set_progress_callback`** (wrapper): try/except `AttributeError`. Se a função não existe,
+    log warning + retorna sem erro. Downloads ainda completam — `download_primitive` detecta fim
+    via **`TC_LAST_PACKET`** (bit 1 das flags V2, manual §3.2 L1912), independente de `progress=100`.
+  - **`dll_version`** (wrapper): já gracioso desde Story 1.2 — retorna `"unknown"` em
+    `AttributeError`/`OSError`. Metadata Parquet (Sol H19/H1) consome string `"unknown"` sem crash.
+  - **`SetHistoryTradeCallbackV2`** (mantida): É exportada → mantém raise se sumir em release
+    futura (signal de DLL incompatível, não graceful — fail-fast com mensagem Q-DRIFT).
+- **Test reprodutor:** smoke executor (commit `153cf43`) com credenciais reais — bug B1.
+- **Data descoberta:** 2026-05-04 (smoke executor, hotfix B1).
+- **Próximo passo:** se progresso real for necessário em futuras stories, custom slot 10
+  no `DLLInitializeMarketLogin` (em vez de Noop) — requer mudança em
+  `wrapper.initialize_market_only` aceitar `progress_callback` opcional.
+- **Aplica a stories:** 1.2 (init), 1.3 (history primitive), 1.7b (smoke MVP gate).
+- **Refs:** `src/data_downloader/dll/wrapper.py:set_progress_callback`,
+  `profitdll/Exemplo Python/main.py` L740-743, `docs/dll/PROFITDLL_KNOWLEDGE.md` §2.2.
+
+---
+
+## Q-DRIFT-02
+
+- **ID:** Q-DRIFT-02
+- **Status:** 🔬 empirical
+- **Categoria:** lifecycle / handshake
+- **Sintoma:** `wait_market_connected(timeout=60)` retornava `False` (timeout) em ambientes
+  reais sem ProfitChart concorrente — DLL inicializa e autentica OK, mas o handshake
+  `MARKET_DATA` leva mais de 60 segundos para chegar a `(2, 4)`/`(2, 2)`.
+- **Causa raiz:** desconhecida. Hipóteses:
+  - (a) DLL espera ProfitChart estar rodando para usar suas conexões.
+  - (b) Servidor de market data faz throttle/handshake demorado fora de horário pregão.
+  - (c) Sequência state callbacks tem etapas extras não documentadas (LOGIN → ROTEAMENTO →
+    sync → MARKET_LOGIN → MARKET_DATA).
+- **Evidência:** smoke executor (commit `153cf43`) — `connect trava em MARKET_DATA/1 >60s`.
+  Estado intermediário `MARKET_DATA/1` (provavelmente "connecting") nunca evolui para 2/4.
+- **Workaround:**
+  - Default timeout `wait_market_connected` elevado de 60s → **300s** (5 min).
+  - Heartbeat a cada 30s no logger (`dll.waiting_market_data` + `elapsed_seconds`) para que
+    operador veja que não está travado.
+- **Manual diz:** silencioso sobre tempo típico de handshake.
+- **Investigação aberta:** validar com humano (a) se ProfitChart precisa estar aberto para
+  MARKET_DATA conectar, (b) qual estado intermediário `MARKET_DATA/1` representa.
+- **Data descoberta:** 2026-05-04 (smoke executor, hotfix B3).
+- **Aplica a stories:** 1.2 (wait_market_connected), 1.6 (probe), 1.7b (CLI download), todas
+  smoke tests.
+- **Refs:** `src/data_downloader/dll/wrapper.py:wait_market_connected`.
+
+---
+
+## Q-DRIFT-03
+
+- **ID:** Q-DRIFT-03
+- **Status:** ✅ validated (corrigido)
+- **Categoria:** config / env vars
+- **Sintoma:** Smoke real falhava com "Credenciais ausentes" mesmo após preencher `.env`
+  corretamente. `.env.example` define `PROFITDLL_KEY` / `PROFITDLL_USER` / `PROFITDLL_PASS`
+  mas o código (cli.py, public_api/download.py, ui/) lia `PROFIT_USER` / `PROFIT_PASS`
+  (sem prefixo). Tests adicionais usavam `PROFITDLL_PASSWORD` (terceira variante).
+- **Causa raiz:** drift de naming durante implementação — agentes diferentes (Felix/UI,
+  Dex/CLI, Quinn/smoke) usaram convenções distintas; nenhum ficou alinhado com
+  `.env.example` original (Story 0.1).
+- **Evidência:** `grep PROFIT_USER\|PROFITDLL_USER` em src/ tests/ mostrava 3 convenções
+  coexistindo. `.env` real do usuário usa `PROFITDLL_PASS` (alinhado com example).
+- **Decisão (mini-council Dex+Aria, 2026-05-04 hotfix):** padrão canônico é
+  `PROFITDLL_KEY` / `PROFITDLL_USER` / `PROFITDLL_PASS` (alinhado com `.env.example`).
+- **Workaround / fix:**
+  - `cli.py` (escopo Dex hotfix): `PROFIT_USER` → `PROFITDLL_USER`,
+    `PROFIT_PASS` → `PROFITDLL_PASS`.
+  - `tests/smoke/*.py`: idem; `PROFITDLL_PASSWORD` → `PROFITDLL_PASS`.
+  - `public_api/download.py` e `ui/*` (FORA do escopo deste hotfix): permanecem com
+    `PROFIT_USER`/`PROFIT_PASS` — Aria deve abrir story de follow-up para padronizar
+    sem violar fronteira `public_api` SemVer (deprecação ou alias env).
+- **Manual diz:** N/A (config local do projeto).
+- **Data descoberta:** 2026-05-04 (smoke executor, hotfix B2).
+- **Aplica a stories:** 0.1 (env template), 1.7b (CLI), 4.0 (UI settings).
+- **Refs:** `.env.example`, `src/data_downloader/cli.py:contracts_validate`,
+  `tests/smoke/test_download_primitive_real.py`, `tests/smoke/test_probe.py`,
+  `tests/smoke/test_mvp_gate.py`.
+
+---
+
+## Q-DRIFT-04
+
+- **ID:** Q-DRIFT-04
+- **Status:** 🔬 empirical
+- **Categoria:** tooling / encoding
+- **Sintoma:** `UnicodeEncodeError: 'charmap' codec can't encode character '✨'` ao
+  emitir Rich Panel com emoji em terminal Windows default cp1252.
+- **Causa raiz:** Windows cmd/PowerShell default encoding é cp1252; Rich emite caracteres
+  unicode (emojis, box-drawing) que não cabem nessa code page. Python 3.7+ tem
+  `sys.stdout.reconfigure(encoding=...)` que força UTF-8 sem reabrir os streams.
+- **Evidência:** smoke executor (commit `153cf43`) — `UnicodeEncodeError cp1252 vs Rich emoji`.
+- **Workaround (CLI startup):** em `data_downloader/cli.py`, ANTES de importar Rich:
+  - `os.environ.setdefault("PYTHONIOENCODING", "utf-8")`
+  - `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` (e `stderr`)
+  - `errors="replace"` garante que mesmo se reconfigure falhar (subprocess pipe sem TTY),
+    caracteres não-encodáveis viram `?` em vez de crash.
+- **Alternativa não escolhida:** substituir emojis por ASCII art — perde fidelity da UX
+  proposta por Uma (microcopy). Encoding fix é menos invasivo.
+- **Manual diz:** N/A (problema de tooling Python/Windows).
+- **Data descoberta:** 2026-05-04 (smoke executor, hotfix B4).
+- **Aplica a stories:** todas com CLI Rich (1.6, 1.7b, 2.1, 2.9).
+- **Refs:** `src/data_downloader/cli.py` topo do módulo.
 
 ---
 

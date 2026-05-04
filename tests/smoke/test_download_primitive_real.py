@@ -1,14 +1,17 @@
 """tests/smoke/test_download_primitive_real.py — Story 1.3 AC10.
 
 Smoke test gated por env (3 vars de credencial ProfitDLL — KEY, USER,
-PASSWORD). Baixa 1 dia de WDOJ26 real (data fixa: dia útil recente
-conhecido) e valida ``len(trades) > 0``.
+PASS — alinhado com ``.env.example``). Baixa 1 dia de WDOJ26 real (data
+fixa: dia útil recente conhecido) e valida ``len(trades) > 0``.
 
 NUNCA roda em CI sem credenciais. Pular silenciosamente quando env ausente.
 
 Para rodar localmente, defina as 3 env vars de credencial — KEY, USER,
-PASSWORD (precedência: env override de testes) — e rode
-``pytest -v tests/smoke/test_download_primitive_real.py``.
+PASS — e rode ``pytest -v tests/smoke/test_download_primitive_real.py``.
+
+Q-DRIFT-03 (smoke 2026-05-04): env padronizada para ``PROFITDLL_PASS``
+(versões anteriores usavam ``PROFITDLL_PASSWORD``, divergente do
+``.env.example``).
 
 (Doc evita exemplo literal `KEY[eq][value]` para não disparar regex do
 pre-commit hook ``check_no_dotenv`` — vide COUNCIL-01.)
@@ -26,8 +29,8 @@ from data_downloader.orchestrator.download_primitive import download_chunk
 
 # Skipif gate — credenciais ProfitDLL ausentes.
 pytestmark = pytest.mark.skipif(
-    not all(os.getenv(k) for k in ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASSWORD")),
-    reason="Smoke real precisa PROFITDLL_KEY + PROFITDLL_USER + PROFITDLL_PASSWORD env vars.",
+    not all(os.getenv(k) for k in ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS")),
+    reason="Smoke real precisa PROFITDLL_KEY + PROFITDLL_USER + PROFITDLL_PASS env vars.",
 )
 
 
@@ -53,12 +56,13 @@ def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
     """
     key = os.environ["PROFITDLL_KEY"]
     user = os.environ["PROFITDLL_USER"]
-    password = os.environ["PROFITDLL_PASSWORD"]
+    password = os.environ["PROFITDLL_PASS"]
 
     with ProfitDLL() as dll:
         dll.initialize_market_only(key, user, password)
-        connected = dll.wait_market_connected(timeout=60)
-        assert connected, "Market data não conectou em 60s — verificar credenciais/rede."
+        # Q-DRIFT-02: 300s — handshake MARKET_DATA pode levar >60s.
+        connected = dll.wait_market_connected(timeout=300)
+        assert connected, "Market data não conectou em 300s — verificar credenciais/rede."
 
         result = download_chunk(
             dll,

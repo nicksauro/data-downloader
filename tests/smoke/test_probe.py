@@ -29,16 +29,20 @@ from pathlib import Path
 
 import pytest
 
-_HAS_CREDS = all(os.getenv(k) for k in ("PROFITDLL_KEY", "PROFIT_USER", "PROFIT_PASS"))
+_HAS_CREDS = all(os.getenv(k) for k in ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS"))
 
 
 @pytest.mark.smoke
 @pytest.mark.skipif(
     not _HAS_CREDS,
-    reason="Smoke real requer PROFITDLL_KEY + PROFIT_USER + PROFIT_PASS (manual run)",
+    reason="Smoke real requer PROFITDLL_KEY + PROFITDLL_USER + PROFITDLL_PASS (manual run)",
 )
 def test_probe_wdoj26_real(tmp_path: Path) -> None:
-    """AC10 — probe real WDOJ26 com DLL conectada."""
+    """AC10 — probe real WDOJ26 com DLL conectada.
+
+    Q-DRIFT-02 / Q-DRIFT-03 (smoke 2026-05-04): timeout 300s; env vars
+    alinhados com ``.env.example`` (prefixo ``PROFITDLL_*``).
+    """
     from data_downloader.dll.wrapper import ProfitDLL
     from data_downloader.orchestrator.contracts import populate_contracts_from_seed
     from data_downloader.orchestrator.contracts_probe import probe_contract
@@ -51,10 +55,10 @@ def test_probe_wdoj26_real(tmp_path: Path) -> None:
         with ProfitDLL() as dll:
             dll.initialize_market_only(
                 key=os.environ["PROFITDLL_KEY"],
-                user=os.environ["PROFIT_USER"],
-                password=os.environ["PROFIT_PASS"],
+                user=os.environ["PROFITDLL_USER"],
+                password=os.environ["PROFITDLL_PASS"],
             )
-            assert dll.wait_market_connected(timeout=60), "DLL não conectou"
+            assert dll.wait_market_connected(timeout=300), "DLL não conectou"
             result = probe_contract(
                 dll=dll,
                 catalog=catalog,

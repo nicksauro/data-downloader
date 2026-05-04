@@ -1,9 +1,13 @@
 """Smoke MVP Gate — Story 1.7b AC9 (Epic 1 final gate).
 
-Gated por env vars (PROFITDLL_KEY, PROFIT_USER, PROFIT_PASS) — em CI sem
-credenciais reais o teste é skipped automaticamente. Ver
-``docs/qa/SMOKE_PROTOCOL.md`` para protocolo formal de execução manual
-pelo humano (Quinn valida a evidência produzida).
+Gated por env vars (PROFITDLL_KEY, PROFITDLL_USER, PROFITDLL_PASS — alinhado
+com ``.env.example``) — em CI sem credenciais reais o teste é skipped
+automaticamente. Ver ``docs/qa/SMOKE_PROTOCOL.md`` para protocolo formal de
+execução manual pelo humano (Quinn valida a evidência produzida).
+
+Q-DRIFT-03 (smoke 2026-05-04): env vars padronizadas para ``PROFITDLL_*``
+(versões anteriores usavam ``PROFIT_USER`` / ``PROFIT_PASS`` — divergência
+com ``.env.example``).
 
 Cenário (full smoke conforme SMOKE_PROTOCOL.md §4.2):
 
@@ -33,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-_HAS_CREDS = all(os.getenv(k) for k in ("PROFITDLL_KEY", "PROFIT_USER", "PROFIT_PASS"))
+_HAS_CREDS = all(os.getenv(k) for k in ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS"))
 
 # Symbol/range canônicos do gate (alinha com SMOKE_PROTOCOL.md §4.2).
 _SMOKE_SYMBOL = "WDOJ26"
@@ -115,7 +119,7 @@ def _save_evidence(
 @pytest.mark.smoke
 @pytest.mark.skipif(
     not _HAS_CREDS,
-    reason="MVP gate requer PROFITDLL_KEY + PROFIT_USER + PROFIT_PASS (manual run)",
+    reason="MVP gate requer PROFITDLL_KEY + PROFITDLL_USER + PROFITDLL_PASS (manual run)",
 )
 def test_mvp_gate_full_smoke(tmp_path: Path) -> None:
     """Full smoke conforme SMOKE_PROTOCOL.md §4.2 + AC9 da Story 1.7b."""
