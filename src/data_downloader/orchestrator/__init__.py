@@ -18,6 +18,18 @@ Fronteiras (Aria, ARCHITECTURE.md §5):
 
 from __future__ import annotations
 
+from data_downloader.orchestrator.contracts import (
+    Contract,
+    list_contracts,
+    month_from_letter,
+    month_letter,
+    populate_contracts_from_seed,
+    vigent_contract,
+)
+from data_downloader.orchestrator.contracts_probe import (
+    ProbeResult,
+    probe_contract,
+)
 from data_downloader.orchestrator.download_primitive import (
     ChunkResult,
     TradeRecord,
@@ -30,8 +42,16 @@ from data_downloader.orchestrator.timestamp import (
 
 __all__ = [
     "ChunkResult",
+    "Contract",
+    "ProbeResult",
     "TradeRecord",
     "download_chunk",
     "format_brt_timestamp",
+    "list_contracts",
+    "month_from_letter",
+    "month_letter",
     "parse_brt_timestamp",
+    "populate_contracts_from_seed",
+    "probe_contract",
+    "vigent_contract",
 ]

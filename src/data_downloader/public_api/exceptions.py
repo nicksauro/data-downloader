@@ -108,11 +108,55 @@ class DLLInitError(DataDownloaderError):
 class InvalidContract(DataDownloaderError):  # noqa: N818  ADR-011 canonical name
     """Símbolo não resolve para contrato vigente na data informada.
 
-    Ex.: ``download('WDO', 2026-03-15)`` — ``WDO`` é raiz, não contrato.
-    Sugestão de correção: usar ``vigent_contract('WDO', date)`` (Epic 1.6).
+    Ex.: ``download('WDO', 2026-03-15)`` quando o catálogo de contratos
+    não tem nenhuma linha cobrindo ``2026-03-15`` para ``WDO``.
 
-    Story 1.2: placeholder (resolução em Story 1.6).
+    Sugestão de correção: rodar ``data-downloader contracts add`` para
+    inserir o contrato vigente, ou ``data-downloader contracts list``
+    para ver o que está cadastrado.
+
+    Story 1.6 — primeira implementação efetiva (raised pelo resolver
+    ``orchestrator.contracts.vigent_contract``).
+
+    Args:
+        symbol_root: Raiz do contrato pedido (ex.: ``"WDO"``).
+        on_date: Data sobre a qual a vigência foi consultada.
+        exchange: Bolsa pedida (``"F"`` ou ``"B"``). Default ``"F"``.
+        message: Mensagem opcional; se ausente, é construída a partir dos
+            campos acima.
+
+    Attributes:
+        symbol_root: Raiz consultada.
+        on_date: Data consultada (ISO em ``details``).
+        exchange: Bolsa consultada (em ``details``).
     """
+
+    def __init__(
+        self,
+        symbol_root: str,
+        on_date: object,
+        *,
+        exchange: str = "F",
+        message: str | None = None,
+        cause: Exception | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        msg = message or (
+            f"No vigent contract for symbol_root={symbol_root!r} "
+            f"on_date={on_date!s} (exchange={exchange!r}). "
+            "Use 'data-downloader contracts list' to inspect catalog."
+        )
+        merged_details: dict[str, object] = {
+            "symbol_root": symbol_root,
+            "on_date": str(on_date),
+            "exchange": exchange,
+        }
+        if details:
+            merged_details.update(details)
+        super().__init__(msg, cause=cause, details=merged_details)
+        self.symbol_root = symbol_root
+        self.on_date = on_date
+        self.exchange = exchange
 
 
 class DiskFull(DataDownloaderError):  # noqa: N818  ADR-011 canonical name
