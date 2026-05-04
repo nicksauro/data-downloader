@@ -166,6 +166,11 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `ERR_NO_INTERNET` | error | Sem conexão com a internet | Não consigo alcançar os servidores da Nelogica. | Verifique sua conexão e firewall. |
 | `ERR_TIMEOUT` | error | Timeout da operação | A DLL não respondeu em {timeout}s. | Tente novamente. Se persistir, rode `doctor`. |
 | `ERR_CHUNK_FAILED` | error | Chunk falhou após retries | Chunk {chunk_id} ({start}-{end}) falhou {n} vezes. | Use `--resume` para retomar do último sucesso. |
+| `error.cancelled.title` | error | Download cancelado | (sem detalhe — combinar com .description) | (sem ação — combinar com .description) |
+| `error.cancelled.description` | error | Download cancelado | Você cancelou o download. {trades_preserved} trades já baixados foram preservados. | Retomar com: `data-downloader download --symbol {symbol} --resume` |
+| `error.connection_lost.title` | error | Conexão perdida | (sem detalhe — combinar com .description) | (sem ação — combinar com .description) |
+| `error.connection_lost.description` | error | Conexão perdida | Conexão com a corretora caiu. Tentando reconectar... (até 30 minutos é normal — Q02-E) | Aguarde até 30 minutos. Se persistir, rode `data-downloader doctor`. |
+| `ERR_CONNECTION_LOST` | error | Conexão perdida (alias public exception) | Conexão com a corretora caiu. Tentando reconectar... (até 30 minutos é normal — Q02-E) | Aguarde até 30 minutos. Se persistir, rode `data-downloader doctor`. |
 
 ---
 

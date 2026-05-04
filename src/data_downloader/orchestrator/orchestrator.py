@@ -45,6 +45,7 @@ LEIS RESPEITADAS:
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -53,6 +54,11 @@ from typing import TYPE_CHECKING, Final, Literal
 import structlog
 
 from data_downloader.contracts.observability import MetricsEmitter, NullMetricsEmitter
+from data_downloader.observability.logging_config import (
+    bind_context,
+    clear_context,
+    unbind_context,
+)
 from data_downloader.orchestrator.chunker import ChunkRange, chunk_date_range
 from data_downloader.orchestrator.contracts import vigent_contract
 from data_downloader.orchestrator.download_primitive import (
@@ -256,13 +262,22 @@ class Orchestrator:
         config: JobConfig,
         *,
         resume_job_id: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> JobResult:
         """Executa o job: chunking → loop download/write/register → finalize.
+
+        Story 2.11 — H10 closure: aceita ``cancel_event`` cooperativo.
+        Loop chunks checa ``cancel_event.is_set()`` ENTRE chunks (não
+        interrompe chunk em andamento — graceful drain). Worker wrapper
+        em :mod:`data_downloader.public_api.download` mapeia para
+        ``DownloadResult(status='cancelled')``.
 
         Args:
             config: Imutável :class:`JobConfig`.
             resume_job_id: Se passado, retoma job existente (Story 1.5
                 AC8). Se ``None``, registra novo job.
+            cancel_event: Event cooperativo opcional. Se setado, loop de
+                chunks aborta na próxima iteração (graceful drain).
 
         Returns:
             :class:`JobResult` com status final + métricas.
@@ -282,6 +297,18 @@ class Orchestrator:
         # 1. Resolve job_id (novo ou resume).
         job_id, resume_pending_chunks = self._resolve_job(config, resume_job_id)
         sm = JobStateMachine(job_id=job_id)
+
+        # Story 2.9 — Bind contextvars (job_id como correlation_id, symbol,
+        # exchange) para que TODOS os logs daqui em diante (incluindo
+        # download_primitive, dll wrapper, writer) carreguem identificadores
+        # automáticos. ``correlation_id`` = ``job_id`` por convenção
+        # (ADR-010 §Configuração + ADR-005 thread model).
+        bind_context(
+            job_id=job_id,
+            correlation_id=job_id,
+            symbol=config.symbol,
+            exchange=config.exchange,
+        )
 
         log.info(
             "orchestrator.start",
@@ -356,6 +383,21 @@ class Orchestrator:
             self._metrics.set_gauge("active_downloads", 1.0)
             partitions_written: list[Path] = []
             for chunk in chunks:
+                # Story 2.11 — H10 closure: cancel cooperativo entre chunks.
+                # NÃO interrompe chunk em andamento (preserva idempotência R5
+                # + INV-12: chunk começa com fila vazia, termina com partition
+                # registrada). Verifica APENAS no boundary entre chunks.
+                if cancel_event is not None and cancel_event.is_set():
+                    log.info(
+                        "orchestrator.cancel_detected",
+                        job_id=job_id,
+                        chunks_completed=metrics.chunks_completed,
+                        chunks_failed=metrics.chunks_failed,
+                        chunks_remaining=len(chunks)
+                        - (metrics.chunks_completed + metrics.chunks_failed),
+                    )
+                    break
+
                 result = self._process_chunk(
                     job_id=job_id,
                     config=config,
@@ -433,6 +475,11 @@ class Orchestrator:
                 pass
             self._handle_fatal_error(sm, job_id, exc)
             raise
+        finally:
+            # Story 2.9 — Limpa contextvars no fim do job (sucesso, cache_hit
+            # ou erro). Evita contaminação cross-job se o mesmo thread roda
+            # múltiplos jobs sequencialmente (ADR-010 AC2).
+            clear_context()
 
     # ------------------------------------------------------------------
     # Helpers internos
@@ -599,6 +646,45 @@ class Orchestrator:
         Retorna :class:`WriteResult` se sucesso; ``None`` se falhou.
         Falhas são absorvidas (registra gap + segue) — não levanta para
         o caller (loop deve continuar próximo chunk).
+
+        Story 2.9 — bind ``chunk_id`` (placeholder por chunk_start range) em
+        contextvars antes do download para que logs do download_primitive +
+        DLL sejam atribuíveis ao chunk corrente. ``chunk_id`` REAL é gerado
+        por ``download_chunk`` (uuid hex) e re-bound assim que disponível
+        (override) — ver ``_do_download``.
+        """
+        # Bind chunk identifier (range-based label até o uuid real estar
+        # disponível). Não usamos bound_context porque o chunk_id "real"
+        # vem de download_chunk e queremos override transparente; ao final
+        # do chunk processamos try/finally para unbind (preserva job_id +
+        # symbol bound em ``run``).
+        chunk_label = f"{chunk.start.isoformat()}__{chunk.end.isoformat()}"
+        bind_context(chunk_id=chunk_label, symbol=contract_code)
+
+        try:
+            return self._process_chunk_inner(
+                job_id=job_id,
+                config=config,
+                contract_code=contract_code,
+                chunk=chunk,
+                metrics=metrics,
+            )
+        finally:
+            unbind_context("chunk_id")
+
+    def _process_chunk_inner(
+        self,
+        *,
+        job_id: str,
+        config: JobConfig,
+        contract_code: str,
+        chunk: ChunkRange,
+        metrics: OrchestratorMetrics,
+    ) -> WriteResult | None:
+        """Corpo de :meth:`_process_chunk` (ver docstring).
+
+        Separado em método interno para permitir try/finally limpo no
+        wrapper sem aninhamento adicional (ver acima).
         """
         log.info(
             "orchestrator.chunk_start",

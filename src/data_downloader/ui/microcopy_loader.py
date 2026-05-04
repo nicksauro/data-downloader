@@ -218,6 +218,58 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         detail="Defina PROFITDLL_KEY, PROFIT_USER, PROFIT_PASS no ambiente.",
         action="Configure em ~/.data-downloader/.env e reinicie o terminal.",
     ),
+    # Story 2.11 — IDs novos (Uma sign-off COUNCIL-17). Cancelamento H10
+    # + ConnectionLost Q02-E. IDs em dot-notation seguem padrão error.*.{title,description}
+    # alinhado com MICROCOPY_CATALOG.md §6.
+    "error.cancelled.title": MicrocopyEntry(
+        msg_type="error",
+        title="Download cancelado",
+    ),
+    "error.cancelled.description": MicrocopyEntry(
+        msg_type="error",
+        title="Download cancelado",
+        detail=(
+            "Você cancelou o download. {trades_preserved} trades já " "baixados foram preservados."
+        ),
+        action="Retomar com: `data-downloader download --symbol {symbol} --resume`",
+    ),
+    "error.connection_lost.title": MicrocopyEntry(
+        msg_type="error",
+        title="Conexão perdida",
+    ),
+    "error.connection_lost.description": MicrocopyEntry(
+        msg_type="error",
+        title="Conexão perdida",
+        detail=(
+            "Conexão com a corretora caiu. Tentando reconectar... "
+            "(até 30 minutos é normal — Q02-E)"
+        ),
+        action="Aguarde até 30 minutos. Se persistir, rode `data-downloader doctor`.",
+    ),
+    # Alias UPPER_SNAKE para compatibilidade com humanized_message public_api.
+    "ERR_CONNECTION_LOST": MicrocopyEntry(
+        msg_type="error",
+        title="Conexão perdida",
+        detail=(
+            "Conexão com a corretora caiu. Tentando reconectar... "
+            "(até 30 minutos é normal — Q02-E)"
+        ),
+        action="Aguarde até 30 minutos. Se persistir, rode `data-downloader doctor`.",
+    ),
+    # Aliases used by ERR_CHUNK_FAILED + ERR_CATALOG_DRIFT (referenciados pelo
+    # mapa _PUBLIC_ERROR_MICROCOPY_ID em public_api/exceptions.py).
+    "ERR_CHUNK_FAILED": MicrocopyEntry(
+        msg_type="error",
+        title="Chunk falhou após retries",
+        detail="Chunk {chunk_id} ({start}-{end}) falhou {n} vezes.",
+        action="Use `--resume` para retomar do último sucesso.",
+    ),
+    "ERR_CATALOG_DRIFT": MicrocopyEntry(
+        msg_type="error",
+        title="Catálogo desincronizado",
+        detail="Detectei diferença entre o catálogo SQLite e os arquivos no disco.",
+        action="Rode reconciliação: `data-downloader doctor --reconcile`.",
+    ),
     # §8 — prompts
     "PMT_CANCEL_CONFIRM": MicrocopyEntry(
         msg_type="prompt",

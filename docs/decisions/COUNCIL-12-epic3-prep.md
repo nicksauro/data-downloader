@@ -343,6 +343,30 @@ referenciam IDs do catálogo nas docstrings.
 | P4 | PyInstaller spec `--onedir` configurado | Felix + Gage | Story 3.7 |
 | P5 | pytest-qt dev dependency adicionada | Quinn | Story 3.6 |
 
+### Updates
+
+**2026-05-03 — H10 closed via Story 2.11 (COUNCIL-17):** Felix está
+agora **DESBLOQUEADO** para iniciar Epic 3. A pendência P1 estava
+relacionada ao finding H10 (`DownloadHandle.cancel()` real). Story 2.11
+implementou:
+
+- `DownloadHandle.cancel(*, timeout=30.0) -> bool` — graceful drain real
+  (não placeholder). Worker checa `cancel_event` ENTRE chunks
+  (cooperative cancellation; preserva idempotência R5 + INV-12).
+- `DownloadHandle.cancelled() -> bool` + `is_cancelled` property —
+  non-blocking probes para UI Felix consumir em sinal Qt
+  (`progress`/`finished`/`cancelled`).
+- `DownloadHandle.result()` raise `OperationCancelled` (nova exception
+  pública) quando cancelamento OK — caller força tratar explicitamente.
+- `DownloadHandle.peek_result()` — non-blocking, no-raise alternativa
+  para inspeção pós-cancel.
+
+Microcopy IDs novos para Felix usar (Uma sign-off):
+`error.cancelled.title`, `error.cancelled.description`,
+`error.connection_lost.title`, `error.connection_lost.description`.
+
+Ver `COUNCIL-17-exception-hierarchy-h10-cancel.md` + `docs/stories/2.11.story.md` (status: Ready for Review).
+
 ---
 
 ## Após esta convocação

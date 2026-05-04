@@ -198,37 +198,101 @@ class DownloadHandle:
         self._thread.start()
 
     # ------------------------------------------------------------------
-    # Public API (ADR-007a)
+    # Public API (ADR-007a + Story 2.11 H10 closure)
     # ------------------------------------------------------------------
 
-    def cancel(self) -> None:
-        """Sinaliza cancelamento ao worker.
+    def cancel(self, *, timeout: float = 30.0) -> bool:
+        """Sinaliza cancelamento ao worker e aguarda graceful drain.
 
-        Idempotente — múltiplas chamadas só seteam o flag uma vez.
-        NÃO bloqueia: worker termina graceful e produz
-        ``DownloadResult(status="cancelled")``. Use ``result()`` para
-        aguardar.
+        Story 2.11 — fechamento de H10 (ADR-007a §"Cancel atômico").
+
+        Comportamento:
+
+        1. Seta o ``threading.Event`` interno (idempotente — múltiplas
+           chamadas reusam o mesmo flag).
+        2. Aguarda ``timeout`` segundos pela completion do worker.
+           Worker checa ``cancel_event.is_set()`` ENTRE chunks (graceful
+           — não interrompe chunk em andamento; preserva idempotência R5).
+        3. Retorna ``True`` se worker terminou dentro de ``timeout``;
+           ``False`` se ainda rodando após timeout (caller pode esperar
+           mais via :meth:`result` ou logar para investigação).
+
+        Idempotente: múltiplas chamadas com ``timeout=0.0`` são equivalentes
+        a ``cancelled()`` (non-blocking probe).
+
+        Args:
+            timeout: Segundos a aguardar pelo drain (default 30.0 — alinhado
+                com ADR-007a §Garantias). ``0.0`` = non-blocking probe.
+
+        Returns:
+            ``True`` se worker terminou dentro do timeout; ``False`` caso
+            contrário.
+
+        Notes:
+            Após retorno ``True``, :meth:`result` levanta
+            :class:`OperationCancelled` (status final ``"cancelled"``).
+            Trades já committados são preservados (catalog atomic).
         """
         self._cancel_event.set()
+        return self._completed_event.wait(timeout=timeout)
 
     def is_cancelling(self) -> bool:
-        """Retorna ``True`` se :meth:`cancel` já foi chamado."""
+        """Retorna ``True`` se :meth:`cancel` já foi chamado.
+
+        Equivalente semântico de "cancel pedido, ainda pode estar drenando".
+        Para "cancel concluído", use :meth:`cancelled` ou :attr:`is_cancelled`.
+        """
         return self._cancel_event.is_set()
+
+    def cancelled(self) -> bool:
+        """Retorna ``True`` se cancel foi pedido E worker já terminou em
+        status cancelled.
+
+        Non-blocking — apenas inspeciona estado interno. Útil para UI que
+        precisa decidir microcopy entre "Cancelando..." e "Cancelado".
+
+        Story 2.11 — H10 closure.
+        """
+        if not self._cancel_event.is_set():
+            return False
+        if not self._completed_event.is_set():
+            # Cancel pedido mas worker ainda drenando.
+            return False
+        with self._result_lock:
+            return self._result is not None and self._result.status == "cancelled"
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Alias de :meth:`cancelled` para uso em property style.
+
+        Story 2.11 — H10 closure.
+        """
+        return self.cancelled()
 
     def result(self, timeout: float | None = None) -> DownloadResult:
         """Bloqueia até o worker terminar e retorna :class:`DownloadResult`.
+
+        Story 2.11 — passa a levantar :class:`OperationCancelled` quando
+        o status final é ``"cancelled"`` (H10 contract).
 
         Args:
             timeout: Timeout em segundos. ``None`` (default) bloqueia
                 para sempre.
 
         Returns:
-            :class:`DownloadResult` com status final.
+            :class:`DownloadResult` com status final ``completed`` |
+            ``partial`` | ``failed`` | ``cache_hit``.
 
         Raises:
             TimeoutError: ``timeout`` esgotou antes do worker terminar.
             RuntimeError: Worker terminou sem produzir resultado (bug).
+            OperationCancelled: Worker terminou com status ``"cancelled"``
+                (caller pediu :meth:`cancel` antes ou durante o run).
+                ``details`` contém ``trades_preserved`` (chunks committados)
+                e ``job_id`` para correlação em logs.
         """
+        from data_downloader.public_api.exceptions import OperationCancelled
+
         finished = self._completed_event.wait(timeout=timeout)
         if not finished:
             raise TimeoutError(
@@ -239,6 +303,18 @@ class DownloadHandle:
                 raise RuntimeError(
                     "Worker terminated without producing a DownloadResult — "
                     "internal error; inspect logs."
+                )
+            if self._result.status == "cancelled":
+                # H10: cancel cooperativo terminou; sinaliza via exception
+                # pública. Trades já committados estão preservados em catalog.
+                raise OperationCancelled(
+                    f"Download cancelled by user (job_id={self._result.job_id!r})",
+                    details={
+                        "trades_preserved": self._result.trades_count,
+                        "job_id": self._result.job_id,
+                        "symbol": self._result.symbol,
+                        "partitions": list(self._result.partitions),
+                    },
                 )
             return self._result
 
@@ -257,6 +333,19 @@ class DownloadHandle:
                 return
             # mypy: garantimos via produtor (worker) que item é DownloadProgress.
             yield item  # type: ignore[misc]
+
+    def peek_result(self) -> DownloadResult | None:
+        """Retorna o :class:`DownloadResult` se já produzido (non-blocking, no-raise).
+
+        Story 2.11 — utilitário para inspeção pós-cancel sem disparar
+        :class:`OperationCancelled` (que :meth:`result` levanta para
+        ``status == "cancelled"``).
+
+        Returns:
+            :class:`DownloadResult` ou ``None`` se worker ainda não emitiu.
+        """
+        with self._result_lock:
+            return self._result
 
     def join(self, timeout: float | None = None) -> None:
         """Aguarda a thread worker terminar (sem retornar resultado).

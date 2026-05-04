@@ -32,12 +32,14 @@ from __future__ import annotations
 
 from data_downloader.public_api.download import download
 from data_downloader.public_api.exceptions import (
+    ConnectionLost,
     DataDownloaderError,
     DiskFull,
     DLLInitError,
     DownloadError,
     IntegrityError,
     InvalidContract,
+    OperationCancelled,
 )
 from data_downloader.public_api.handle import (
     DownloadHandle,
@@ -54,6 +56,7 @@ from data_downloader.public_api.history import (
 __api_version__ = "0.3.0"
 
 __all__ = [
+    "ConnectionLost",
     "DLLInitError",
     "DataDownloaderError",
     "DiskFull",
@@ -64,6 +67,7 @@ __all__ = [
     "DownloadStatus",
     "IntegrityError",
     "InvalidContract",
+    "OperationCancelled",
     "__api_version__",
     "download",
     "read",

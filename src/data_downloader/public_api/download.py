@@ -126,6 +126,14 @@ def download(
 
     resolved_data_dir = Path(data_dir) if data_dir is not None else Path(_DEFAULT_DATA_DIR_NAME)
 
+    # Story 2.9 — captura snapshot de contextvars do thread chamador (CLI
+    # main ou app caller) para propagar correlation_id eventual + qualquer
+    # bind feito antes de chamar download(). Aplicado dentro do worker via
+    # ctx.run.
+    import contextvars as _contextvars
+
+    parent_ctx = _contextvars.copy_context()
+
     # Worker target — recebe os signals via kwargs do DownloadHandle._runner.
     def _worker(
         *,
@@ -133,20 +141,26 @@ def download(
         events_queue: queue.Queue[object],
         set_result: Callable[[DownloadResult], None],
     ) -> None:
-        _run_download_worker(
-            symbol=symbol,
-            exchange=exchange,
-            start=start_dt,
-            end=end_dt,
-            data_dir=resolved_data_dir,
-            cancel_event=cancel_event,
-            events_queue=events_queue,
-            set_result=set_result,
-            dll_factory=dll_factory,
-            catalog_factory=catalog_factory,
-            writer_factory=writer_factory,
-            metrics_emitter=metrics_emitter,
-        )
+        # Story 2.9 — propaga contextvars do parent thread (orchestrator
+        # vai bind seu próprio job_id, mas qualquer bind feito por caller
+        # antes de download() é preservado — defesa em profundidade).
+        def _go() -> None:
+            _run_download_worker(
+                symbol=symbol,
+                exchange=exchange,
+                start=start_dt,
+                end=end_dt,
+                data_dir=resolved_data_dir,
+                cancel_event=cancel_event,
+                events_queue=events_queue,
+                set_result=set_result,
+                dll_factory=dll_factory,
+                catalog_factory=catalog_factory,
+                writer_factory=writer_factory,
+                metrics_emitter=metrics_emitter,
+            )
+
+        parent_ctx.run(_go)
 
     return DownloadHandle(worker_target=_worker)
 
@@ -273,12 +287,12 @@ def _run_download_worker(
             ),
         )
 
-        # 6. Execute. Orchestrator.run não tem cancel hook nativo (Story 1.7a)
-        # — cancelamento é checado entre chunks via wrapper futuro. V1.7b:
-        # cancelamento simples = se cancel setado antes de run, abortamos;
-        # se setado durante, sinalizamos no catalog após retorno do run.
-        # (Mais robusto que matar thread; preserva idempotência R5.)
-        result_obj: JobResult = orchestrator.run(config)
+        # 6. Execute. Story 2.11 — H10 closure: passa cancel_event ao
+        # orchestrator. Loop interno checa entre chunks (graceful drain,
+        # NÃO interrompe chunk em andamento). Após retorno, verificamos
+        # cancel_event.is_set() para decidir entre status='cancelled' e
+        # status normal (mapeamento de JobResult.status).
+        result_obj: JobResult = orchestrator.run(config, cancel_event=cancel_event)
 
         contract_code = result_obj.contract_code
         job_id = result_obj.job_id

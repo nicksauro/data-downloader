@@ -21,13 +21,32 @@ stories futuras (1.4 ``DiskFull``/``IntegrityError``, 1.6 ``InvalidContract``,
 from __future__ import annotations
 
 __all__ = [
+    "ConnectionLost",
     "DLLInitError",
     "DataDownloaderError",
     "DiskFull",
     "DownloadError",
     "IntegrityError",
     "InvalidContract",
+    "OperationCancelled",
 ]
+
+
+# Mapa público → microcopy ID (Uma — MICROCOPY_CATALOG.md).
+# Usado por ``DataDownloaderError.humanized_message`` para obter o ID
+# canônico de microcopy associado ao tipo. Não embute o texto pt-BR aqui
+# (Uma authority — single source = MICROCOPY_CATALOG.md / microcopy_loader).
+# Subclasses sem entrada no mapa caem em ``ERR_DLL_GENERIC`` via property.
+_PUBLIC_ERROR_MICROCOPY_ID: dict[str, str] = {
+    "DLLInitError": "ERR_DLL_NOT_INITIALIZED",
+    "InvalidContract": "ERR_INVALID_CONTRACT",
+    "DiskFull": "ERR_DISK_FULL",
+    "DownloadError": "ERR_CHUNK_FAILED",
+    "IntegrityError": "ERR_CATALOG_DRIFT",
+    "OperationCancelled": "SUC_CANCEL_DONE",
+    "ConnectionLost": "ERR_CONNECTION_LOST",
+    "DataDownloaderError": "ERR_DLL_GENERIC",
+}
 
 
 class DataDownloaderError(Exception):
@@ -57,6 +76,25 @@ class DataDownloaderError(Exception):
         super().__init__(message)
         self.cause = cause
         self.details: dict[str, object] = details or {}
+
+    @property
+    def humanized_message(self) -> str:
+        """Microcopy ID canônico para esta exceção (Story 2.11 — Uma).
+
+        Retorna o ID (string) que o caller (CLI / Qt UI) usa para
+        renderizar a mensagem humana via
+        :func:`data_downloader.ui.microcopy_loader.format_msg` ou via
+        :func:`humanize_nl_error`. NÃO retorna o texto em si — Uma é
+        a única autoridade sobre as strings (R17). UI faz o lookup.
+
+        Subclasses não-mapeadas em ``_PUBLIC_ERROR_MICROCOPY_ID`` caem
+        em ``ERR_DLL_GENERIC`` (fallback documentado em
+        MICROCOPY_CATALOG.md §5).
+
+        Returns:
+            ID UPPER_SNAKE_CASE compatível com microcopy_loader.MSG.
+        """
+        return _PUBLIC_ERROR_MICROCOPY_ID.get(type(self).__name__, "ERR_DLL_GENERIC")
 
 
 class DLLInitError(DataDownloaderError):
@@ -179,4 +217,47 @@ class IntegrityError(DataDownloaderError):
     Crítica: caller deve parar e investigar; não corrigir silenciosamente.
 
     Story 1.2: placeholder (raised por storage/validator em Story 2.1).
+    """
+
+
+# ---------------------------------------------------------------------
+# Story 2.11 — adições H10 (cancel) e Q02-E (ConnectionLost).
+# ---------------------------------------------------------------------
+
+
+class OperationCancelled(DataDownloaderError):  # noqa: N818  ADR-011 canonical name
+    """Operação foi cancelada cooperativamente (H10 — :meth:`DownloadHandle.cancel`).
+
+    Não é erro de execução — é sinal de que o usuário pediu cancel.
+    Caller que estava em :meth:`DownloadHandle.result` recebe esta exceção
+    quando o worker cooperativo termina o cancelamento gracioso.
+
+    Atributos esperados em ``details``:
+
+    - ``trades_preserved``: ``int`` — trades já committados (parcial salvo).
+    - ``chunks_completed``: ``int`` — chunks que terminaram antes do cancel.
+
+    Microcopy UI (MICROCOPY_CATALOG.md §16+):
+        - Título: ``error.cancelled.title`` ("Download cancelado").
+        - Detalhe: ``error.cancelled.description`` (com {trades_preserved}).
+
+    Story 2.11 — primeira implementação (raised por
+    :meth:`DownloadHandle.cancel`/``result`` quando cancelamento OK).
+    """
+
+
+class ConnectionLost(DataDownloaderError):  # noqa: N818  ADR-011 canonical name
+    """Conexão com a corretora caiu de forma não-recuperável.
+
+    Diferente do quirk Q11-99 (reconexão normal até 30 minutos — não
+    raised, apenas warning ``WAR_99_RECONNECT``). Esta exceção sinaliza
+    que o reconnect ULTRAPASSOU a janela esperada (Q02-E hard timeout)
+    e o caller precisa decidir (retry manual? doctor?).
+
+    Microcopy UI:
+        - Título: ``error.connection_lost.title``.
+        - Detalhe: ``error.connection_lost.description`` (referência Q02-E).
+
+    Story 2.11 — primeira implementação (traduzido de
+    :class:`_DLLDisconnected` interno via adapter).
     """
