@@ -237,9 +237,12 @@ class _IngestorThread(threading.Thread):
         self._parent_ctx = contextvars.copy_context()
 
         # Saídas (acessadas após join via .trades / .last_packet_seen):
+        # R21.4 — counters atomic (int +=) substituem logs per-trade. Logs
+        # agregados emitidos em ``_run_inner`` (cool path) após drain.
         self.trades: list[TradeRecord] = []
         self.last_packet_seen: bool = False
         self.translate_failures: int = 0
+        self.trade_edits: int = 0
 
         # Sequência por (timestamp_ns) para preencher
         # ``sequence_within_ns`` (Sol — SCHEMA.md §2.1).
@@ -259,7 +262,13 @@ class _IngestorThread(threading.Thread):
         self._parent_ctx.run(self._run_inner)
 
     def _run_inner(self) -> None:
-        """Loop interno (com contextvars do parent já aplicados)."""
+        """Loop interno (com contextvars do parent já aplicados).
+
+        R21 (HOT_PATH_RULES.md) — ``_process_trade`` é hot path
+        (per-trade @ 100-4000/s). Counters atomic (``translate_failures``,
+        ``trade_edits``, ``last_packet_seen``) são incrementados sem
+        I/O e os logs agregados emitidos AQUI após o drain (cool path).
+        """
         while not self._stop_event.is_set():
             try:
                 handle, flags = self._trade_queue.get(timeout=_INGESTOR_GET_TIMEOUT)
@@ -276,20 +285,35 @@ class _IngestorThread(threading.Thread):
                 break
             self._process_trade(handle, flags)
 
+        # R21.2 — logs agregados pós-drain (cool path, 1 evento por chunk).
+        if self.last_packet_seen:
+            log.info(
+                "download.last_packet",
+                chunk_id=self._chunk_id,
+                trades_count=len(self.trades),
+            )
+        if self.trade_edits:
+            log.debug(
+                "download.trade_edits_summary",
+                chunk_id=self._chunk_id,
+                edits_count=self.trade_edits,
+            )
+
     def _process_trade(self, handle: int, flags: int) -> None:
-        """Processa 1 trade: TranslateTrade → TradeRecord → append."""
+        """Processa 1 trade: TranslateTrade → TradeRecord → append.
+
+        # @hot_path — per-trade @ 100-4000/s. R21: counters atomic only,
+        # SEM logging síncrono / json / strftime aqui. Logs agregados
+        # emitidos em ``_run_inner`` após drain (cool path).
+        """
         # Resetar Version=0 antes de cada chamada (main.py L328 demonstra).
         self._struct.Version = 0
         rc = self._dll.translate_trade(handle, self._struct)
         if rc != NL_OK:
+            # R21.4 — counter atomic; agregado é exposto em
+            # ``ChunkResult`` via ``ingestor.translate_failures`` e logado
+            # 1x no ``download.complete`` (cool path).
             self.translate_failures += 1
-            log.warning(
-                "download.translate_failed",
-                code=rc,
-                handle=handle,
-                flags=flags,
-                chunk_id=self._chunk_id,
-            )
             return
 
         # Copia campos do struct ANTES de overwriter no próximo loop.
@@ -324,21 +348,16 @@ class _IngestorThread(threading.Thread):
         self.trades.append(record)
 
         if flags & TC_LAST_PACKET:
+            # R21 — apenas seta flag (atomic bool); log agregado em
+            # ``_run_inner`` após drain final.
             self.last_packet_seen = True
-            log.info(
-                "download.last_packet",
-                chunk_id=self._chunk_id,
-                trades_count=len(self.trades),
-            )
         if flags & TC_IS_EDIT:
-            # Trade V2 com flag de edição (correção de trade prévio). Apenas
-            # log informativo — Sol decide se downstream filtra ou armazena
-            # ambos (não é responsabilidade do download_chunk).
-            log.debug(
-                "download.trade_edit",
-                chunk_id=self._chunk_id,
-                trade_id=trade_id,
-            )
+            # R21.4 — counter atomic substitui log per-trade. Trade V2 com
+            # flag de edição (correção de trade prévio). Sol decide se
+            # downstream filtra ou armazena ambos (não é responsabilidade
+            # do download_chunk). Counter agregado emitido em
+            # ``_run_inner`` (cool path).
+            self.trade_edits += 1
 
 
 # =====================================================================
@@ -620,6 +639,7 @@ def download_chunk(
         trades_count=len(trades),
         duration_seconds=round(duration, 3),
         translate_failures=ingestor.translate_failures,
+        trade_edits=ingestor.trade_edits,
         progress_99_reconnect=monitor.reconnect_99_detected,
         last_packet_seen=ingestor.last_packet_seen,
     )

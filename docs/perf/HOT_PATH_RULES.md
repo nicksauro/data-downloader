@@ -206,21 +206,51 @@ Funções **excluídas** (cool path):
 - `register_partition` (per-chunk, ~1/min)
 - `_process_progress` (per-1%)
 
-### Violações conhecidas (baseline 2026-05-04)
+### Violations baseline
 
-`scripts/audit_hot_path.py` detecta atualmente **3 violações** em
-`download_primitive.py::_process_trade` (linhas 286, 328, 337). Estas
-violações são herança da implementação inicial e devem ser endereçadas
-em uma Story 2.X dedicada (Pyro+Dex):
+| Data | Violations | Status |
+|------|-----------|--------|
+| 2026-05-04 | 3 (em `_process_trade`) | identificadas no audit inicial |
+| 2026-05-03 (V1.0 cleanup) | **0** | resolvidas — ver abaixo |
 
-1. `log.warning("download.translate_failed", ...)` — substituir por
-   `Counter("trades_translate_failed_total")`.
-2. `log.info("download.last_packet", ...)` — mover para `_run_inner`
-   (cool path; emitido apenas no fim do drain).
-3. `log.debug("download.trade_edit", ...)` — substituir por
-   `Counter("trades_edit_total")` ou skip se `DEBUG_SAMPLE=0`.
+#### Resolução das 3 violações originais (2026-05-03)
 
-O script reporta exit 1 (FAIL) enquanto essas violações existirem —
-NÃO instalar o pre-commit hook como blocking até serem corrigidas.
+Cleanup cosmético V1.0 (Pyro+Dex+Quinn) endereçou as 3 violações em
+`download_primitive.py::_process_trade` (linhas 286, 328, 337):
+
+1. `log.warning("download.translate_failed", ...)` (linha 286) →
+   **removido**. Counter `_IngestorThread.translate_failures` (atomic
+   `+= 1`) já existia e é exposto agregado via `download.complete`
+   (cool path).
+2. `log.info("download.last_packet", ...)` (linha 328) → **movido
+   para `_run_inner`** (cool path; emitido 1x após drain final, com
+   `trades_count` snapshot do estado terminal). Per-trade hot path
+   apenas seta `self.last_packet_seen = True` (atomic bool).
+3. `log.debug("download.trade_edit", ...)` (linha 337) → **substituído
+   por counter** `_IngestorThread.trade_edits` (`+= 1`). Log agregado
+   `download.trade_edits_summary` emitido em `_run_inner` se contador
+   > 0; valor também propagado em `download.complete`.
+
+Após o cleanup, `python scripts/audit_hot_path.py` retorna exit 0
+(0 violações em 3 funções auditadas).
+
+#### Pre-commit hook — agora pode ser blocking
+
+Com violations baseline = 0, o hook em `scripts/hooks/check_hot_path.py`
+pode ser ativado como **blocking** (era opt-in). Adicionar a
+`.pre-commit-config.yaml`:
+
+```yaml
+- repo: local
+  hooks:
+    - id: check-hot-path
+      name: Audit R21 hot-path compliance (blocking)
+      entry: python scripts/hooks/check_hot_path.py
+      language: system
+      types: [python]
+      files: ^src/data_downloader/.*\.py$
+```
+
+Documentação relacionada: COUNCIL-22 update / V1.0 cosmetic cleanup.
 
 — Pyro ⚡

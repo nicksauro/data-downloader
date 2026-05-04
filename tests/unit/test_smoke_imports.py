@@ -32,7 +32,9 @@ def test_public_api_exposes_api_version() -> None:
     assert isinstance(__api_version__, str)
     # Story 1.5b — bumpado para 0.2.0 ao adicionar read/read_continuous/vigent_contract.
     # Story 1.7b — bumpado para 0.3.0 ao adicionar download/DownloadHandle (minor aditivo).
-    assert __api_version__ == "0.3.0"
+    # Story 2.11 — bumpado para 0.4.0.
+    # Story 4.3 — bumpado para 1.0.0 (V1.0 stable release).
+    assert __api_version__ == "1.0.0"
 
 
 @pytest.mark.smoke

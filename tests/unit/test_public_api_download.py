@@ -2,7 +2,7 @@
 
 Cobertura:
 
-- ``__api_version__`` bumpado para 0.3.0.
+- ``__api_version__`` em V1.0 (atualmente 1.0.0 — Story 4.3 release).
 - ``DownloadHandle.cancel()`` é idempotente e reflete em ``is_cancelling()``.
 - ``DownloadHandle.result()`` bloqueia até worker terminar e retorna
   ``DownloadResult``.
@@ -29,9 +29,9 @@ from data_downloader.public_api import (
 )
 
 
-def test_api_version_bumped_to_0_3_0() -> None:
-    """Story 1.7b: bump minor aditivo (0.2.0 → 0.3.0)."""
-    assert __api_version__ == "0.3.0"
+def test_api_version_bumped_to_1_0_0() -> None:
+    """Story 4.3: V1.0 stable release (0.3.0 → 0.4.0 → 1.0.0)."""
+    assert __api_version__ == "1.0.0"
 
 
 def test_public_api_exports() -> None:
