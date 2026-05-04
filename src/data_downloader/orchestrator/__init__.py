@@ -18,6 +18,12 @@ Fronteiras (Aria, ARCHITECTURE.md §5):
 
 from __future__ import annotations
 
+from data_downloader.orchestrator.chunker import (
+    CHUNK_DAYS,
+    ChunkRange,
+    chunk_date_range,
+    chunk_days_for_symbol,
+)
 from data_downloader.orchestrator.contracts import (
     Contract,
     list_contracts,
@@ -35,16 +41,43 @@ from data_downloader.orchestrator.download_primitive import (
     TradeRecord,
     download_chunk,
 )
+from data_downloader.orchestrator.orchestrator import (
+    JobConfig,
+    JobResult,
+    Orchestrator,
+    OrchestratorMetrics,
+)
+from data_downloader.orchestrator.retry import (
+    RetryError,
+    with_retry,
+)
+from data_downloader.orchestrator.state_machine import (
+    InvalidStateTransition,
+    JobState,
+    JobStateMachine,
+)
 from data_downloader.orchestrator.timestamp import (
     format_brt_timestamp,
     parse_brt_timestamp,
 )
 
 __all__ = [
+    "CHUNK_DAYS",
+    "ChunkRange",
     "ChunkResult",
     "Contract",
+    "InvalidStateTransition",
+    "JobConfig",
+    "JobResult",
+    "JobState",
+    "JobStateMachine",
+    "Orchestrator",
+    "OrchestratorMetrics",
     "ProbeResult",
+    "RetryError",
     "TradeRecord",
+    "chunk_date_range",
+    "chunk_days_for_symbol",
     "download_chunk",
     "format_brt_timestamp",
     "list_contracts",
@@ -54,4 +87,5 @@ __all__ = [
     "populate_contracts_from_seed",
     "probe_contract",
     "vigent_contract",
+    "with_retry",
 ]
