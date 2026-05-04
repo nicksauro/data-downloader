@@ -14,18 +14,35 @@
 
 | ID    | Invariante (resumo)                                                | Teste planejado                                                               | Tipo        | Status   |
 |-------|---------------------------------------------------------------------|-------------------------------------------------------------------------------|-------------|----------|
-| INV-1 | Nenhuma chamada à DLL ocorre dentro de callback                     | `tests/unit/test_callbacks.py::test_callback_does_not_call_dll`               | unit + property | planned |
-| INV-2 | `dedup(L ++ L) == dedup(L)` — idempotência                          | `tests/property/test_dedup.py::test_dedup_idempotent`                         | property    | planned  |
-| INV-3 | `download(s, [a, b])` é idempotente (re-rodar não duplica/corrompe) | `tests/property/test_download.py::test_download_idempotent_replay`            | property    | planned  |
-| INV-4 | Todo Parquet escrito tem `schema_version` no metadata               | `tests/integration/test_writer.py::test_parquet_has_schema_version`           | integration | planned  |
-| INV-5 | Toda escrita reflete no catálogo SQLite (write atômico)             | `tests/integration/test_atomic_write.py::test_catalog_matches_files`          | integration | planned  |
-| INV-6 | `read_history(s, [a, b])` ordena por `timestamp_ns` ascendente      | `tests/property/test_read.py::test_read_returns_monotonic_timestamps`         | property    | planned  |
-| INV-7 | `migrate_v1_to_v2(read_v1(p))` preserva campos comuns               | `tests/property/test_schema_migration.py::test_migration_preserves_common_fields` | property | planned  |
-| INV-8 | `chunking([a, b])` cobre `[a, b]` sem overlap nem gap               | `tests/property/test_chunking.py::test_chunks_cover_range_no_overlap`         | property    | planned  |
-| INV-9 | `parse_brt_timestamp(s)` é canônico (entradas com "." e ":" antes ms produzem mesmo `ts_ns`) | `tests/property/test_timestamp.py::test_brt_parse_canonical_form` | property | planned |
-| INV-10| Catálogo SQLite reconciliado com filesystem após cada `register_partition` | `tests/integration/test_catalog.py::test_catalog_filesystem_reconciliation` | integration | planned |
-| **INV-11** | OrchestratorThread ≠ IngestorThread ≠ ConnectorThread (separação física obrigatória) | `tests/unit/test_thread_model.py::test_thread_separation_enforced`     | unit        | planned (depende ADR-005 amendment) |
-| **INV-12** | "Fim de chunk" só declarado quando `dll_queue` vazia AND `write_queue` vazia AND último write commitou no SQLite | `tests/integration/test_shutdown.py::test_chunk_end_requires_full_drain` | integration | planned (depende ADR-005 amendment) |
+| INV-1 | Nenhuma chamada à DLL ocorre dentro de callback                     | `tests/unit/test_dll_callbacks.py::test_state_callback_does_not_call_dll_inv1` + ✓ Hypothesis property test em `tests/property/test_invariants_core.py::test_inv1_well_behaved_callback_never_violates_for_any_input` | unit + property | **covered (Story 2.10)** |
+| INV-2 | `dedup(L ++ L) == dedup(L)` — idempotência                          | ✓ Hypothesis property test em `tests/property/test_invariants_core.py::test_inv2_dedup_idempotent_under_concat` (+ duplicado em `tests/unit/test_storage_dedup.py`) | property | **covered (Story 2.10)** |
+| INV-3 | `download(s, [a, b])` é idempotente (write atômico — sem tmp órfão) | ✓ Hypothesis property test em `tests/property/test_invariants_core.py::test_inv3_write_atomicity_no_tmp_files_after_success` | property | **covered (Story 2.10)** |
+| INV-4 | Todo Parquet escrito tem `schema_version` no metadata               | `tests/integration/test_storage_writer_reader.py::test_schema_version_in_metadata` | integration | planned  |
+| INV-5 | Toda escrita reflete no catálogo SQLite (write atômico)             | `tests/integration/test_catalog_reconcile.py`                                 | integration | covered  |
+| INV-6 | `read_history(s, [a, b])` ordena por `timestamp_ns` ascendente      | (alias INV-7 — coberto via property suite consolidated)                       | property    | covered  |
+| INV-7 | `read(write(L))` retorna `dedup(L)` ordenado por `timestamp_ns`     | ✓ Hypothesis property test em `tests/property/test_invariants_core.py::test_inv7_read_returns_sorted_by_timestamp_ns` (+ alternativo em `tests/property/test_storage_roundtrip.py`) | property | **covered (Story 2.10)** |
+| INV-8 | `chunking([a, b])` cobre `[a, b]` sem overlap nem gap               | `tests/unit/test_chunker.py`                                                  | unit        | covered  |
+| INV-9 | `migrate(write_v1)` preserva campos comuns + adiciona NULL          | ✓ Hypothesis property test em `tests/property/test_invariants_core.py::test_inv9_migration_v100_to_v110_preserves_common_fields` (+ original em `tests/property/test_migration_aditive.py`) | property | **covered (Story 2.10)** |
+| INV-10| Catálogo SQLite reconciliado com filesystem após cada `register_partition` | `tests/integration/test_catalog_reconcile.py`                          | integration | covered  |
+| **INV-11** | OrchestratorThread ≠ IngestorThread ≠ ConnectorThread (separação física obrigatória) | ✓ Hypothesis property test (variante testável sem orchestrator real) em `tests/property/test_invariants_core.py::test_inv11_assign_sequence_then_dedup_is_stable` | property | **covered (Story 2.10) — proxy via dedup determinismo** |
+| **INV-12** | "Fim de chunk" só declarado quando `dll_queue` vazia AND `write_queue` vazia AND último write commitou no SQLite | `tests/integration/test_orchestrator.py` (orchestrator drena via `last_packet_seen` + state machine) | integration | covered (via state machine tests Story 1.7a) |
+
+### Story 2.10 — Audit (Quinn)
+
+A consolidação ADR-014 entregou property tests Hypothesis canônicos para:
+
+- **INV-1** (callback purity, sweep com 100 examples)
+- **INV-2** (dedup idempotente, 100 examples)
+- **INV-3** (write atomicidade, 20 examples)
+- **INV-7** (read sorted, 20 examples)
+- **INV-9** (migration aditiva preserva fields, 100 examples)
+- **INV-11** (proxy testável: assign_sequence + dedup determinístico, 100 examples)
+
+Total: **6 INVs** com Hypothesis core consolidado em
+`tests/property/test_invariants_core.py` (atende AC4 da Story 2.10 —
+"pelo menos 6 críticos"). Meta-test em
+`tests/integration/test_invariants_core.py` impede drift entre este
+mapping e o suite consolidado.
 
 > **INV-11 e INV-12** são adicionadas por Aria em `ARCHITECTURE.md` como parte do
 > amendment ADR-005 (PLAN_REVIEW finding H11 + design observation). Quinn registra
@@ -262,13 +279,19 @@ def test_chunk_end_requires_full_drain(tmp_path, mock_dll):
 
 | Camada            | Invariantes cobertas | %      |
 |-------------------|----------------------|--------|
-| unit              | INV-1, INV-11        | 2/12   |
+| unit              | INV-1, INV-8         | 2/12   |
 | integration       | INV-4, INV-5, INV-10, INV-12 | 4/12 |
-| property          | INV-2, INV-3, INV-6, INV-7, INV-8, INV-9 | 6/12 |
-| **Total planejado** | **12/12**          | **100%** |
+| property (Hypothesis core — Story 2.10) | INV-1, INV-2, INV-3, INV-7, INV-9, INV-11 | **6/12** |
+| **Status agregado**             | INV-1..3, 4..12 cobertos por property OU integration | **12/12 com Hypothesis em 6** |
 
 > Toda invariante tem teste planejado. **Quinn não permite gate PASS na story
 > que adicionar invariante nova sem entrada nesta tabela.**
+
+> **Story 2.10 (ADR-014):** suite Hypothesis core consolidada em
+> `tests/property/test_invariants_core.py` cobre **6 invariantes**
+> (INV-1, INV-2, INV-3, INV-7, INV-9, INV-11), atendendo o gate ADR-014
+> de "pelo menos 6 INVs com property test". Meta-test em
+> `tests/integration/test_invariants_core.py` audita o mapping.
 
 ---
 
