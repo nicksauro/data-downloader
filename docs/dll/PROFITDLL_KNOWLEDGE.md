@@ -148,6 +148,27 @@ Rastreamento: `ClOrderID` (permanente) + `MessageID` (sessão).
 
 Todos com convenção **stdcall** (`WINFUNCTYPE` em Python ctypes). Todos disparados na **ConnectorThread** interna da DLL.
 
+> ⚠️ **NOTA CRÍTICA — TAssetID por valor (Q-DRIFT-05, descoberto 2026-05-04):**
+> A maioria dos callbacks legados V1 (todos os listados na coluna "Signature" abaixo que começam com `rAssetID`) recebem o struct **`TAssetID` POR VALOR como UM ÚNICO ARG**, não 3 args primitivos expandidos.
+>
+> **Definição canônica (`profitdll/Exemplo Python/profitTypes.py` L293-296):**
+> ```python
+> class TAssetID(Structure):
+>     _fields_ = [("ticker", c_wchar_p),
+>                 ("bolsa", c_wchar_p),
+>                 ("feed", c_int)]
+> ```
+>
+> **Exemplos `WINFUNCTYPE` corretos (`profitdll/Exemplo Python/main.py`):**
+> - L243 progress: `WINFUNCTYPE(None, TAssetID, c_int)` — 2 args
+> - L336 tinyBook: `WINFUNCTYPE(None, TAssetID, c_double, c_int, c_int)` — 4 args
+> - L346 daily: `WINFUNCTYPE(None, TAssetID, c_wchar_p, c_double × 11, c_int × 7)` — 20 args
+> - L391 offerBook V2: `WINFUNCTYPE(None, TAssetID, c_int × 5, c_longlong, c_double, c_int × 5, c_wchar_p, POINTER(c_ubyte) × 2)` — 16 args
+>
+> **NUNCA expandir TAssetID em `(c_wchar_p, c_wchar_p, c_int)`** — desalinha o stack frame de stdcall e causa silent corruption na ConnectorThread (root cause de Q-DRIFT-02, manifest do bug "MARKET_CONNECTING preso em (2,1)").
+>
+> Callbacks **V2** novos (TConnectorTradeCallback, TConnectorPriceDepthCallback, etc.) usam `TConnectorAssetIdentifier` (também struct por valor — `profitTypes.py` L88-94).
+
 | Callback | Signature (resumo) | Manual ref | Notas |
 |----------|-------------------|------------|-------|
 | `TStateCallback` | `(nConnStateType: int, nResult: int)` | §3.2 L2738, L3267 | Estados de conexão; sequência canônica seção 6 |
@@ -235,6 +256,18 @@ Códigos `NL_*` são `int` retornados por funções (negativos = erro, 0 ou posi
 | `2` | `MARKET_DATA` | `4` (`MARKET_CONNECTED`) **OU** `2` (`MARKET_WAITING`) [Q10-AMB / Q-AMB-01] | market data conectado |
 | `3` | `MARKET_LOGIN` | `0` | login market OK |
 
+**Tabela completa de results para `conn_type=2 MARKET_DATA` (manual p.13/55):**
+
+| result | Constante | Significado |
+|--------|-----------|-------------|
+| `0` | `MARKET_DISCONNECTED` | Desconectado do servidor de market data |
+| `1` | `MARKET_CONNECTING` | **Conectando ao servidor** (estado de transição — DLL ainda em handshake) |
+| `2` | `MARKET_WAITING` | Esperando conexão (Q10-AMB; aceito empiricamente como "pronto") |
+| `3` | `MARKET_NOT_LOGGED` | Não logado ao servidor de market data |
+| `4` | `MARKET_CONNECTED` | **Conectado ao market data** (único valor "correto" pelo manual p.55) |
+
+> ⚠️ **Q-DRIFT-02 (corrigido 2026-05-04):** se sua DLL fica preso em `(2, 1)` MARKET_CONNECTING por minutos sem evoluir para `(2, 4)`, **NÃO é pré-requisito de ProfitChart concorrente** (hipótese refutada pelo usuário). Causa raiz real é signatures incorretas dos NoopCallback no wrapper — ver Q-DRIFT-05 + nota crítica TAssetID em §3.1.
+
 **Decisão Story 1.2 AC5:** aceitar **ambos** `2` e `4` para `conn_type=2` como market data conectado. Logar qual veio com alias resolvido (`MARKET_WAITING` vs `MARKET_CONNECTED`).
 
 **Sequência típica observada (whale-detector v2):**
@@ -266,15 +299,26 @@ configure_argtypes(dll)
 # 4. SILENCIAR log nativo ANTES do init
 dll.SetEnabledLogToDebug(0)
 
-# 5. Construir 11 callbacks (1 ativo + 8 noop) — JAMAIS passar None (Q11-E)
+# 5. Construir SOMENTE callbacks reais necessários — exemplo oficial Nelogica
+#    `profitdll/Exemplo Python/main.py` L742-743 passa `None` em 4 dos 8 slots
+#    de DLLInitializeMarketLogin tranquilamente. (Q-DRIFT-06 refuta Q11-E.)
 state_cb = register_state_callback(state_queue)  # appended to _cb_refs
-noops = [make_noop_callback(t) for t in (TNoopTrade, TNoopDaily, ...)]
 
-# 6. Init com TODOS os 11 slots preenchidos
+# 6. Init seguindo EXEMPLO OFICIAL — None nos slots não-usados
 ret = dll.DLLInitializeMarketLogin(
     c_wchar_p(key), c_wchar_p(user), c_wchar_p(pwd),
-    state_cb, *noops,  # 11 args total
+    state_cb,
+    None,  # slot 5 — trade V1 (use SetTradeCallbackV2 depois se necessário)
+    None,  # slot 6 — daily
+    None,  # slot 7 — priceBook (DEPRECIADO; use SetPriceDepthCallback)
+    None,  # slot 8 — offerBook V1
+    None,  # slot 9 — histTrade V1 (use SetHistoryTradeCallbackV2 depois)
+    None,  # slot 10 — progress
+    None,  # slot 11 — tinyBook
 )
+# IMPORTANTE: se quiser usar Noop em vez de None, signatures DEVEM espelhar EXATAMENTE
+# `Exemplo Python/main.py` (TAssetID por valor, NÃO expandir em c_wchar_p × 2 + c_int).
+# Ver Q-DRIFT-05 para detalhes.
 if ret < 0:
     raise DLLInitError(ret, *decode_nl_error(ret))
 

@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 (Hotfix B1-B4 — adicionados Q-DRIFT-01..04: divergência manual vs DLL real após smoke executor)
+**Última atualização:** 2026-05-04 (Q-DRIFT-02 CORRIGIDO + Q-DRIFT-05 NOVO — investigação Nelo manual-first após smoke #3 confirmou: hipótese ProfitChart prerequisite REFUTADA pelo usuário; causa raiz real é signatures incorretas dos NoopCallback no wrapper)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -36,9 +36,11 @@
 | [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
 | [Q18-OPEN](#q18-open) | ❓ open | history / contract calendar | Vigência exata WIN H/M/U/Z conforme regra B3 oficial (5º dia útil mês X-3 → quarta mais próxima 15/X)? |
 | [Q-DRIFT-01](#q-drift-01) | 🔬 empirical | api drift | `SetProgressCallback` e `GetDLLVersion` **NÃO exportadas** pela DLL real |
-| [Q-DRIFT-02](#q-drift-02) | ⚠️ LIKELY ProfitChart prerequisite | lifecycle | `wait_market_connected` trava em (2,1) >5min — provável dependência de ProfitChart concorrente |
+| [Q-DRIFT-02](#q-drift-02) | ⚠️ ambiguous → 🔬 ROOT CAUSE: signatures NoopCallback erradas | lifecycle | `wait_market_connected` trava em (2,1) MARKET_CONNECTING; hipótese ProfitChart REFUTADA |
 | [Q-DRIFT-03](#q-drift-03) | ✅ validated | config | Env vars do código divergiam de `.env.example` — padronizado em `PROFITDLL_*` |
 | [Q-DRIFT-04](#q-drift-04) | 🔬 empirical | tooling / encoding | Rich Panel emoji crash em Windows cp1252 — CLI força `PYTHONIOENCODING=utf-8` |
+| [Q-DRIFT-05](#q-drift-05) | 🔬 empirical | init / signatures | NoopCallback signatures expandem TAssetID em 3 args primitivos (errado) — exemplo Nelogica usa TAssetID struct por valor |
+| [Q-DRIFT-06](#q-drift-06) | ⚠️ corrected | init | Q11-E "JAMAIS passar None" REFUTADO pelo exemplo oficial — Nelogica passa `None` em 4 dos 8 slots em `DLLInitializeMarketLogin` |
 
 ---
 
@@ -234,8 +236,8 @@
 
 ## Q11-E
 
-- **ID:** Q11-E (Sentinel §12)
-- **Status:** 🔬 empirical
+- **ID:** Q11-E (Sentinel §12) ⚠️ **SUPERSEDED por [Q-DRIFT-06](#q-drift-06) (2026-05-04)**
+- **Status:** 🔬 empirical → ⚠️ REFUTADO em 2026-05-04. Mantido aqui pelo histórico, mas o exemplo oficial Nelogica (`main.py` L742) passa `None` em 4 dos 8 slots tranquilamente. Provável causa do bug Sentinel §12 era signatures incorretas (Q-DRIFT-05), não `None`.
 - **Categoria:** init
 - **Sintoma:** `DLLInitializeMarketLogin` é chamado com `None` em alguns dos 11 callback slots opcionais (ex: passar `None` em `histTrade` porque a story atual não usa histórico). Init **retorna sucesso**. Story posterior chama `SetHistoryTradeCallback(real_callback)` — **callback nunca dispara**, sem erro reportado.
 - **Causa raiz:** DLL provavelmente armazena os ponteiros do init internamente em uma estrutura/array; passar `None` (NULL ptr) corrompe um índice e o `Set*Callback` posterior escreve no slot errado OU é silenciosamente ignorado.
@@ -491,60 +493,65 @@
 ## Q-DRIFT-02
 
 - **ID:** Q-DRIFT-02
-- **Status:** ⚠️ **LIKELY ProfitChart prerequisite** (atualizado 2026-05-04 após 2ª tentativa smoke)
+- **Status:** ⚠️ **CORRIGIDO** — hipótese ProfitChart REFUTADA pelo usuário; causa raiz real é signatures incorretas (ver Q-DRIFT-05). Mantido aqui pelo histórico do sintoma e ID estável.
 - **Categoria:** lifecycle / handshake
 - **Sintoma:** `wait_market_connected` retornava `False` (timeout) — DLL inicializa e
-  autentica OK, mas o handshake `MARKET_DATA` **fica em estado intermediário `(2, 1)` por
-  mais de 5 minutos** sem evoluir para `(2, 4)`/`(2, 2)`.
-- **Causa raiz (hipótese atual):** ⚠️ **LIKELY** — ProfitDLL exige que **ProfitChart
-  esteja rodando concorrentemente e logado com a mesma chave de licença Nelogica** para
-  que o canal MARKET_DATA conecte. Hipótese formulada com base em 2 tentativas de smoke
-  consecutivas onde MARKET_DATA travou em (2,1).
-  - Hipótese (a) — **LIKELY**: ProfitChart precisa estar aberto/logado.
-  - Hipótese (b) — secundária: throttle/handshake demorado fora de pregão.
-  - Hipótese (c) — secundária: sequência state callbacks tem etapas extras (LOGIN →
-    ROTEAMENTO → sync → MARKET_LOGIN → MARKET_DATA).
-- **Evidência (atualizada):**
-  - Smoke #1 (commit `153cf43`, 2026-05-04 manhã): `connect trava em MARKET_DATA/1 >60s`.
-  - Smoke #2 (commit `4412d48`, 2026-05-04 tarde): `connect trava em MARKET_DATA/1 >5min`
-    mesmo após default timeout elevado para 300s.
-  - **Inferência:** ambientes nas duas tentativas provavelmente NÃO tinham ProfitChart
-    aberto concorrentemente. Hipótese (a) é a explicação mais parcimoniosa para a
-    persistência do state `(2, 1)` indefinidamente.
-  - Manual silencioso. Manual.py oficial Nelogica (`profitdll/Exemplo Python/main.py`)
-    não menciona pré-requisito ProfitChart, mas o exemplo é interativo via CLI e provavelmente
-    foi testado em máquina dev com ProfitChart instalado.
-- **Mitigação V1.0 (proposta — INSTALL.md §2.4):**
-  - **Pré-requisito documentado**: usuário abre ProfitChart e faz login com a mesma chave
-    Nelogica configurada em `.env` ANTES de rodar data-downloader. Aguarda ProfitChart
-    conectar a market data, depois roda CLI/UI.
-  - Default timeout `wait_market_connected` mantido em **300s** (5 min) — Q-DRIFT-02
-    persiste em ambientes sem ProfitChart, então timeout elevado por si só não basta.
-  - Heartbeat a cada 30s no logger (`dll.waiting_market_data` + `elapsed_seconds` +
-    `quirk="Q-DRIFT-02"`) para visibilidade.
-  - Mensagem de timeout (`ERR_DLL_MARKET_TIMEOUT` em MICROCOPY_CATALOG §5) inclui hint
-    explícito sobre ProfitChart como pré-requisito.
-- **Investigação aberta (V1.1 deve resolver se confirmado):**
-  - **Probe humano necessário:** rodar smoke com ProfitChart aberto + logado e medir
-    se MARKET_DATA chega a `(2, 2)`/`(2, 4)` em < 60s. Se sim → hipótese (a) confirmada
-    → V1.0 documenta pré-requisito; V1.1 investiga API alternativa que não dependa de
-    ProfitChart (ou abre ticket Nelogica).
-  - Se NÃO (timeout persiste com ProfitChart aberto) → hipóteses (b)/(c) reabertas;
-    Nelo abre ticket suporte Nelogica.
-- **Status code mapping:**
-  - `(2, 1)` = MARKET_DATA / 1 (provavelmente "connecting" / aguardando handshake)
-  - `(2, 2)` = MARKET_WAITING (Q10-AMB)
-  - `(2, 4)` = MARKET_CONNECTED (Q10-AMB)
-- **Data descoberta:** 2026-05-04 (smoke executor #1, hotfix B3).
-- **Data status atualizado:** 2026-05-04 (smoke executor #2 — hotfix B2-B4 follow-up;
-  hipótese ProfitChart formalizada).
-- **Aplica a stories:** 1.2 (wait_market_connected), 1.6 (probe), 1.7b (CLI download),
-  4.4 (INSTALL.md V1.0 pré-requisito), todas smoke tests.
+  autentica OK (recebe `(0,0)` LOGIN_CONNECTED, `(3,0)` MARKET_LOGIN_OK), mas o canal
+  `MARKET_DATA` **fica em `(2, 1)` por minutos** sem evoluir para `(2, 4)`.
+- **Hipótese descartada (V1.0 manhã 2026-05-04):** ⚠️ ProfitChart concorrente como pré-requisito.
+  - **Refutada pelo usuário em 2026-05-04 tarde:** "não é tão difícil, o manual não está
+    errado, muito menos o exemplo, basta segui-los."
+  - Manual ProfitDLL pt_br pp.74-75 (seção "Uso do Produto / Inicializando com Market
+    Data") **NÃO menciona ProfitChart** como pré-requisito.
+  - Exemplo oficial `profitdll/Exemplo Python/main.py` linhas 729-764 (`dllStart`) **não
+    abre ProfitChart**; apenas chama `DLLInitializeMarketLogin` + `SetXxxCallback`s e
+    aguarda em `wait_login` (linha 568) por `bMarketConnected = True` que vem de
+    `(conn_type=2, result=4)` (linhas 222-225 do `stateCallback`).
+- **Causa raiz REAL (descoberta 2026-05-04 noite, investigação Nelo manual-first):**
+  - Manual pp.13/55: `MARKET_CONNECTING = 1` significa **literalmente "Conectando ao
+    servidor de market data"** — é estado de progresso normal. **NÃO é estado terminal.**
+  - O handshake fica preso em `(2,1)` porque a **ConnectorThread interna da DLL provavelmente
+    falha ao chamar UM dos NoopCallback que registramos** durante a sincronização inicial
+    de market data, devido a **signatures ctypes incorretas**.
+  - Detalhes técnicos completos em [Q-DRIFT-05](#q-drift-05).
+  - Adicionalmente, [Q-DRIFT-06](#q-drift-06) refuta Q11-E ("JAMAIS passar None") — o exemplo
+    oficial passa `None` em 4 dos 8 slots tranquilamente.
+- **Evidência:**
+  - Smoke #1 e #2 (commits `153cf43` e `4412d48`, 2026-05-04): travam em `(2,1)`.
+  - Smoke #3 (log `docs/qa/SMOKE_EVIDENCE/logs/smoke1-attempt3-20260504T163934Z.log`):
+    sequência observada `LOGIN_CONNECTED (0,0) → MARKET_LOGIN_OK (3,0) → MARKET_DATA/1
+    (2,1) repetido 300s`. Manual diz `result=1` é `MARKET_CONNECTING`, ou seja: DLL
+    **está tentando conectar** mas algo a impede de evoluir.
+  - Comparação `src/data_downloader/dll/types.py` (NOSSO wrapper) vs
+    `profitdll/Exemplo Python/main.py` (exemplo oficial Nelogica):
+    - **NOSSO:** `TProgressCallback = WINFUNCTYPE(None, c_wchar_p, c_wchar_p, c_int, c_int)` (4 args primitivos)
+    - **OFICIAL** (main.py L243): `@WINFUNCTYPE(None, TAssetID, c_int)` (TAssetID struct + 1 c_int)
+  - Mesmo erro em `TTradeCallback`, `TDailyCallback`, `TPriceBookCallback`,
+    `TOfferBookCallback`, `THistoryTradeCallback`, `TTinyBookCallback` — todos expandem
+    `TAssetID` em 3 args primitivos quando deveriam ser **um único arg struct por valor**.
+- **Mitigação correta (REVERTER):**
+  - **Remover** documentação ProfitChart pré-requisito de `docs/release/INSTALL.md` §2.4.
+  - **Remover** hint sobre ProfitChart de `docs/ux/MICROCOPY_CATALOG.md` §5
+    `ERR_DLL_MARKET_TIMEOUT` (mensagem deve apenas dizer "MARKET_DATA não conectou — ver
+    log para state codes").
+  - **Corrigir signatures dos NoopCallback** (escopo Dex — ver Q-DRIFT-05 "Recomendação Dex").
+- **Status code mapping (manual pp.13/55 confirma):**
+  - `(2, 0)` = MARKET_DISCONNECTED — desconectado.
+  - `(2, 1)` = **MARKET_CONNECTING — conectando ao servidor (estado de transição)**.
+  - `(2, 2)` = MARKET_WAITING — esperando conexão (Q10-AMB; aceito empiricamente).
+  - `(2, 3)` = MARKET_NOT_LOGGED — não logado.
+  - `(2, 4)` = MARKET_CONNECTED — conectado ao market data **(único valor correto, manual p.55)**.
+- **Data descoberta:** 2026-05-04 (smoke #1, hotfix B3 originalmente diagnosticado errado).
+- **Data CORRIGIDO:** 2026-05-04 (investigação Nelo manual-first após smoke #3 + feedback usuário).
+- **Aplica a stories:** 1.2 (wait_market_connected, NoopCallback signatures), 1.6 (probe),
+  1.7b (CLI download), 4.4 (INSTALL.md — REMOVER §2.4 ProfitChart), todas smoke tests.
 - **Refs:**
+  - `src/data_downloader/dll/types.py` (signatures NOOP_SLOT_SIGNATURES — INCORRETAS, ver Q-DRIFT-05)
   - `src/data_downloader/dll/wrapper.py:wait_market_connected`
-  - `src/data_downloader/public_api/download.py:_build_real_dll`
-  - `docs/release/INSTALL.md` §2.4 (pré-requisito ProfitChart V1.0)
-  - `docs/ux/MICROCOPY_CATALOG.md` §5 `ERR_DLL_MARKET_TIMEOUT`
+  - `profitdll/Exemplo Python/main.py` L195, L243, L324, L336, L346, L391, L440, L445 (signatures corretas)
+  - `profitdll/Exemplo Python/profitTypes.py` L293-296 (TAssetID struct), L325-335 (TNewTradeCallback)
+  - `docs/qa/SMOKE_EVIDENCE/logs/smoke1-attempt3-20260504T163934Z.log` (evidência de (2,1) por 300s)
+  - Manual pp.13, 55, 74-75 (state codes + Uso do Produto — NÃO menciona ProfitChart).
 
 ---
 
@@ -602,6 +609,126 @@
 - **Data descoberta:** 2026-05-04 (smoke executor, hotfix B4).
 - **Aplica a stories:** todas com CLI Rich (1.6, 1.7b, 2.1, 2.9).
 - **Refs:** `src/data_downloader/cli.py` topo do módulo.
+
+---
+
+## Q-DRIFT-05
+
+- **ID:** Q-DRIFT-05
+- **Status:** 🔬 **empirical** — root cause de Q-DRIFT-02. Aguarda fix no wrapper + smoke confirmação.
+- **Categoria:** init / signatures ctypes / NoopCallback
+- **Sintoma:** `wait_market_connected` trava em `(conn_type=2, result=1)` MARKET_CONNECTING
+  por minutos, sem evoluir para `(2,4)` MARKET_CONNECTED. DLL inicializa OK, autentica OK,
+  mas o canal de market data nunca conclui o handshake.
+- **Causa raiz:** As 7 signatures `WINFUNCTYPE` em `src/data_downloader/dll/types.py`
+  (`TTradeCallback`, `TDailyCallback`, `TPriceBookCallback`, `TOfferBookCallback`,
+  `THistoryTradeCallback`, `TProgressCallback`, `TTinyBookCallback`) **EXPANDEM** o struct
+  `TAssetID` em 3 args primitivos (`c_wchar_p, c_wchar_p, c_int` — ticker, bolsa, feed)
+  quando o exemplo oficial Nelogica passa **`TAssetID` como struct por valor** (1 arg).
+  - **Stdcall convention:** quando os args do callback Python diferem do que a DLL Delphi
+    espera no stack frame, o stack pointer fica desalinhado após retorno do callback.
+    Em 64-bit isso normalmente apenas corrompe valores; em alguns casos pode causar
+    exception silenciosa interna na ConnectorThread, abortando o handshake de market data.
+  - Provavelmente, durante a sincronização de market data, a DLL chama internamente um
+    desses callbacks (ex.: TinyBook para ativo de teste, ou Daily snapshot) e o
+    desalinhamento do stack causa erro silencioso, deixando o handshake preso em
+    `MARKET_CONNECTING` (não progride para `MARKET_CONNECTED`).
+- **Evidência (citações exatas):**
+  - **Manual `Manual - ProfitDLL pt_br.pdf` p.55** (TStateCallback values): `MARKET_CONNECTING = 1`
+    é literalmente "Conectando ao servidor de market data" — estado de progresso, não terminal.
+  - **Exemplo oficial `profitdll/Exemplo Python/main.py`:**
+    - L243: `@WINFUNCTYPE(None, TAssetID, c_int)` — `progressCallBack` recebe `TAssetID` STRUCT.
+    - L336: `@WINFUNCTYPE(None, TAssetID, c_double, c_int, c_int)` — `tinyBookCallBack` recebe TAssetID STRUCT + 3 args.
+    - L346-347: `@WINFUNCTYPE(None, TAssetID, c_wchar_p, c_double × 12, c_int × 7)` — `newDailyCallback` recebe TAssetID STRUCT + 18 fields.
+    - L391-392: `@WINFUNCTYPE(None, TAssetID, c_int, c_int, c_int, c_int, c_int, c_longlong, c_double, c_int × 5, c_wchar_p, POINTER(c_ubyte) × 2)` — `offerBookCallbackV2` recebe TAssetID STRUCT.
+  - **Struct `TAssetID` (`profitTypes.py` L293-296):**
+    ```python
+    class TAssetID(Structure):
+        _fields_ = [("ticker", c_wchar_p),
+                    ("bolsa", c_wchar_p),
+                    ("feed", c_int)]
+    ```
+    Quando passado por valor em stdcall, ocupa 1 slot lógico (struct), não 3 slots primitivos.
+  - **NOSSO `src/data_downloader/dll/types.py` L122-237** (INCORRETO — expande TAssetID):
+    - L122-136 `TTradeCallback`: `WINFUNCTYPE(None, c_wchar_p, c_wchar_p, c_int, c_wchar_p, c_uint, c_double, c_double, c_int, c_int, c_int, c_int, c_int)` — expande TAssetID em 3 primitivos + 9 demais.
+    - L220-226 `TProgressCallback`: `WINFUNCTYPE(None, c_wchar_p, c_wchar_p, c_int, c_int)` — expande em 3 primitivos + nProgress (vs oficial: TAssetID + c_int = 2 args).
+    - Mesmo erro em `TDailyCallback`, `TPriceBookCallback`, `TOfferBookCallback`, `THistoryTradeCallback`, `TTinyBookCallback`.
+- **Workaround (recomendação para Dex):**
+  1. Adicionar `TAssetID` Structure em `src/data_downloader/dll/types.py` (mirror exato de `profitTypes.py` L293-296).
+  2. Reescrever as 7 signatures NOOP_SLOT_SIGNATURES espelhando EXATAMENTE o `@WINFUNCTYPE` do exemplo oficial:
+     - Slot 5 trade (V1): `WINFUNCTYPE(None, TAssetID, c_wchar_p, c_uint, c_double, c_double, c_int, c_int, c_int, c_int, c_int)` (TAssetID + 10 args; ver `profitTypes.py` L325-335 TNewTradeCallback).
+     - Slot 6 daily: `WINFUNCTYPE(None, TAssetID, c_wchar_p, c_double × 11, c_int × 7)` (main.py L346-347).
+     - Slot 7 priceBook (DEPRECIADO, mas signature precisa estar ok): TAssetID + (vários — ver `profitTypes.py` L391+ se necessário).
+     - Slot 8 offerBook V1: TAssetID + (vários — ver `profitTypes.py` L404+).
+     - Slot 9 histTrade (V1): `WINFUNCTYPE(None, TAssetID, c_wchar_p, c_uint, c_double, c_double, c_int, c_int, c_int, c_int)` (sem `bIsEdit` — `profitTypes.py` L365-374 TNewHistoryCallback).
+     - Slot 10 progress: `WINFUNCTYPE(None, TAssetID, c_int)` (main.py L243).
+     - Slot 11 tinyBook: `WINFUNCTYPE(None, TAssetID, c_double, c_int, c_int)` (main.py L336).
+  3. Considerar **opção alternativa segura**: passar `None` literal nos slots não-usados (como o exemplo oficial faz em main.py L742) — refuta Q11-E (ver Q-DRIFT-06). Isso elimina a necessidade de Noop e por consequência elimina risco de signatures erradas.
+  4. **Smoke test:** após fix, rerun `tests/smoke/test_mvp_gate.py`. Esperar transição
+     `(2,1) → (2,4)` em < 60s sem necessidade de ProfitChart concorrente.
+- **Manual diz:** as **signatures dos callbacks** são tipos Delphi com `TAssetIDRec`
+  (= `TAssetID` em ctypes Python) como primeiro arg de quase todos os callbacks de market
+  data (manual §3.2 pp.55-71). Manual NÃO ensina a expandir struct em primitivos — isso
+  foi assunção incorreta nossa.
+- **Data descoberta:** 2026-05-04 (investigação Nelo manual-first após Q-DRIFT-02 ProfitChart REFUTADA).
+- **Aplica a stories:** 1.2 (NoopCallback signatures), 1.7b (CLI smoke), 1.6 (probe).
+- **Refs:**
+  - `src/data_downloader/dll/types.py` (signatures NOOP_SLOT_SIGNATURES — corrigir).
+  - `profitdll/Exemplo Python/main.py` L195, L243, L324, L336, L346-347, L391-392.
+  - `profitdll/Exemplo Python/profitTypes.py` L293-296 (TAssetID), L325-335 (TNewTrade), L342-361 (TNewDaily), L378-381 (TProgress), L383-389 (TTinyBook).
+  - `docs/qa/SMOKE_EVIDENCE/logs/smoke1-attempt3-20260504T163934Z.log` (evidência (2,1) por 300s).
+
+---
+
+## Q-DRIFT-06
+
+- **ID:** Q-DRIFT-06
+- **Status:** ⚠️ **CORRECTED** — refuta Q11-E (Sentinel §12 / Story 1.2 AC2).
+- **Categoria:** init / NoopCallback policy
+- **Sintoma:** Story 1.2 implementou `NoopCallback` em todos os 7 slots não-state de
+  `DLLInitializeMarketLogin` baseando-se em Q11-E ("JAMAIS passar None — corrompe
+  registro interno e Set*Callback posterior nunca dispara").
+- **Causa raiz da regra incorreta:** Q11-E é uma observação empírica do Sentinel (~2025)
+  que provavelmente combinava signatures incorretas + `None` em slots — atribuiu a culpa
+  ao `None` quando provavelmente era o desalinhamento de stdcall (ver Q-DRIFT-05).
+- **Refutação direta com fonte primária:**
+  - **`profitdll/Exemplo Python/main.py` L742-743** (chamada oficial Nelogica):
+    ```python
+    result = profit_dll.DLLInitializeMarketLogin(
+        c_wchar_p(key), c_wchar_p(user), c_wchar_p(password),
+        stateCallback, None, newDailyCallback, None,
+        None, None, progressCallBack, tinyBookCallBack
+    )
+    ```
+  - O exemplo passa `None` em **4 dos 8 slots de callback** (slot 5 trade, slot 7
+    priceBook, slot 8 offerBook, slot 9 histTrade) e ainda assim a DLL conecta + funciona.
+  - Em main.py L745-761, callbacks adicionais são registrados via `SetXxxCallback` AFTER
+    init (`SetTradeCallbackV2`, `SetOfferBookCallbackV2`, `SetHistoryTradeCallbackV2`,
+    etc.) — isso PROVA que os slots passados como `None` no init NÃO impedem o registro
+    posterior via `SetXxxCallback`.
+- **Workaround (decisão):** Aceitar `None` como valor válido para slots não-usados.
+  Eliminar `make_noop_callback` factory ou mantê-la apenas como opcional (não default).
+- **Decisão para Dex:** o caminho mais simples e fiel ao exemplo oficial é:
+  1. Para slot 4 (state): SEMPRE callback real (estado de conexão é obrigatório).
+  2. Para slots 5-11: passar `None` literal por padrão; usar callback real APENAS quando a
+     story precisa daquele dado (ex.: Story 1.3 usa slot 9 histTrade ou registra via
+     `SetHistoryTradeCallbackV2` AFTER init).
+  3. Atualizar `Q11-E` em QUIRKS.md como ⚠️ REFUTADO / superseded por Q-DRIFT-06.
+- **Atenção (NÃO ALTERAR sem nova evidência):** Story 1.2 AC2 e o Sentinel §12 falam em
+  semanas de debugging por causa de None. Pode haver edge case que o exemplo oficial não
+  cobre. **Implementação recomendada conservadora:** começar passando `None` (como exemplo
+  oficial), e se algum callback "set posteriormente" não disparar, voltar atrás caso-a-caso.
+- **Manual diz:** Manual pp.22-23 lista os callbacks de `DLLInitializeMarketLogin` SEM
+  marcar quais são opcionais — descrição diz "callbacks obrigatórios" (p.74), mas o
+  exemplo oficial contradiz claramente passando `None`. Esta é uma divergência real
+  manual ↔ exemplo, mas o **exemplo é a fonte canônica de uso** (manual descreve a API
+  Delphi; exemplo demonstra a API Python).
+- **Data descoberta:** 2026-05-04 (investigação Nelo durante root-cause de Q-DRIFT-02).
+- **Aplica a stories:** 1.2 (AC2 — relaxar regra "JAMAIS None"), 1.7b, 1.3.
+- **Refs:**
+  - `profitdll/Exemplo Python/main.py` L738-743 (`DLLInitializeLogin` e `DLLInitializeMarketLogin` com `None` em 4-7 slots).
+  - `profitdll/Exemplo Python/main.py` L745-761 (callbacks registrados via `SetXxxCallback` AFTER init).
+  - Q11-E (Sentinel §12) — SUPERSEDED.
 
 ---
 
