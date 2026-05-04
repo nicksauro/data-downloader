@@ -1671,4 +1671,61 @@ real ainda (V1.0 é baseline; tracker DEPRECATION_POLICY.md vazio).
 
 ---
 
+## Story 4.2 — Multi-asset support (WIN, equities)
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/4.2.story.md`                          |
+| **commit auditado**    | `32a56e5`                                            |
+| **owner**              | mini-council Sol+Dex+Nelo (modo autônomo via COUNCIL-29) |
+| **gatekeeper**         | Quinn (qa) — modo autônomo                           |
+| **report path**        | `docs/qa/QA_REPORTS/4.2-2026-05-04.md`               |
+| **storage audit**      | `docs/qa/AUDIT_REPORTS/4.2-storage-2026-05-04.md` (Sol APPROVED) |
+| **dll audit**          | `docs/qa/AUDIT_REPORTS/4.2-dll-2026-05-04.md` (Nelo APPROVED) |
+| **WAIVER**             | `docs/qa/WAIVERS/4.2-real-smoke-deferred-2026-05-04.md` (smoke real WIN+PETR4 DEFERRED — política COUNCIL-09 / 4.1 / 1.7b) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                                  |
+|----------------------|-----------|---------------------------------------------------------------------------------------|
+| 1. Code review       | PASS      | Chunker equity regex `^[A-Z]{4}\d$` + `is_equity_ticker` (single source of truth — reusada por probe); seed CONTRACTS.md v1.1.0 (8 WIN H/M/U/Z + 6 equity); zero schema migration; bug overflow `vigent_until=9999-12-31 + 1d` FIXED. |
+| 2. Unit tests        | PASS      | 91 PASS scope-novo em 28.35s: 50 chunker_equity + 21 contracts_multi_asset + 6 multi_asset_mock + 9 continuous_equity + 5 continuous_rollover (P5 WIN H→M→U→Z). |
+| 3. Acceptance criteria | PASS    | 5/6 PASS literal + 1 PASS-com-WAIVER (AC6 smoke real DEFERRED). AC1 chunker matrix; AC2 seed expandida 17 entries; AC3 probe equity exchange='B' (mock) + Q18-OPEN registry; AC4 read_continuous WIN+equity; AC5 4 test files novos/estendidos. |
+| 4. No regressions    | PASS      | Story 1.7a chunker WDO/WIN/IND/DOL inalterado; Story 1.5b read_continuous P1..P4 preservados; Story 1.6 contracts UPSERT idempotente preservado; pre-existing failures unrelated documentados (api_version drift Epic 3). |
+| 5. Performance       | PASS      | Property tests Hypothesis 100+ examples cada; sem novo bench requerido (chunk size para WIN/equity inalterado vs Story 1.7a / COUNCIL-05). |
+| 6. Security          | PASS      | Sem secrets; sem SQL injection (parametrizado); WAIVER com sign-offs implícitos (Sol+Nelo+Aria+Morgan via COUNCIL-29 + COUNCIL-09). |
+| 7. Documentation     | PASS      | CONTRACTS.md v1.1.0 (§3 expandido + §3.1 asset class mapping novo); QUIRKS.md Q18-OPEN registrado (3 hipóteses + probe proposto); COUNCIL-29 ratifica D1..D5; WAIVER 4.2 + 4.2-followup story-debt criadas. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Sol (storage)   | **APPROVED**     | `4.2-storage-2026-05-04.md` — 5 findings LOW/INFO; zero schema migration; seed YAML correto; bug overflow FIXED. |
+| Nelo (DLL)      | **APPROVED**     | `4.2-dll-2026-05-04.md` — 5 findings INFO/LOW; manual §3.1 linha 1673 conformidade; lei R3 preservada; Q18-OPEN registrado. |
+| Aria (design)   | n/a              | Zero mudança public_api; zero schema migration; SemVer impact NONE. Audit não requerido (D6 COUNCIL-29). |
+| Pyro (perf)     | n/a              | Chunk size inalterado (WIN=5d desde 1.7a; equity=1d default). Sem bench novo. |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 3     | F-Q-1 (smoke real DEFERRED via WAIVER) / F-Q-2 (Q18-OPEN vigência exata WIN) / F-Q-3 (overflow bug FIXED). |
+| INFO      | 4     | F-Q-4 (api_version drift unrelated) / F-Q-5 (AC1 narrativa "WIN: 1d" vs implementação 5d — D2 COUNCIL-29 ratifica) / F-Q-6 (CLI `--exchange` flag pendente) / F-Q-7 (UNT regex V1.x). |
+
+### Verdict
+
+**PASS\*** — Story 4.2 fechada. Status `Ready for Review` → `Done*` (asterisco = real smoke deferred via WAIVER).
+
+**Próximo passo desbloqueado:** **Story 4.3** (multi-symbol public_api — V1.x) e **Story 4.4** (packaging V1) podem prosseguir; foundation multi-asset estável. Smoke real (humano) bloqueia release V1 não Story 4.2.
+
+**Bloqueios remanescentes para release V1:**
+
+- B1 (existente) — Smoke real single-symbol WDOJ26 (Story 1.7b-followup).
+- B3 (novo) — Smoke real multi-asset WINH26 + PETR4 (Story 4.2-followup); pré-requisitos: 1.7b-followup PASS + Q18-OPEN respondido + 4.1-followup PASS.
+
+---
+
 — Quinn, no portão
