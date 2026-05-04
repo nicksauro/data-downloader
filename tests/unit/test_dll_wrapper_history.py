@@ -167,37 +167,85 @@ def test_get_history_trades_raises_when_dll_not_initialized(tmp_path: Path) -> N
 
 
 # =====================================================================
-# translate_trade
+# translate_trade — Story 1.7b-followup (returns TradeFields | None)
 # =====================================================================
 
 
 @pytest.mark.unit
 def test_translate_trade_calls_dll_with_handle_and_struct_byref(tmp_path: Path) -> None:
-    """TranslateTrade(handle, byref(struct)) — args devem chegar à DLL."""
+    """TranslateTrade(handle, byref(struct)) — args devem chegar à DLL.
+
+    Story 1.7b-followup: nova API ``translate_trade(handle) -> TradeFields``
+    aloca struct internamente. Verificamos que TranslateTrade foi chamada
+    com o handle correto + um pointer-like (byref do struct interno).
+    """
     dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
     mock_dll = MagicMock()
-    mock_dll.TranslateTrade = MagicMock(return_value=0)
+
+    def _fill(_handle: int, struct_ref: object) -> int:
+        # struct_ref é byref(TConnectorTrade) — ._obj é o struct interno.
+        # Populamos TradeDate com SystemTime válido para que o parse de ns
+        # não levante (year>=1).
+        struct = struct_ref._obj  # type: ignore[attr-defined]
+        from data_downloader.dll.types import SystemTime
+
+        st = SystemTime()
+        st.wYear = 2026
+        st.wMonth = 4
+        st.wDay = 15
+        st.wHour = 9
+        st.wMinute = 0
+        st.wSecond = 0
+        st.wMilliseconds = 0
+        struct.TradeDate = st
+        return 0
+
+    mock_dll.TranslateTrade = MagicMock(side_effect=_fill)
     dll._dll = mock_dll
 
-    struct = TConnectorTrade(Version=0)
-    rc = dll.translate_trade(0xDEADBEEF, struct)
+    fields = dll.translate_trade(0xDEADBEEF)
 
-    assert rc == 0
+    assert fields is not None
     mock_dll.TranslateTrade.assert_called_once()
     call_args = mock_dll.TranslateTrade.call_args.args
     assert call_args[0] == 0xDEADBEEF
-    # 2º arg é byref(struct) — inspecionamos via .contents (ctypes byref).
-    # Garantia mínima: arg[1] não é None e existe (byref retorna pointer-like).
+    # 2º arg é byref(struct) — pointer-like, não None.
     assert call_args[1] is not None
 
 
 @pytest.mark.unit
 def test_translate_trade_raises_when_dll_not_initialized(tmp_path: Path) -> None:
     dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
-    struct = TConnectorTrade(Version=0)
     with pytest.raises(DLLInitError) as exc:
-        dll.translate_trade(123, struct)
+        dll.translate_trade(123)
     assert exc.value.name == "NL_NOT_INITIALIZED"
+
+
+@pytest.mark.unit
+def test_translate_trade_returns_none_on_nl_error(tmp_path: Path) -> None:
+    """translate_trade retorna None quando TranslateTrade retorna NL_* < 0."""
+    dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
+    mock_dll = MagicMock()
+    mock_dll.TranslateTrade = MagicMock(return_value=-1)  # NL_INTERNAL_ERROR
+    dll._dll = mock_dll
+
+    result = dll.translate_trade(0xCAFE)
+    assert result is None
+
+
+@pytest.mark.unit
+def test_translate_trade_raw_low_level_still_works(tmp_path: Path) -> None:
+    """Helper privado ``_translate_trade_raw(handle, struct)`` ainda preenche struct."""
+    dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
+    mock_dll = MagicMock()
+    mock_dll.TranslateTrade = MagicMock(return_value=0)
+    dll._dll = mock_dll
+
+    struct = TConnectorTrade(Version=0)
+    rc = dll._translate_trade_raw(0x1234, struct)
+
+    assert rc == 0
+    mock_dll.TranslateTrade.assert_called_once()
 
 
 # =====================================================================
