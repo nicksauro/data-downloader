@@ -18,7 +18,7 @@
 | ID | Status | Categoria | Sumário |
 |----|--------|-----------|---------|
 | [Q01-V](#q01-v) | ✅ validated | history | `WDOFUT`/`WINFUT` retornam 0 trades; usar contrato vigente |
-| [Q02-E](#q02-e) | 🔬 empirical | history | Progresso 99% reconectando — não é trava |
+| [Q02-E](#q02-e) | ✅ validated | history | Progresso 99% reconectando — não é trava (workaround formalizado em Story 2.6) |
 | [Q03-AMB](#q03-amb) | ⚠️ ambiguous | timestamp | Formato `.ZZZ` (manual) vs `:ZZZ` (whale-detector v2) |
 | [Q04-E](#q04-e) | 🔬 empirical | timestamp | Timestamps em BRT naive (manual silencioso) |
 | [Q05-V](#q05-v) | ✅ validated | subscription | Bolsa = uma letra (`B`, `F`); `BMF` retorna NL_EXCHANGE_UNKNOWN |
@@ -54,18 +54,21 @@
 ## Q02-E
 
 - **ID:** Q02-E
-- **Status:** 🔬 empirical
+- **Status:** ✅ validated (workaround formalizado em Story 2.6)
 - **Categoria:** history
 - **Sintoma:** `ProgressCallback` reporta `99` repetidamente por dezenas de minutos antes de chegar a `100` ou disparar último `HistoryTradeCallback`. Aparenta travamento.
 - **Causa raiz:** A DLL cicla a conexão com o servidor de histórico antes de entregar o último pacote (especulação — manual silencioso). Pode estar relacionado a checkpoint/handshake interno.
 - **Evidência:** validado em whale-detector v2 e Sentinel §12. Reproduzível em dias com volume alto de trades.
-- **Workaround:**
-  - Timeout mínimo: **1800s** sem progresso real (não confundir com 99% repetido).
-  - "Progresso real" = mudança no número de `HistoryTradeCallback` recebidos OU mudança no progress reportado.
+- **Workaround (Story 1.3 + Story 2.6):**
+  - **Timeout duro:** 1800s sem progresso real (não confundir com 99% repetido) — `download_chunk` timeout default.
+  - **Progress-aware policy:** progress=99% NÃO é error code NL_*, é estado de fluxo. `download_primitive` (Story 1.3) detecta e ignora; orchestrator + circuit breaker (Story 2.6) NÃO contam como falha porque `download_chunk` retorna `status='completed'` se `TC_LAST_PACKET` chegou (mesmo após N callbacks de 99%).
+  - **Apenas falhas reais contam:** circuit breaker recebe `record_failure` apenas quando `status='timeout'` (deadline duro) OU `status='failed'` (NL_* error code). Q02-E permanece transparente — N reconnects 99% durante 1 chunk = 0 falhas no breaker = CLOSED preservado.
   - **NÃO** abortar em 99% — esperar `100` OU `TC_LAST_PACKET` (V2) OU timeout duro.
+- **Test reprodutor:** `tests/integration/test_orchestrator_with_retry.py::test_circuit_breaker_does_not_count_q02e_progress_99_as_failure`.
 - **Manual diz:** §3.1 linha 1750 — "progresso de Download (1 até 100)" sem detalhar.
 - **Data descoberta:** ~2025 (Sentinel).
-- **Aplica a stories:** 1.3 (history primitive), 1.7a/b.
+- **Data validated:** 2026-05-03 (Story 2.6 / COUNCIL-20).
+- **Aplica a stories:** 1.3 (history primitive), 1.7a/b, 2.6 (circuit breaker policy).
 
 ---
 

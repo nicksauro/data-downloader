@@ -24,6 +24,12 @@ from data_downloader.orchestrator.chunker import (
     chunk_date_range,
     chunk_days_for_symbol,
 )
+from data_downloader.orchestrator.circuit_breaker import (
+    BreakerState,
+    CircuitBreaker,
+    CircuitOpenError,
+    with_circuit_breaker,
+)
 from data_downloader.orchestrator.contracts import (
     Contract,
     list_contracts,
@@ -51,6 +57,11 @@ from data_downloader.orchestrator.retry import (
     RetryError,
     with_retry,
 )
+from data_downloader.orchestrator.retry_policy import (
+    RetryPolicy,
+    default_retry_policy,
+    policy_from_env,
+)
 from data_downloader.orchestrator.state_machine import (
     InvalidStateTransition,
     JobState,
@@ -63,8 +74,11 @@ from data_downloader.orchestrator.timestamp import (
 
 __all__ = [
     "CHUNK_DAYS",
+    "BreakerState",
     "ChunkRange",
     "ChunkResult",
+    "CircuitBreaker",
+    "CircuitOpenError",
     "Contract",
     "InvalidStateTransition",
     "JobConfig",
@@ -75,17 +89,21 @@ __all__ = [
     "OrchestratorMetrics",
     "ProbeResult",
     "RetryError",
+    "RetryPolicy",
     "TradeRecord",
     "chunk_date_range",
     "chunk_days_for_symbol",
+    "default_retry_policy",
     "download_chunk",
     "format_brt_timestamp",
     "list_contracts",
     "month_from_letter",
     "month_letter",
     "parse_brt_timestamp",
+    "policy_from_env",
     "populate_contracts_from_seed",
     "probe_contract",
     "vigent_contract",
+    "with_circuit_breaker",
     "with_retry",
 ]

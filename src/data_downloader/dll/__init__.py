@@ -17,7 +17,22 @@ Stories que tocam este pacote DEVEM consultar Nelo via ``*consult nelo {pergunta
 
 from __future__ import annotations
 
-__all__ = ["ProfitDLL", "get_dll_version"]
+# Story 2.6 — re-export taxonomia para ergonomia.
+from data_downloader.dll.error_taxonomy import (
+    ErrorCategory,
+    NLErrorCategory,
+    categorize_nl,
+    is_retryable,
+)
+
+__all__ = [
+    "ErrorCategory",
+    "NLErrorCategory",
+    "ProfitDLL",
+    "categorize_nl",
+    "get_dll_version",
+    "is_retryable",
+]
 
 
 def get_dll_version() -> str:

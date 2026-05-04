@@ -26,9 +26,12 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import structlog
+
+if TYPE_CHECKING:
+    from data_downloader.orchestrator.retry_policy import RetryPolicy
 
 __all__ = [
     "DEFAULT_BASE_DELAY",
@@ -90,6 +93,7 @@ def with_retry(
     sleep_fn: Callable[[float], None] = time.sleep,
     random_fn: Callable[[], float] = random.random,
     op_name: str = "retry",
+    policy: RetryPolicy | None = None,
 ) -> T:
     """Executa ``fn()`` com retry exponencial em erros transientes.
 
@@ -126,6 +130,12 @@ def with_retry(
         Exception: Qualquer erro fatal (não em ``retryable_errors``) é
             re-raised imediatamente.
     """
+    # Story 2.6 — se ``policy`` é passada, delega tudo (params V1 são
+    # ignorados). A policy faz fail-fast em PERMANENT/UNKNOWN e re-raise
+    # a última exception em exhaustion (NÃO levanta RetryError).
+    if policy is not None:
+        return policy(fn, sleep_fn=sleep_fn, random_fn=random_fn, op_name=op_name)
+
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1; got {max_attempts}")
 

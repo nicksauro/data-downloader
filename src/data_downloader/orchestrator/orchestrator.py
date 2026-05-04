@@ -60,6 +60,10 @@ from data_downloader.observability.logging_config import (
     unbind_context,
 )
 from data_downloader.orchestrator.chunker import ChunkRange, chunk_date_range
+from data_downloader.orchestrator.circuit_breaker import (
+    CircuitBreaker,
+    CircuitOpenError,
+)
 from data_downloader.orchestrator.contracts import vigent_contract
 from data_downloader.orchestrator.download_primitive import (
     DEFAULT_TIMEOUT_SECONDS,
@@ -74,6 +78,7 @@ from data_downloader.orchestrator.retry import (
     RetryError,
     with_retry,
 )
+from data_downloader.orchestrator.retry_policy import RetryPolicy, default_retry_policy
 from data_downloader.orchestrator.state_machine import JobState, JobStateMachine
 from data_downloader.storage.catalog_models import Partition
 from data_downloader.storage.partition import PartitionKey
@@ -241,6 +246,8 @@ class Orchestrator:
         *,
         cleanup_orphans_on_start: bool = True,
         metrics_emitter: MetricsEmitter | None = None,
+        retry_policy: RetryPolicy | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self._dll = dll
         self._catalog = catalog
@@ -252,6 +259,19 @@ class Orchestrator:
         self._metrics: MetricsEmitter = (
             metrics_emitter if metrics_emitter is not None else NullMetricsEmitter()
         )
+        # Story 2.6 — RetryPolicy + CircuitBreaker injetados (Aria fronteira).
+        # Defaults garantem que callers existentes (Story 1.7a/1.7b) NÃO
+        # quebram em comportamento (apenas ganham retry inteligente +
+        # breaker ativo, documentado em CHANGELOG e docs/dev/RETRY_POLICY.md).
+        self._retry_policy: RetryPolicy = retry_policy or default_retry_policy()
+        # Breakers indexados por (symbol, exchange) — lazy-allocated em
+        # _process_chunk para suportar multi-symbol futuro (Epic 3).
+        # ``circuit_breaker`` injetado é usado como template
+        # (compartilha threshold/window/cooldown); cada (symbol, exchange)
+        # recebe seu próprio breaker stateful.
+        self._cb_template: CircuitBreaker | None = circuit_breaker
+        self._breakers: dict[tuple[str, str], CircuitBreaker] = {}
+        self._breakers_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public — run
@@ -696,8 +716,16 @@ class Orchestrator:
         )
 
         chunk_t0 = time.monotonic()
+        # Story 2.6 — obtém breaker para (symbol, exchange). Em OPEN,
+        # CircuitOpenError economiza retry inteiro + sleep.
+        breaker = self._get_breaker(contract_code, config.exchange)
 
         def _do_download() -> ChunkResult:
+            # Q02-E (Story 2.6 AC4): progress=99% reconnect NÃO levanta
+            # exception em download_chunk — retorna status='completed' OU
+            # status='timeout' (timeout duro). Apenas NL_* error codes
+            # reais ou TimeoutError contam como falha (categoria via
+            # taxonomy NL_*).
             result = download_chunk(
                 self._dll,
                 contract_code,
@@ -706,33 +734,68 @@ class Orchestrator:
                 chunk.end,
                 timeout=config.chunk_timeout_seconds,
             )
-            # Status timeout/failed da DLL é considerado retryable
-            # (transient — pode ser blip de rede ou DLL).
             if result.status == "timeout":
                 raise TimeoutError(
                     f"download_chunk timed out for {contract_code} " f"[{chunk.start}, {chunk.end}]"
                 )
             if result.status == "failed":
-                raise OSError(
+                # OSError carrega ``nl_code`` para o RetryPolicy classificar
+                # via taxonomia (TRANSIENT vs PERMANENT vs UNKNOWN).
+                err = OSError(
                     f"download_chunk failed (NL_{result.nl_error_code}) for "
                     f"{contract_code} [{chunk.start}, {chunk.end}]"
                 )
+                err.nl_code = result.nl_error_code  # type: ignore[attr-defined]
+                raise err
             return result
+
+        def _do_download_with_breaker() -> ChunkResult:
+            # breaker.call() aplica state machine: OPEN → CircuitOpenError
+            # imediato; HALF_OPEN/CLOSED → executa fn, conta result.
+            return breaker.call(_do_download)
 
         try:
             chunk_result = with_retry(
-                _do_download,
-                max_attempts=config.max_retry_attempts,
-                base_delay=config.retry_base_delay,
-                factor=config.retry_factor,
-                jitter=config.retry_jitter,
+                _do_download_with_breaker,
                 op_name=f"download_chunk[{contract_code}]",
+                policy=self._retry_policy,
             )
-        except RetryError as exc:
-            # Falha definitiva após todas as tentativas.
+        except CircuitOpenError as exc:
+            # Story 2.6 AC5 — breaker bloqueou. Registra gap com reason
+            # específico e segue (não aborta job; outros chunks podem
+            # completar). Counter chunks_completed_total{status=circuit_open}.
             metrics.chunks_failed += 1
             chunk_duration = time.monotonic() - chunk_t0
-            # Story 2.4 — métricas chunk failed (cool path, 1x por chunk).
+            self._metrics.incr_counter(
+                "chunks_completed_total",
+                labels={"symbol": contract_code, "status": "circuit_open"},
+            )
+            self._metrics.observe_histogram(
+                "chunk_duration_seconds",
+                chunk_duration,
+                labels={"symbol": contract_code},
+            )
+            self._catalog.register_gap(
+                symbol=contract_code,
+                exchange=config.exchange,
+                gap_start=chunk.start,
+                gap_end=chunk.end,
+                reason="failed_chunk",
+            )
+            log.warning(
+                "circuit_breaker.rejected",
+                job_id=job_id,
+                symbol=contract_code,
+                chunk_start=chunk.start.isoformat(),
+                chunk_end=chunk.end.isoformat(),
+                retry_after_seconds=round(exc.retry_after_seconds, 1),
+                failure_count=exc.failure_count,
+            )
+            return None
+        except RetryError as exc:
+            # Falha definitiva após todas as tentativas (V1 path).
+            metrics.chunks_failed += 1
+            chunk_duration = time.monotonic() - chunk_t0
             self._metrics.incr_counter(
                 "chunks_completed_total",
                 labels={"symbol": contract_code, "status": "failed"},
@@ -758,6 +821,45 @@ class Orchestrator:
                 chunk_end=chunk.end.isoformat(),
                 attempts=exc.attempts,
                 last_error=repr(exc.last_exception),
+            )
+            return None
+        except (OSError, TimeoutError) as exc:
+            # Story 2.6 — quando RetryPolicy é usada (caminho default),
+            # ela re-raise a última exception em vez de RetryError. Captura
+            # aqui mantém isolamento por chunk (não aborta job inteiro).
+            # PERMANENT/UNKNOWN também caem aqui (fail-fast pela policy).
+            metrics.chunks_failed += 1
+            chunk_duration = time.monotonic() - chunk_t0
+            self._metrics.incr_counter(
+                "chunks_completed_total",
+                labels={"symbol": contract_code, "status": "failed"},
+            )
+            self._metrics.observe_histogram(
+                "chunk_duration_seconds",
+                chunk_duration,
+                labels={"symbol": contract_code},
+            )
+            self._metrics.set_gauge("last_chunk_duration_seconds", chunk_duration)
+            nl_code = getattr(exc, "nl_code", None)
+            # NL_*-aware reason via taxonomy seria útil, mas o CHECK
+            # constraint do catalog limita a um set fechado (Story 1.5).
+            # Mantemos "failed_chunk" como bucket genérico — nl_code vai
+            # para log estruturado para forensics.
+            self._catalog.register_gap(
+                symbol=contract_code,
+                exchange=config.exchange,
+                gap_start=chunk.start,
+                gap_end=chunk.end,
+                reason="failed_chunk",
+            )
+            log.warning(
+                "orchestrator.chunk_failed",
+                job_id=job_id,
+                symbol=contract_code,
+                chunk_start=chunk.start.isoformat(),
+                chunk_end=chunk.end.isoformat(),
+                last_error=repr(exc),
+                nl_code=nl_code,
             )
             return None
 
@@ -910,6 +1012,31 @@ class Orchestrator:
             error=repr(exc),
             error_type=type(exc).__name__,
         )
+
+    def _get_breaker(self, symbol: str, exchange: str) -> CircuitBreaker:
+        """Obtém (lazy-create) o circuit breaker para (symbol, exchange).
+
+        Story 2.6 AC3 + AC5 — 1 breaker por par. Compartilha
+        threshold/window/cooldown do template injetado em ``__init__``,
+        ou usa defaults se nenhum template foi passado.
+        """
+        key = (symbol, exchange)
+        with self._breakers_lock:
+            existing = self._breakers.get(key)
+            if existing is not None:
+                return existing
+            if self._cb_template is not None:
+                breaker = CircuitBreaker(
+                    symbol=symbol,
+                    exchange=exchange,
+                    failure_threshold=self._cb_template.failure_threshold,
+                    window_seconds=self._cb_template.window_seconds,
+                    cooldown_seconds=self._cb_template.base_cooldown_seconds,
+                )
+            else:
+                breaker = CircuitBreaker(symbol=symbol, exchange=exchange)
+            self._breakers[key] = breaker
+            return breaker
 
     def _safe_dll_version(self) -> str:
         """Retorna ``dll.dll_version`` se atributo presente, senão ``"unknown"``.

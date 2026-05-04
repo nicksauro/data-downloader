@@ -229,6 +229,22 @@ def writer(data_dir: Path) -> ParquetWriter:
     return ParquetWriter(data_dir=data_dir)
 
 
+@pytest.fixture
+def fast_retry_policy() -> Any:
+    """Story 2.6 — RetryPolicy com delays quase zero para testes rápidos."""
+    from data_downloader.orchestrator.retry_policy import RetryPolicy
+
+    return RetryPolicy(
+        max_attempts_transient=3,
+        max_attempts_ambiguous=2,
+        base_delay_transient=0.001,
+        base_delay_ambiguous=0.001,
+        factor=1.0,
+        jitter=0.0,
+        max_delay=0.01,
+    )
+
+
 # =====================================================================
 # Happy path — 1 chunk
 # =====================================================================
@@ -327,12 +343,18 @@ def test_orchestrator_partial_when_one_chunk_fails(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """1º chunk falha (NL_*); 2º chunk OK → status='partial' + 1 gap."""
+    """1º chunk falha (NL_* TRANSIENT); 2º chunk OK → status='partial' + 1 gap.
+
+    Story 2.6 — usa código TRANSIENT (NL_INTERNAL_ERROR) para que a policy
+    default tente retry. Para velocidade de teste, injeta policy com delay
+    quase zero. Usa max_attempts=3 para conservar a forma do teste original.
+    """
+    from data_downloader.orchestrator.retry_policy import RetryPolicy
+
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 13, 17, 0, 0)
-    # Primeiro round retorna NL_* error em todas as 3 tentativas;
-    # segundo round retorna 4 trades.
-    fail_round = {"get_history_return": -2147483390}  # NL_INVALID_TICKER
+    # NL_INTERNAL_ERROR é TRANSIENT na taxonomia Nelo (Story 2.6).
+    fail_round = {"get_history_return": -2147483647}  # NL_INTERNAL_ERROR
     success_round = _round_with_n_trades(4, base=start.replace(day=9))
     dll = _FakeProfitDLL(rounds=[fail_round, fail_round, fail_round, success_round])
 
@@ -342,13 +364,15 @@ def test_orchestrator_partial_when_one_chunk_fails(
         start=start,
         end=end,
         chunk_timeout_seconds=5,
-        max_retry_attempts=3,
-        retry_base_delay=0.001,  # quase zero para teste rápido
-        retry_factor=1.0,
-        retry_jitter=0.0,
         resolve_contract=False,
     )
-    orch = Orchestrator(dll, catalog, writer)  # type: ignore[arg-type]
+    fast_policy = RetryPolicy(
+        max_attempts_transient=3,
+        base_delay_transient=0.001,
+        factor=1.0,
+        jitter=0.0,
+    )
+    orch = Orchestrator(dll, catalog, writer, retry_policy=fast_policy)  # type: ignore[arg-type]
     result = orch.run(config)
 
     assert result.status == "partial"
@@ -371,10 +395,16 @@ def test_orchestrator_failed_when_all_chunks_fail(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """Todos os 6 attempts falham (3 retries x 2 chunks) -> status='failed'."""
+    """Todos os 6 attempts falham (3 retries x 2 chunks) -> status='failed'.
+
+    Story 2.6 — usa código TRANSIENT + policy fast para reproduzir
+    comportamento de retry-then-fail.
+    """
+    from data_downloader.orchestrator.retry_policy import RetryPolicy
+
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 13, 17, 0, 0)
-    fail_round = {"get_history_return": -2147483390}
+    fail_round = {"get_history_return": -2147483647}  # NL_INTERNAL_ERROR (TRANSIENT)
     dll = _FakeProfitDLL(rounds=[fail_round] * 6)  # 2 chunks x 3 attempts
 
     config = JobConfig(
@@ -383,13 +413,15 @@ def test_orchestrator_failed_when_all_chunks_fail(
         start=start,
         end=end,
         chunk_timeout_seconds=5,
-        max_retry_attempts=3,
-        retry_base_delay=0.001,
-        retry_factor=1.0,
-        retry_jitter=0.0,
         resolve_contract=False,
     )
-    orch = Orchestrator(dll, catalog, writer)  # type: ignore[arg-type]
+    fast_policy = RetryPolicy(
+        max_attempts_transient=3,
+        base_delay_transient=0.001,
+        factor=1.0,
+        jitter=0.0,
+    )
+    orch = Orchestrator(dll, catalog, writer, retry_policy=fast_policy)  # type: ignore[arg-type]
     result = orch.run(config)
 
     assert result.status == "failed"
@@ -441,6 +473,7 @@ def test_orchestrator_cache_hit_when_range_fully_covered(
 def test_orchestrator_no_cache_hit_when_range_extends_beyond(
     catalog: Catalog,
     writer: ParquetWriter,
+    fast_retry_policy: Any,
 ) -> None:
     """Range que extrapola partições registradas NÃO é cache hit (finding H8)."""
     base = datetime(2026, 3, 2, 9, 0, 0)
@@ -453,7 +486,7 @@ def test_orchestrator_no_cache_hit_when_range_extends_beyond(
         chunk_timeout_seconds=10,
         resolve_contract=False,
     )
-    Orchestrator(dll1, catalog, writer).run(config1)  # type: ignore[arg-type]
+    Orchestrator(dll1, catalog, writer, retry_policy=fast_retry_policy).run(config1)  # type: ignore[arg-type]
 
     # Segundo run com range que se estende para abril.
     apr_base = datetime(2026, 4, 1, 9, 0, 0)
@@ -468,7 +501,7 @@ def test_orchestrator_no_cache_hit_when_range_extends_beyond(
         chunk_timeout_seconds=10,
         resolve_contract=False,
     )
-    result = Orchestrator(dll2, catalog, writer).run(config2)  # type: ignore[arg-type]
+    result = Orchestrator(dll2, catalog, writer, retry_policy=fast_retry_policy).run(config2)  # type: ignore[arg-type]
     # Não cache hit — abril não está em disco.
     assert result.status != "cache_hit"
 
