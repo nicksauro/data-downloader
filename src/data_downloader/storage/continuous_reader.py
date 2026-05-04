@@ -264,7 +264,14 @@ def read_continuous_with_rollover_metadata(
         # vigent_until é o último dia inclusivo (datetime à meia-noite no seed).
         # Para abranger o dia inteiro do vigent_until, somamos 24h-1ns.
         # Isso casa com a semântica "vigente DURANTE o dia vigent_until".
-        vigent_until_eod_ns = _to_ns(contract.vigent_until + timedelta(days=1)) - 1
+        # Story 4.2 — equities têm vigent_until=9999-12-31; +1d overflowa.
+        # Defensivo: clamp a datetime.max sem perder semântica (equity é
+        # sempre vigente até o fim do tempo expressável).
+        try:
+            vigent_until_eod_ns = _to_ns(contract.vigent_until + timedelta(days=1)) - 1
+        except OverflowError:
+            # Equity / vigência infinita — usa um upper-bound seguro.
+            vigent_until_eod_ns = _to_ns(datetime(9999, 12, 31, 23, 59, 59, 999_999))
         slice_end_ns_candidate = min(slice_end_ns_candidate, vigent_until_eod_ns)
         slice_end_ns_candidate = min(slice_end_ns_candidate, end_ns)
 

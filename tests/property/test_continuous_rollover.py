@@ -297,3 +297,128 @@ def test_contract_code_never_reverts() -> None:
             assert seen == ["WDOG26", "WDOH26", "WDOJ26"]
         finally:
             cat.close()
+
+
+# =====================================================================
+# Property 5 — WIN quarterly rollover H→M→U→Z (Story 4.2 AC4)
+# =====================================================================
+
+
+def _setup_four_win_contracts(
+    data_dir: Path,
+    *,
+    n_per_contract: int,
+) -> Catalog:
+    """Cria catalog com 4 WIN trimestrais 2026 (H/M/U/Z) + escreve trades.
+
+    Janelas trimestrais simplificadas (90 dias cada) para evitar
+    dependência da regra B3 exata (Q18-OPEN). Property test exercita
+    APENAS a integração `read_continuous` cross-trimestre — vigências
+    reais do seed são validadas em ``test_contracts_multi_asset.py``.
+    """
+    db_path = data_dir / "history" / "catalog.db"
+    cat = Catalog(db_path=db_path)
+    conn = cat._conn_or_raise()
+    with cat._transaction():
+        rows = [
+            ("WIN", "WINH26", "2026-01-01 00:00:00", "2026-03-31 00:00:00"),
+            ("WIN", "WINM26", "2026-04-01 00:00:00", "2026-06-30 00:00:00"),
+            ("WIN", "WINU26", "2026-07-01 00:00:00", "2026-09-30 00:00:00"),
+            ("WIN", "WINZ26", "2026-10-01 00:00:00", "2026-12-31 00:00:00"),
+        ]
+        for root, code, vf, vu in rows:
+            conn.execute(
+                "INSERT INTO contracts(symbol_root, contract_code, vigent_from, "
+                "vigent_until, validation_source) VALUES (?, ?, ?, ?, 'hypothesized')",
+                (root, code, vf, vu),
+            )
+
+    bases = [
+        (
+            PartitionKey(exchange="F", symbol="WINH26", year=2026, month=2),
+            "WINH26",
+            _to_ns(datetime(2026, 2, 15, 9, 0, 0)),
+        ),
+        (
+            PartitionKey(exchange="F", symbol="WINM26", year=2026, month=5),
+            "WINM26",
+            _to_ns(datetime(2026, 5, 15, 9, 0, 0)),
+        ),
+        (
+            PartitionKey(exchange="F", symbol="WINU26", year=2026, month=8),
+            "WINU26",
+            _to_ns(datetime(2026, 8, 15, 9, 0, 0)),
+        ),
+        (
+            PartitionKey(exchange="F", symbol="WINZ26", year=2026, month=11),
+            "WINZ26",
+            _to_ns(datetime(2026, 11, 15, 9, 0, 0)),
+        ),
+    ]
+    writer = ParquetWriter(data_dir=data_dir)
+    trade_id_counter = 0
+    for partition, code, base_ns in bases:
+        trades = [
+            _make_trade(
+                symbol=code,
+                ts_ns=base_ns + i * 1_000_000,
+                trade_id=trade_id_counter + i,
+            )
+            for i in range(n_per_contract)
+        ]
+        trade_id_counter += n_per_contract
+        writer.write(trades, partition, dll_version="4.0.0.34")
+    return cat
+
+
+@given(
+    n_per_contract=st.integers(min_value=2, max_value=10),
+)
+@settings(
+    max_examples=8,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_win_quarterly_rollover_concatenates_4_contracts(n_per_contract: int) -> None:
+    """Story 4.2 AC4 (P5) — WIN H/M/U/Z 26 concatenados sem dup nem perda.
+
+    Verifica:
+    - ``read_continuous("WIN", ano_inteiro)`` retorna ``4 * n`` trades.
+    - Sequência de contratos é H → M → U → Z (sem reversão).
+    - 3 rollover events (N-1 para N=4 contratos com dados).
+    - Sem duplicatas (timestamp_ns, _contract_code).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        data_dir = Path(td) / "data"
+        cat = _setup_four_win_contracts(data_dir, n_per_contract=n_per_contract)
+        try:
+            table = read_continuous(
+                "WIN",
+                datetime(2026, 1, 1),
+                datetime(2026, 12, 31, 23, 59, 59),
+                exchange="F",
+                catalog=cat,
+                data_dir=data_dir,
+            )
+
+            # Sem perdas: 4 contratos x n_per_contract.
+            assert table.num_rows == 4 * n_per_contract
+
+            # Ordem e monotonicidade dos contratos.
+            codes = table.column("_contract_code").to_pylist()
+            seen: list[str] = []
+            for c in codes:
+                if not seen or c != seen[-1]:
+                    seen.append(c)
+            assert seen == ["WINH26", "WINM26", "WINU26", "WINZ26"]
+
+            # 3 rollover events.
+            flags = table.column("_rollover_event").to_pylist()
+            assert sum(flags) == 3
+
+            # Sem duplicatas em (ts, code).
+            ts_list = table.column("timestamp_ns").to_pylist()
+            pairs = list(zip(ts_list, codes, strict=True))
+            assert len(pairs) == len(set(pairs))
+        finally:
+            cat.close()

@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04
+**Última atualização:** 2026-05-04 (Story 4.2 — adicionado Q18-OPEN: WIN H/M/U/Z calendar)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -34,6 +34,7 @@
 | [Q15-OPEN](#q15-open) | ❓ open | threading | Comportamento ConnectorThread quando `put_nowait` bloqueia (drop ou wait?) |
 | [Q16-VALIDATED](#q16-validated) | ✅ validated | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
 | [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
+| [Q18-OPEN](#q18-open) | ❓ open | history / contract calendar | Vigência exata WIN H/M/U/Z conforme regra B3 oficial (5º dia útil mês X-3 → quarta mais próxima 15/X)? |
 
 ---
 
@@ -380,6 +381,51 @@
   - `docs/decisions/COUNCIL-25-multi-symbol-broker-impl.md` D5 (decisão de assumir Hipótese A pessimista)
   - `docs/stories/4.1-followup.story.md` (probe humano em AC1.2)
   - `docs/qa/WAIVERS/4.1-real-smoke-deferred-2026-05-04.md` (WAIVER que cobre esta open question)
+
+---
+
+## Q18-OPEN
+
+- **ID:** Q18-OPEN
+- **Status:** ❓ open
+- **Categoria:** history / contract calendar
+- **Sintoma:** Pergunta: a vigência exata dos contratos WIN trimestrais
+  (H/M/U/Z) segue a regra B3 documentada — **vigente do 5º dia útil do
+  mês X-3 até a quarta-feira mais próxima do dia 15 do mês X** — em
+  todas as instâncias, ou há exceções por feriado / pregão estendido /
+  decisão B3?
+  - Hipótese A: Regra é determinística, todas as 8 entradas WIN no seed
+    `CONTRACTS.md` §3 (WINH26..WINZ27) estão corretas dentro de ±1 dia.
+  - Hipótese B: B3 muda calendário por feriado regional (Carnaval cai
+    em fev/mar — afeta WINH); regra documentada é aproximação.
+  - Hipótese C: Vigência efetiva é menor (último dia útil antes do
+    vencimento, não o vencimento — diferença ~3 dias úteis).
+- **Causa raiz:** desconhecida — Nelogica não documenta calendário de
+  vencimento WIN; B3 publica calendário oficial mas formato não-machine-readable.
+- **Evidência:** seed `CONTRACTS.md` §3 (Story 4.2) tem 8 entradas WIN
+  com `validation_source=hypothesized`. Nenhuma confirmada por probe.
+- **Workaround proposto (até probe):**
+  - Story 4.2 — manter seed com `hypothesized`; AC3 prevê probe humano
+    contra `WINH26 + 5 dias úteis` para validar primeira entrada.
+  - Operadores que precisam de WIN antes do probe: usar `vigent_contract`
+    com data dentro da janela hipotetizada; cross-check via DLL probe se
+    `NL_INVALID_TICKER` aparece.
+- **Probe proposto (humano + Nelo):**
+  1. Para cada vencimento WIN (H/M/U/Z 26/27): rodar
+     `data-downloader contracts validate --root WIN --year 2026` (Story 4.2 AC3).
+  2. Cross-check com calendário B3 oficial PDF (humano + Nova).
+  3. Atualizar `validation_source=dll_probe` ou `b3_calendar` quando
+     confirmado.
+- **Manual diz:** silencioso sobre calendário de vencimentos.
+- **Data descoberta:** 2026-05-04 (Story 4.2 mini-council COUNCIL-29).
+- **Aplica a stories:** 4.2 (multi-asset seed), 4.2-followup (smoke real
+  WIN+equity humano).
+- **Refs:**
+  - `docs/storage/CONTRACTS.md` §2.2 + §3 (regra hipotetizada + entries seed)
+  - `docs/decisions/COUNCIL-29-multi-asset-impl.md` (decisão de assumir
+    Hipótese A com `hypothesized` source até probe humano)
+  - `docs/qa/WAIVERS/4.2-real-smoke-deferred-2026-05-04.md` (WAIVER que
+    cobre esta open question)
 
 ---
 

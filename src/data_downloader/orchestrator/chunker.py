@@ -33,6 +33,7 @@ LEIS RESPEITADAS:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -43,9 +44,11 @@ from data_downloader.validation.calendar_b3 import b3_business_days_range
 __all__ = [
     "CHUNK_DAYS",
     "DEFAULT_EQUITY_CHUNK_DAYS",
+    "EQUITY_TICKER_RE",
     "ChunkRange",
     "chunk_date_range",
     "chunk_days_for_symbol",
+    "is_equity_ticker",
 ]
 
 
@@ -61,6 +64,16 @@ CHUNK_DAYS: Final[Mapping[str, int]] = {
 
 DEFAULT_EQUITY_CHUNK_DAYS: Final[int] = 1
 """Default para símbolos sem prefixo conhecido — equities (1 dia útil/chunk)."""
+
+
+# Regex para detecção determinística de equity B3 — convenção 4 letras +
+# 1 dígito (PETR4, VALE3, ITUB4, BBDC4, BBAS3, ABEV3, etc.). Story 4.2
+# (COUNCIL-29) adicionou para distinguir equities (chunk=1d, exchange=B) de
+# símbolos arbitrários sem prefixo conhecido (mesmo fallback de 1d, mas
+# sem garantia semântica). Equities NUNCA batem em CHUNK_DAYS porque seus
+# prefixos (PETR/VALE/...) não estão lá.
+EQUITY_TICKER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Z]{4}\d$")
+"""Regex canônica para tickers equity B3 (4 letras maiúsculas + 1 dígito)."""
 
 
 @dataclass(frozen=True)
@@ -82,20 +95,51 @@ class ChunkRange:
     end: datetime
 
 
+def is_equity_ticker(symbol: str) -> bool:
+    """Detecta ticker equity B3 via regex ``^[A-Z]{4}\\d$`` (Story 4.2).
+
+    Convenção B3 para tickers à vista: 4 letras maiúsculas + 1 dígito
+    indicando classe (ON=3, PN=4, UNT=11, etc.). Story 4.2 (COUNCIL-29)
+    formaliza este check para o chunker e contracts probe.
+
+    Args:
+        symbol: Código a testar (ex.: ``"PETR4"``, ``"WDOJ26"``).
+
+    Returns:
+        True sse ``symbol`` casa com :data:`EQUITY_TICKER_RE`.
+
+    Examples:
+        >>> is_equity_ticker("PETR4")
+        True
+        >>> is_equity_ticker("WDOJ26")
+        False
+        >>> is_equity_ticker("VALE3")
+        True
+        >>> is_equity_ticker("WINH26")
+        False
+    """
+    return bool(EQUITY_TICKER_RE.fullmatch(symbol))
+
+
 def chunk_days_for_symbol(
     symbol: str,
     *,
     chunk_days_map: Mapping[str, int] | None = None,
     default_equity: int = DEFAULT_EQUITY_CHUNK_DAYS,
 ) -> int:
-    """Resolve dias úteis por chunk para um símbolo via prefixo.
+    """Resolve dias úteis por chunk para um símbolo via prefixo OU regex equity.
 
-    Procura o prefixo mais longo em ``chunk_days_map`` (ou :data:`CHUNK_DAYS`
-    default) que corresponde ao início de ``symbol``. Se nenhum bate,
-    retorna ``default_equity``.
+    Ordem de resolução (Story 4.2 COUNCIL-29):
+
+    1. Match longest prefix em ``chunk_days_map`` (ou :data:`CHUNK_DAYS`).
+    2. Se nenhum bate E ``is_equity_ticker(symbol)`` → ``default_equity``
+       (semântica explícita: equity B3).
+    3. Senão → ``default_equity`` (fallback conservador para símbolos
+       desconhecidos — mantém comportamento histórico).
 
     Args:
-        symbol: Código do contrato (e.g. ``"WDOJ26"`` → prefixo ``"WDO"``).
+        symbol: Código do contrato (e.g. ``"WDOJ26"`` → prefixo ``"WDO"``,
+            ou ``"PETR4"`` → equity).
         chunk_days_map: Override do mapa default. Se ``None``, usa
             :data:`CHUNK_DAYS`.
         default_equity: Fallback quando nenhum prefixo bate (default 1).
@@ -108,6 +152,9 @@ def chunk_days_for_symbol(
     for prefix in sorted(table, key=len, reverse=True):
         if symbol.startswith(prefix):
             return table[prefix]
+    # Story 4.2 — equity tickers (PETR4 etc.) não batem em CHUNK_DAYS;
+    # caem no default_equity. is_equity_ticker é exposto para callers que
+    # precisam distinguir "equity confirmado" de "símbolo desconhecido".
     return default_equity
 
 

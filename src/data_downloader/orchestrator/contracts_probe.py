@@ -199,10 +199,20 @@ def probe_contract(
 def _resolve_sample_date(catalog: Catalog, contract_code: str) -> date:
     """Resolve ``sample_date`` default = ``vigent_from + 1 dia``.
 
+    Story 4.2 (COUNCIL-29) — equity tickers (``vigent_from=1900-01-01``)
+    são detectados via :func:`is_equity_ticker` e usam ``today() - 7d``
+    como sample (vigência infinita não tem ponto canônico de probe).
+
     Se nenhuma linha em ``contracts`` para ``contract_code``, fallback
     para ``date.today() - 7 dias``. Não levanta — probe ad-hoc é caso
     válido durante onboarding de novo contrato.
     """
+    from data_downloader.orchestrator.chunker import is_equity_ticker
+
+    # Equity: vigência infinita não dá ponto canônico — usa today-7d.
+    if is_equity_ticker(contract_code):
+        return date.today() - timedelta(days=7)
+
     conn = catalog._conn_or_raise()
     row = conn.execute(
         "SELECT vigent_from FROM contracts WHERE contract_code = ? LIMIT 1",

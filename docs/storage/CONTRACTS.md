@@ -1,8 +1,8 @@
 # CONTRACTS.md — Mapa de Contratos Vigentes
 
 **Owner:** 💾 Sol (Storage Engineer), em consulta a 🗝️ Nelo (DLL probe) e fonte oficial Nelogica/B3.
-**Versão:** v1.0.0 (seed inicial — todos contratos com `validated_at: null`)
-**Status:** SEED (será validado contra DLL na Story 1.6)
+**Versão:** v1.1.0 (Story 4.2 — expansão multi-asset WIN H/M/U/Z + equities)
+**Status:** SEED (validado contra DLL nas Stories 1.6 [WDO] e 4.2 [WIN+equities])
 
 ---
 
@@ -59,12 +59,17 @@ Hipótese de vigência:
 
 **Status:** `hypothesized`. Validar via probe + cross-check com calendário B3.
 
-### 2.3 Equities (PETR4, VALE3, ITUB4, ...)
+### 2.3 Equities (PETR4, VALE3, ITUB4, BBDC4, BBAS3, ABEV3, ...)
 
 - Não têm vencimento (papel à vista).
 - Convenção: `vigent_from = 1900-01-01`, `vigent_until = 9999-12-31`.
 - `validation_source = manual` desde que o ticker exista no momento.
+- **Exchange = `B` (Bovespa)** — sempre. Lei R8 / Q05-V: BMF (`F`)
+  retorna `NL_EXCHANGE_UNKNOWN` para equities.
 - Ressalva: tickers podem mudar (split, fusão). Sol não rastreia mudança de ticker — quando isso acontece, abre nova entrada.
+- `read_continuous("PETR4", ...)` é caso degenerado: 1 contrato vigente
+  cobrindo todo o range = idêntico a `read_history("PETR4", ...)`.
+  Story 4.2 AC4 cobre teste de propriedade (equity = idempotente).
 
 ### 2.4 Outros futuros (DOL, IND, contratos cheios)
 
@@ -116,8 +121,13 @@ contracts:
   # Adicionar futuros distantes pollui o catálogo e gera ruído em integrity-check.
 
   # =====================================================================
-  # WIN — Mini Índice (trimestral)
+  # WIN — Mini Índice (trimestral H/M/U/Z)
   # =====================================================================
+  # Story 4.2 (COUNCIL-29) — expandido para 8 contratos (2026 + 2027)
+  # cobrindo o ano-calendário completo trimestral. Vigências hipotéticas
+  # baseadas na regra B3: vigente do quinto dia útil do mês {X-3} até a
+  # quarta-feira mais próxima do dia 15 do mês {X}. Validação exata via
+  # probe DLL (Story 4.2 AC3) — Q-OPEN registrado em QUIRKS.md.
 
   - symbol_root: WIN
     contract_code: WINH26
@@ -125,7 +135,7 @@ contracts:
     vigent_until: 2026-03-18  # quarta-feira mais próxima de 15/mar/26
     validated_at: null
     validation_source: hypothesized
-    notes: "Março/26. Trimestral. Validar via probe Story 1.6."
+    notes: "Março/26. Trimestral. Validar via probe Story 4.2."
 
   - symbol_root: WIN
     contract_code: WINM26
@@ -133,11 +143,62 @@ contracts:
     vigent_until: 2026-06-17  # quarta-feira mais próxima de 15/jun/26
     validated_at: null
     validation_source: hypothesized
-    notes: "Junho/26. Trimestral. Validar via probe Story 1.6."
+    notes: "Junho/26. Trimestral. Validar via probe Story 4.2."
+
+  - symbol_root: WIN
+    contract_code: WINU26
+    vigent_from: 2026-06-17
+    vigent_until: 2026-09-16  # quarta-feira mais próxima de 15/set/26
+    validated_at: null
+    validation_source: hypothesized
+    notes: "Setembro/26. Trimestral. Validar via probe Story 4.2."
+
+  - symbol_root: WIN
+    contract_code: WINZ26
+    vigent_from: 2026-09-16
+    vigent_until: 2026-12-16  # quarta-feira mais próxima de 15/dez/26
+    validated_at: null
+    validation_source: hypothesized
+    notes: "Dezembro/26. Trimestral. Validar via probe Story 4.2."
+
+  - symbol_root: WIN
+    contract_code: WINH27
+    vigent_from: 2026-12-16
+    vigent_until: 2027-03-17  # quarta-feira mais próxima de 15/mar/27
+    validated_at: null
+    validation_source: hypothesized
+    notes: "Março/27. Trimestral. Buffer 1 ano. Validar via probe Story 4.2."
+
+  - symbol_root: WIN
+    contract_code: WINM27
+    vigent_from: 2027-03-17
+    vigent_until: 2027-06-16  # quarta-feira mais próxima de 15/jun/27
+    validated_at: null
+    validation_source: hypothesized
+    notes: "Junho/27. Trimestral. Buffer. Validar via probe Story 4.2."
+
+  - symbol_root: WIN
+    contract_code: WINU27
+    vigent_from: 2027-06-16
+    vigent_until: 2027-09-15  # quarta-feira mais próxima de 15/set/27
+    validated_at: null
+    validation_source: hypothesized
+    notes: "Setembro/27. Trimestral. Buffer. Validar via probe Story 4.2."
+
+  - symbol_root: WIN
+    contract_code: WINZ27
+    vigent_from: 2027-09-15
+    vigent_until: 2027-12-15  # quarta-feira mais próxima de 15/dez/27
+    validated_at: null
+    validation_source: hypothesized
+    notes: "Dezembro/27. Trimestral. Buffer. Validar via probe Story 4.2."
 
   # =====================================================================
   # Equities (à vista — sem vencimento)
   # =====================================================================
+  # Story 4.2 (COUNCIL-29) — expandido para 6 tickers líquidos B3
+  # (Bovespa "B"). Sem rollover — read_continuous para equity é o caso
+  # degenerado (single contrato vigente do epoch ao infinito).
 
   - symbol_root: PETR4
     contract_code: PETR4
@@ -145,7 +206,7 @@ contracts:
     vigent_until: 9999-12-31
     validated_at: null
     validation_source: manual
-    notes: "Petrobras PN. Papel à vista, sem vencimento."
+    notes: "Petrobras PN. Papel à vista, sem vencimento. Bovespa (B)."
 
   - symbol_root: VALE3
     contract_code: VALE3
@@ -153,8 +214,61 @@ contracts:
     vigent_until: 9999-12-31
     validated_at: null
     validation_source: manual
-    notes: "Vale ON. Papel à vista, sem vencimento."
+    notes: "Vale ON. Papel à vista, sem vencimento. Bovespa (B)."
+
+  - symbol_root: ITUB4
+    contract_code: ITUB4
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Itaú Unibanco PN. Papel à vista. Bovespa (B). Story 4.2."
+
+  - symbol_root: BBDC4
+    contract_code: BBDC4
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Bradesco PN. Papel à vista. Bovespa (B). Story 4.2."
+
+  - symbol_root: BBAS3
+    contract_code: BBAS3
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Banco do Brasil ON. Papel à vista. Bovespa (B). Story 4.2."
+
+  - symbol_root: ABEV3
+    contract_code: ABEV3
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Ambev ON. Papel à vista. Bovespa (B). Story 4.2."
 ```
+
+---
+
+## 3.1 Asset class mapping (Story 4.2 AC1)
+
+Tabela canônica `symbol_root → asset_class` consumida por `chunker.py`
+(`chunk_days_for_symbol`) para determinar dias úteis por chunk:
+
+| symbol_root prefix          | asset_class | chunk_days B3 | Justificativa Q12-E      |
+|-----------------------------|-------------|---------------|--------------------------|
+| `WDO*`                      | future_mini | 5             | Mini dólar (alta vazão)  |
+| `WIN*`                      | future_mini | 5             | Mini índice (alta vazão) |
+| `IND*`                      | future_full | 5             | Índice cheio             |
+| `DOL*`                      | future_full | 5             | Dólar cheio              |
+| Equity (regex `^[A-Z]{4}\d$`) | equity      | 1             | Vazão menor; granularidade fina |
+| Outros                      | unknown     | 1 (fallback)  | Conservador              |
+
+A detecção é por **prefixo** (longest match wins), exceto equities, que
+respeitam a regex `^[A-Z]{4}\d$` (4 letras + 1 dígito — convenção B3
+para tickers à vista). Equities sempre usam exchange `B` (Bovespa, R8 /
+Q05-V) — nunca `F`. Futuros sempre usam exchange `F` (BMF).
 
 > Datas de vigência acima são aproximações com base em regras hipotetizadas. Antes de qualquer download de produção contra contrato com `validated_at = null`, a Story 1.6 deve correr o probe e atualizar.
 
