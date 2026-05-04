@@ -353,6 +353,38 @@ recomendações não-vinculantes (sign-off oficial).
 
 ---
 
+## Story 2.1 — Data integrity validators como código (subpacote validation/)
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.1.story.md`                          |
+| **commit auditado**    | (preenchido após commit)                             |
+| **owner**              | Sol+Quinn (modo autônomo, claude-opus-4-7)           |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (Sol+Quinn co-owners)     |
+| **report path**        | `docs/qa/QA_REPORTS/2.1-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.1-storage-2026-05-04.md` (Sol APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs INTEGRITY.md §1/§2/§5; queries DuckDB **bit-a-bit canônicas** vs INTEGRITY.md §2 (auditado por Sol §3.2) |
+| 2. Unit tests        | PASS      | 37 passed em 6.07s; cobertura `validation` **89.20%** (>= 80%) |
+| 3. Acceptance criteria | PASS    | 10/10 ACs (6 literal + 4 revised via mini-council Sol+Quinn — escopo refinado preservando intent) |
+| 4. No regressions    | PASS      | 297 passed, 4 skipped, 0 failed em `pytest tests/` (+37 testes ao total) |
+| 5. Performance       | PASS      | DuckDB queries com pruning `WHERE timestamp_ns BETWEEN`; iteração linear OK |
+| 6. Security          | PASS      | Sem credenciais; SQL parametrizado; sem `eval`/`exec` |
+| 7. Documentation     | PASS      | COUNCIL-04 documenta dep `pandas`; audit Sol APPROVED; File List completa |
+
+### Verdict
+
+**PASS** — Story 2.1 fechada. Status `Draft` → **Done**.
+
+**Esta gate FECHA Epic 1 finding C4** (validators existem como código,
+não em palpite).
+
+---
+
 ## Resumo consolidado (gates 2026-05-04)
 
 | Story | Owner | Commit  | Verdict | LOW | MED | HIGH | CRIT | Report |
@@ -363,11 +395,15 @@ recomendações não-vinculantes (sign-off oficial).
 | 1.5   | Dex+Sol | d1fb2e0 | PASS    | 7   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.5-2026-05-04.md` |
 | 1.4.5 | Pyro  | 550ea2c | PASS    | 6   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.4.5-2026-05-04.md` |
 | 1.3   | Dex+COUNCIL-03 | beac226 | PASS    | 7   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.3-2026-05-04.md` |
+| 2.1   | Sol+Quinn | (TBD) | PASS    | 4   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/2.1-2026-05-04.md` |
 
-**Total:** 6 stories passadas pelo gate em 2026-05-04. 6 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
+**Total:** 7 stories passadas pelo gate em 2026-05-04. 7 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
 
-**Total findings acumulados:** 32 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
-com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.1, 2.X, DevOps).
+**Total findings acumulados:** 36 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
+com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.X, DevOps).
+
+**Story 2.1 fecha Epic 1 finding C4** (validators executáveis em código real
+— `data-downloader integrity check` + `integrity validate-data`).
 
 **Story 1.5 fecha F-M-1 da Story 1.4** (catálogo SQLite ausente). F-M-2
 (`sha256_self` no metadata Parquet) permanece deferred para Story 2.X.
@@ -380,6 +416,13 @@ perf-write-optimization a ser criada por Morgan (PM).
 (R10/Q13-V + trade_id real + TC_LAST_PACKET autoritativo). Primeira
 fronteira `orchestrator/` ↔ `dll/` desenhada e validada — desbloqueia
 Story 1.7a (orchestrator multi-chunk).
+
+**COUNCIL-04 ratificado em 2.1** (Sol+Aria+Quinn mental) — `pandas>=2.0`
+adicionado como dep transversal para business-days B3 + classificação
+de gap. Implementação V1 hardcoded em `validation/calendar_b3.py`
+(2025-2026 cobertos); pandas fica como dep formal para integração
+futura com `holidays.dat` Nelogica + property tests com `pd.bdate_range`
+como oracle.
 
 ---
 
