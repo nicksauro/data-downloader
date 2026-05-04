@@ -446,6 +446,139 @@ agora resolver `WDO` → `WDOJ26` via `vigent_contract` ANTES de chamar
 
 ---
 
+## Story 1.5b — read_continuous + queries DuckDB canônicas + property tests rollover
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/1.5b.story.md`                         |
+| **commit auditado**    | `3c8210c`                                            |
+| **owner**              | Dex (dev) — modo autônomo (mini-council Sol+Quinn+Aria) |
+| **gatekeeper**         | Quinn (qa) — modo autônomo                           |
+| **report path**        | `docs/qa/QA_REPORTS/1.5b-2026-05-04.md`              |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/1.5b-storage-2026-05-04.md` (Sol APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs (QUERIES.md §2/§6, CONTRACTS.md §6.1, ADR-002/004/007a, COUNCIL-06). Convenção `_prefix` para metadata derivada (`_contract_code`, `_rollover_event`). Deferred imports em `public_api/history.py` (evita circular). `Catalog` kw-only obrigatório (caller gerencia lifecycle). |
+| 2. Unit tests        | PASS      | **27 testes novos** (12 unit + 4 property Hypothesis + 11 integration). 4 property invariants críticas: no-duplicates-at-rollover, monotonic-ordering, chunking-invariance, contract-code-never-reverts. |
+| 3. Acceptance criteria | PASS    | **10/10 ACs** (8 literal + 2 revisados-conscientes; AC9 deferred opcional sem regressão). |
+| 4. No regressions    | PASS      | 324 passed + 1 skipped no commit `3c8210c` (+27 vs 297 da Story 2.1). HEAD `65f6930` (após 1.7a): 390 passed + 1 skipped. 0 failed. |
+| 5. Performance       | PASS      | Cobertura `continuous_reader` 94%, `history` 93% (>= 80%). Sort cross-contract via `pa.sort_by` (cool path — F-S-1 trackeia refactor para `UNION ALL` em Story 2.X via Pyro bench). |
+| 6. Security          | PASS      | Sem credenciais. SQL parametrizado (DuckDB `?` placeholders). Deferred imports evitam exposição acidental de internals via re-export. |
+| 7. Documentation     | PASS      | File List completa. Dev Agent Record completo. COUNCIL-06 documenta política de rollover (3 opções + sign-off Sol/Aria). QUERIES.md (Sol owner) validado pela implementação. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | n/a              | Story 1.5b NÃO toca DLL (leitura pura de Parquet/SQLite).                                              |
+| Sol (storage)   | **APPROVED**     | 5-checklist: schema_change_review (N/A — não muda schema), storage_pr_review (idempotência leitura PURA, append-only N/A), contract_validation (consume-mode), continuous_reader_design_review (5 itens custom — `_contract_code` PASS, cut-off `+1ns` PASS, deferred imports PASS), contract_resolution_via_catalog. 6 LOW (F-S-1..F-S-6) — todos tracking Story 2.X/4.X. Path: `docs/qa/AUDIT_REPORTS/1.5b-storage-2026-05-04.md`. |
+| Aria (design)   | APPROVED implícito | Sign-off mental Aria documentado em COUNCIL-06 (item 3 "Justificativa"). `__api_version__` bump aditivo conforme ADR-007a; assinatura `read_continuous` em `public_api/` validada. Decisão "módulo separado" (não método em `duckdb_reader.py`) é design interno. |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 6     | F-Q-1 (sort via Arrow vs DuckDB UNION ALL — Story 2.X) / F-Q-2 (`_contract_code` vs `_source_symbol` em QUERIES.md) / F-Q-3 (`_to_ns` duplicado — extrair) / F-Q-4 (empty table vs NoVigentContractError) / F-Q-5 (`glob.recursive` em hot path — Story 4.X) / F-Q-6 (`columns=` apenas declarativo) — todos com tracking |
+| INFO      | 1     | F-Q-7 (AC9 reconcile flag deferred consciente — COUNCIL-06)                                          |
+
+### Verdict
+
+**PASS** — Story 1.5b fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate FECHA finding M16** (PLAN_REVIEW 2026-05-03) e
+**desbloqueia consumers downstream** (backtest, signal generator,
+risk monitor) via `data_downloader.public_api.read_continuous`.
+
+**Próximo passo desbloqueado:**
+- **Story 1.7b (CLI smoke MVP)** — pode usar `read_continuous`
+  para validar dataset baixado end-to-end com WDOH26+WDOJ26
+  reais (rollover real fim-de-março).
+- **Story 4.X (backtest integration)** — fronteira pública
+  estável pronta.
+
+---
+
+## Story 1.7a — Orchestrator core (chunker + retry + state machine + integração 1.3/1.5/1.6)
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/1.7a.story.md`                         |
+| **commit auditado**    | `65f6930`                                            |
+| **owner**              | Dex (dev) — modo autônomo (COUNCIL-05 Dex+Aria+Pyro+Sol mental) |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Aria+Quinn) |
+| **report path**        | `docs/qa/QA_REPORTS/1.7a-2026-05-04.md`              |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/1.7a-design-2026-05-04.md` (Aria APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs (ADR-005 + amendments 2026-05-03 e 2026-05-04 FAILED, ADR-007a/010/011/013, INV-1/3/4/5/6/11/12, R3/R5/R8/R21, COUNCIL-05 D1-D9). 4 módulos novos (state_machine 210L, chunker 145L, retry 165L, orchestrator 620L) + `__init__.py` re-exports. Helpers privados com `_prefix`. TYPE_CHECKING-only para DLL/Catalog/Writer (runtime injection). |
+| 2. Unit tests        | PASS      | **66 testes novos** (16 state_machine + 24 chunker incluindo 3 property + 12 retry + 12 integration + 2 property idempotency E2E). Hypothesis valida: chunks cobrem business days, no-overlap, no-gap, idempotência E2E. |
+| 3. Acceptance criteria | PASS    | **10/10 ACs** (8 literal + AC8/AC9 consolidados em `test_orchestrator.py` por decisão consciente Dex+Aria — cobertura equivalente, redução de duplicação). |
+| 4. No regressions    | PASS      | HEAD `65f6930`: **390 passed + 1 skipped** em 199.40s (Python 3.14). +66 vs 324 da Story 1.5b. 0 failed. |
+| 5. Performance       | PASS      | Cobertura empírica ~95%+ nos 4 arquivos novos. **Cobertura formal `--cov` BLOQUEADA** por incompatibilidade duckdb 1.x x Python 3.14 (validation/__init__.py falha em coverage hook). Dívida F-Q-1 (LOW) explicitamente não-bloqueante autorizada pelo escopo da story. Tracking: Story 2.X (DevOps/Pyro). |
+| 6. Security          | PASS      | Sem credenciais. SQL parametrizado (Catalog). Sem `eval`/`exec`. Logs estruturados sem args sensíveis (R3+ADR-010). Deferred imports/TYPE_CHECKING evita exposição interna. |
+| 7. Documentation     | PASS      | File List completa (4 source novos + 5 test files novos + COUNCIL-05). Dev Agent Record completo. **COUNCIL-05 documenta D1-D9** com sign-off mental Aria/Pyro/Sol. **ADR-005 amendment v2 (2026-05-04) ratifica estado FAILED** via mini-council Aria+Dex nesta gate (nova seção em ADR-005-thread-model.md). |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | APPROVED implícito | Story 1.7a NÃO toca `dll/` — consume-mode sobre `download_chunk` (Story 1.3 Nelo APPROVED). Tradução `status==timeout/failed → retryable exception` é decisão consciente (COUNCIL-05 §D5). |
+| Sol (storage)   | APPROVED implícito | Story 1.7a NÃO toca `storage/` — consume-mode sobre `ParquetWriter` (Story 1.4), `Catalog` (Story 1.5), `vigent_contract` (Story 1.6) — todas APPROVED por Sol. `register_partition` UPSERT idempotente garantido. |
+| Aria (design)   | **APPROVED**     | 11-pt `design_review` checklist PASS. State machine ADR-005 amendment fielmente implementada + estado FAILED extra ratificado em ADR-005 amendment v2 (2026-05-04, mini-council Aria+Dex). COUNCIL-05 D1-D9 todos PASS. INV-11/INV-12 preservadas. Cache hit range coverage REAL (H8). correlation_id=job_id (L2). 5 findings (3 LOW + 2 INFO) — design refinements V2/docs. Path: `docs/qa/AUDIT_REPORTS/1.7a-design-2026-05-04.md`. |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 4     | F-Q-1 (cobertura `--cov` bloqueada por duckdb x Python 3.14 — dívida não-bloqueante Story 2.X) / F-Q-2 (`_handle_fatal_error` 2-hop não-atômico — Story 2.X método `fail_and_idle`) / F-Q-3 (`callbacks_received` naming engana — Story 2.X) / F-Q-4 (resume path expansão por mês — otimização Story 2.X) — todos com tracking |
+| INFO      | 3     | F-Q-5 (cache hit pula state machine — ADR-005 v3 ou refactor 2.X) / F-Q-6 (`OrchestratorMetrics` mutável em `JobResult` frozen — Story 1.7b documentar) / F-Q-7 (cosmético — suite 390 vs estimativa 480) |
+
+### Verdict
+
+**PASS** — Story 1.7a fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate FECHA findings C10/H8/H11/L2/R21** (PLAN_REVIEW
+2026-05-03):
+- **C10** — escopo separado de 1.7a (core) vs 1.7b (CLI/smoke).
+- **H8** — cache hit é range coverage REAL (granularidade mensal).
+- **H11** — state machine elimina race no shutdown
+  (DRAINING_DLL → DRAINING_WRITE → COMMITTED só após drain+commit).
+- **L2** — correlation_id = job_id em todo log structlog.
+- **R21** — per-chunk logging OK; per-trade NÃO emitido.
+
+**Mini-council Aria+Dex (FAILED state) APROVADO** — formalizado
+em ADR-005 amendment v2 (2026-05-04) nesta gate. Estado terminal
+alternativo legítimo, alcançável de RUNNING/DRAINING_*/com cleanup
+unificado via `force_idle()`.
+
+**Esta gate desbloqueia Story 1.7b (CLI smoke MVP gate Epic 1)** —
+CLI typer + public_api facade `Downloader` + smoke real contra
+DLL podem ser implementados sobre o `Orchestrator.run` core.
+
+**Próximo passo desbloqueado:**
+- **Story 1.7b (CLI MVP + smoke real)** — `Downloader` facade em
+  `public_api/download.py` envolve `Orchestrator.run`; CLI typer
+  expõe `data-downloader download WDO --start ... --end ...`;
+  smoke real com creds Nelogica + WDOJ26.
+- **Story 2.X (Pyro perf-write-optimization + DevOps tooling)** —
+  `OrchestratorMetrics` para baseline; resolução de F-Q-1 (cobertura
+  `--cov` bloqueada por duckdb x Python 3.14).
+- **Story 2.X (refinamentos state machine)** — F-Q-2/F-Q-3/F-Q-4.
+
+---
+
 ## Resumo consolidado (gates 2026-05-04)
 
 | Story | Owner | Commit  | Verdict | LOW | INFO | MED | HIGH | CRIT | Report |
@@ -458,11 +591,13 @@ agora resolver `WDO` → `WDOJ26` via `vigent_contract` ANTES de chamar
 | 1.3   | Dex+COUNCIL-03 | beac226 | PASS    | 7   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.3-2026-05-04.md` |
 | 2.1   | Sol+Quinn | (TBD) | PASS    | 4   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/2.1-2026-05-04.md` |
 | 1.6   | Dex+COUNCIL-07 mini | 4f28b41 | PASS    | 5   | 5    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.6-2026-05-04.md` |
+| 1.5b  | Dex+COUNCIL-06 mini | 3c8210c | PASS    | 6   | 1    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.5b-2026-05-04.md` |
+| 1.7a  | Dex+COUNCIL-05 mini + ADR-005 v2 | 65f6930 | PASS    | 4   | 3    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.7a-2026-05-04.md` |
 
-**Total:** 8 stories passadas pelo gate em 2026-05-04. 8 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
+**Total:** 10 stories passadas pelo gate em 2026-05-04. 10 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
 
-**Total findings acumulados:** 41 LOW + 5 INFO + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
-com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.X, DevOps).
+**Total findings acumulados:** 51 LOW + 9 INFO + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
+com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.X, 4.X, DevOps).
 
 **Story 2.1 fecha Epic 1 finding C4** (validators executáveis em código real
 — `data-downloader integrity check` + `integrity validate-data`).
@@ -499,6 +634,36 @@ custom** em vez de PyYAML — funciona para o subset atual (escalares
 string em mapping de 1 nível); migração para PyYAML fica trackeada
 quando schema do seed evoluir. Documento completo em
 `docs/decisions/COUNCIL-07-contracts-design-decisions.md`.
+
+**COUNCIL-06 ratificado em 1.5b** (Dex+Sol+Aria mental) —
+política de rollover **`vigent_until + 1 ns` (cut-off
+determinístico)** escolhida como default V1 entre 3 opções
+(vigent_until / first_trade / liquidity_crossover). Justificativa:
+zero overlap garantido por construção, alinha com QUERIES.md §2.2,
+determinismo é requisito SemVer (ADR-007a). Opções B/C
+documentadas como TODOs Story 4.X (analytics de liquidez).
+Documento completo em `docs/decisions/COUNCIL-06-rollover-policy-vigent-until.md`.
+
+**COUNCIL-05 ratificado em 1.7a** (Dex+Aria+Pyro+Sol mental) —
+9 decisões upfront do orchestrator core: D1 state machine
+(ADR-005 amendment + extensão FAILED), D2 queue 100k (já em
+download_primitive Story 1.3), D3 métricas via structlog V1
+(Prometheus V2 ADR-013 deferred), D4 chunking 5d futuros mini /
+1d equity, D5 retry 3 tentativas exponencial+jitter, D6 resume
+via `Catalog.resume_job` (Story 1.5 API), D7 cache hit range
+coverage REAL (granularidade mensal — fecha H8), D8 correlation_id
+= job_id (fecha L2), D9 logging events canônicos per-chunk
+(R21 OK). Documento completo em
+`docs/decisions/COUNCIL-05-orchestrator-core-design.md`.
+
+**ADR-005 amendment v2 (2026-05-04) — FAILED state** ratificado
+em 1.7a (mini-council Aria+Dex). Estado terminal alternativo
+formalizado, alcançável de RUNNING/DRAINING_DLL/DRAINING_WRITE,
+com cleanup unificado via `force_idle()`. Sign-off Aria. Resolve
+ambiguidade "DrainingDLL_TimedOut/DrainingWrite_TimedOut" do
+amendment original. Documento atualizado em
+`docs/adr/ADR-005-thread-model.md` (nova seção "Amendment
+2026-05-04 — FAILED state").
 
 ---
 

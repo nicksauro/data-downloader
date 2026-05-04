@@ -308,3 +308,121 @@ class JobStateMachine:
 ### Atualização de invariantes globais
 
 ARCHITECTURE.md §4 ganha INV-11 e INV-12 (este amendment). Aria editará separadamente.
+
+---
+
+## Amendment 2026-05-04 — FAILED state (terminal alternativo)
+
+**Autor:** 🏛️ Aria (mini-council Aria+Dex)
+**Origem:** Story 1.7a implementação — Dex adicionou `FAILED` como
+terminal alternativo a `COMMITTED`. Aria avaliou e ratificou via
+audit `*review-design 1.7a` (`docs/qa/AUDIT_REPORTS/1.7a-design-2026-05-04.md`).
+**Related:** ADR-005 amendment 2026-05-03 (state machine de shutdown).
+
+### Problema endereçado
+
+O amendment de 2026-05-03 desenhou o happy-path
+`Idle → Running → DrainingDLL → DrainingWrite → Committed → Idle`
+mas NÃO formalizou o caminho de erro. Em produção, um chunk pode
+falhar definitivamente após esgotar retries, ou o catálogo SQLite
+pode rejeitar um commit (disk full, schema mismatch). Sem estado
+explícito de erro, o orchestrator ficava em estado ambíguo entre
+`Running` e `Committed` quando algo falhava antes do drain final.
+
+### Decisão
+
+Adicionar **`FAILED`** como estado terminal alternativo a
+`COMMITTED`, alcançável a partir de `RUNNING`, `DRAINING_DLL`, ou
+`DRAINING_WRITE` (qualquer estado ativo). De `FAILED`, transição
+única para `IDLE` (cleanup) — alinhado com a transição
+`COMMITTED → IDLE` do amendment original.
+
+### Diagrama atualizado
+
+```
+                     ┌──────────┐
+                     │   IDLE   │
+                     └────┬─────┘
+                          │ run()
+                          ▼
+                     ┌──────────┐
+                     │ RUNNING  │
+                     └─┬──────┬─┘
+              fatal err│      │ último chunk OK ou cancel
+                       ▼      ▼
+                ┌──────────┐ ┌────────────────┐
+                │  FAILED  │ │ DRAINING_DLL   │
+                └────┬─────┘ └─┬──────────┬───┘
+                     │  fatal│           │ dll_queue empty
+                     │       ▼           ▼
+                     │ ┌──────────┐ ┌────────────────┐
+                     │ │  FAILED  │ │ DRAINING_WRITE │
+                     │ └────┬─────┘ └─┬──────────┬───┘
+                     │      │  fatal │           │ write empty + commit
+                     │      │        ▼           ▼
+                     │      │ ┌──────────┐ ┌────────────┐
+                     │      │ │  FAILED  │ │ COMMITTED  │
+                     │      │ └────┬─────┘ └─────┬──────┘
+                     │      │      │             │
+                     ▼      ▼      ▼             ▼
+                          ┌──────────┐
+                          │   IDLE   │
+                          └──────────┘
+```
+
+### Transições válidas atualizadas
+
+| De              | Para            | Trigger                                         |
+|-----------------|-----------------|-------------------------------------------------|
+| IDLE            | RUNNING         | `run()` chamado                                 |
+| RUNNING         | DRAINING_DLL    | Último chunk OK ou cancel                       |
+| RUNNING         | **FAILED**      | Erro fatal antes do drain (NOVO)                |
+| DRAINING_DLL    | DRAINING_WRITE  | dll_queue vazia + ingestor idle                 |
+| DRAINING_DLL    | **FAILED**      | Timeout/erro no drain (NOVO — formaliza `DrainingDLL_TimedOut`) |
+| DRAINING_WRITE  | COMMITTED       | write_queue vazia + commit SQLite OK            |
+| DRAINING_WRITE  | **FAILED**      | Timeout/erro no commit (NOVO — formaliza `DrainingWrite_TimedOut`) |
+| COMMITTED       | IDLE            | Cleanup feito                                   |
+| **FAILED**      | **IDLE**        | Cleanup feito (NOVO — terminal alternativo)     |
+
+### Justificativa
+
+1. **Determinismo:** o estado `FAILED` formaliza o que o amendment
+   original chamou de `DrainingDLL_TimedOut` / `DrainingWrite_TimedOut`
+   sob um nome único e unificado — reduz cardinalidade de estados
+   sem perder informação (a causa raiz vai em
+   `catalog.downloads.error` e nos logs `orchestrator.fatal_error`).
+2. **Observabilidade:** `JobStateMachine.transition(FAILED)` emite
+   event `orchestrator.state_transition` com `to_state="FAILED"` —
+   gauges e dashboards (V2 ADR-013) podem alertar em `state == FAILED`
+   sem precisar correlacionar timeouts.
+3. **Cleanup uniforme:** `force_idle()` aceita ambos `COMMITTED` e
+   `FAILED` (linha 204 `state_machine.py`) — mesma rota de saída,
+   simplifica o caller.
+4. **Sem violação INV-11/INV-12:** estado `FAILED` é declarado pelo
+   orchestrator (OrchestratorThread) APÓS observar erro fatal — não
+   muda o contrato "fim de chunk" (INV-12); apenas marca que o job
+   NÃO completou os 4 critérios de COMMITTED.
+
+### Implementação
+
+`src/data_downloader/orchestrator/state_machine.py:68-94` — `JobState.FAILED`
++ entradas em `VALID_TRANSITIONS` para `RUNNING/DRAINING_DLL/DRAINING_WRITE → FAILED`
+e `FAILED → IDLE`. `force_idle()` (linhas 193-206) aceita ambos
+terminais. 16 testes unit em `tests/unit/test_state_machine.py`
+cobrem: `test_failed_path_from_running`, `test_failed_path_from_draining_dll`,
+`test_failed_path_from_draining_write`, `test_force_idle_from_failed`.
+
+### Sign-off
+
+- **Aria (architect):** APPROVED — extensão é minor, alinhada com
+  espírito do amendment original (DrainingDLL_TimedOut →
+  DrainingDLL → FAILED). Uniformiza terminal alternativo.
+- **Dex (implementer):** APPROVED implícito — implementação já
+  existente em `state_machine.py`, este amendment formaliza.
+
+### Auditor
+
+Quinn — testes unit `test_state_machine.py` validam todas as 4
+transições para FAILED + 1 transição FAILED → IDLE. Audit Aria
+`*review-design 1.7a` confirmou consistência (sem regressão de
+INV-11/INV-12).
