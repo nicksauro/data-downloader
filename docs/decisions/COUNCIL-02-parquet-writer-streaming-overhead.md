@@ -140,11 +140,15 @@ docstring forte sobre pré-condição.
 
 ---
 
-## Aria consultation (não convocada — mudança não cruza fronteira)
+## Aria consultation (não convocada inicialmente — mudança não cruza fronteira)
 
 Esta decisão NÃO altera fronteira de camada. Otimizações futuras (Opção B)
 ficam dentro de `data_downloader.storage.parquet_writer` — sem novo
 contrato externo. Aria consultada apenas se Opção C escalada.
+
+**RATIFICAÇÃO ARIA (2026-05-04):** Aria revisou COUNCIL-02 durante
+`*review-design 1.4.5` e endossa as 6 decisões/recomendações. Sign-off
+formal abaixo.
 
 ---
 
@@ -156,3 +160,46 @@ contrato externo. Aria consultada apenas se Opção C escalada.
   regressão será MELHORA, não baseline shift.
 
 — Pyro ⚡ (com mini-council Sol)
+
+---
+
+## Sign-off Aria (architect) — 2026-05-04
+
+Aria endossa formalmente as 6 decisões/recomendações de COUNCIL-02 após
+revisão durante `*review-design 1.4.5`. Auditoria completa em
+`docs/qa/AUDIT_REPORTS/1.4.5-design-2026-05-04.md` §7.
+
+**Aria endorses:**
+
+1. ✅ Aceitar números atuais como baseline canônico v1.0.0-synthetic.
+2. ✅ Atualizar `TARGETS_V1.md` marcando targets afetados como `gap`.
+3. ✅ NÃO mudar código de produção nesta story (escopo = medição).
+4. ✅ **Story 2.1 (perf-write-optimization)** — Opção B passos 1-3
+   (vectorização interna do `ParquetWriter`). Owner Pyro, reviewer Sol.
+   Otimização interna NÃO cruza fronteira de camada — sem ADR amendment
+   necessário.
+5. ✅ NÃO buscar Opção C (streaming-append separado) até Opção B esgotar.
+   Opção C quebraria atomicidade single-file (INV-3) + exigiria ADR
+   amendment a ADR-002 + revisão SCHEMA.md §4 (metadata final-only).
+6. ✅ Revisar target `latency_callback_to_disk_p99` em Story 1.7
+   (decomposição em 3 sub-targets: `0 drops sob carga normal`,
+   `p99 callback→queue acceptance < 1ms`, `p99 chunk→disk < 30s para
+   chunk 500k`). Decomposição é arquiteturalmente superior.
+
+**Aria adds (não-vinculante):**
+
+7. Story 2.1 deve incluir **property-based tests** (Hypothesis) para
+   garantir que vectorização preserva invariantes INV-2/INV-3/INV-7.
+   Vectorização é refactor de risco; Hypothesis é o gate apropriado.
+8. Bump default `dll_queue maxsize` 10k → 100k (recomendação 2 do
+   COUNCIL-02) em Story 1.7 deve ser documentado como **ADR amendment
+   pequeno (3-5 linhas) a ADR-005**. Justificativa empírica: H4
+   confirmada (queue=10k + pause=2000ms = 1.17% drops; queue=100k +
+   pause=500ms = 0 drops).
+
+**Mini-council confirmado:** Pyro (perf-engineer) + Aria (architect).
+Consultoria mental: Sol (storage layout authority). Story 2.1
+**perf-write-optimization** a ser criada por Morgan (PM) com base nesta
+ratificação.
+
+— Aria, mapeando o território 🏛️
