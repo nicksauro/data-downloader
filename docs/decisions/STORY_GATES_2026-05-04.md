@@ -1578,4 +1578,97 @@ workers).
 
 ---
 
+## Story 4.3 — Public API estável V1.0 release
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/4.3.story.md`                          |
+| **commit auditado**    | `9304106`                                            |
+| **owner**              | Aria (architect, design owner) + Dex (dev, decorator + tests + docstrings) + Gage (devops, CHANGELOG) — modo autônomo COUNCIL-27 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Aria+Gage via COUNCIL-28) |
+| **report path**        | `docs/qa/QA_REPORTS/4.3-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/4.3-design-2026-05-04.md` (Aria APPROVED) |
+| **council outcome**    | `docs/decisions/COUNCIL-28-v1-release-readiness.md` (Quinn+Aria+Gage tríade — verdict GO-WITH-DEFERRED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings Google style completos (Args/Returns/Raises/Examples/Notes) em 4 funções + 4 classes + 8 exceções. Module docstring exhaustivo (157 linhas) em `public_api/__init__.py`. `mypy --strict` 0 errors em 6 source files. `ruff check` All checks passed. Decorator `@deprecated` em `_deprecation.py` (D3 COUNCIL-27 — desvio justificado vs `_internal/`). |
+| 2. Unit tests        | PASS      | 47 SemVer regression + 6 no-internal-imports = **53 PASS em 1.98s**. Cobertura `public_api/` 65% (justificada: `_deprecation.py` 0% intencional — decorator não aplicado a nenhum símbolo em V1.0 baseline; `download.py` 52% reflete escopo mock-first). Demais módulos excelentes (`__init__.py` 100%, `exceptions.py` 94%, `history.py` 98%, `handle.py` 76%). |
+| 3. Acceptance criteria | PASS    | 7/7 PASS literal — 4 sem reserva (AC4 política/decorator, AC5 bump 0.3.0→1.0.0, AC6 CHANGELOG, AC7 53 regression tests) + 3 com notas deferred não-bloqueantes (AC1 linter docstring CI deferred P2; AC2 `py.typed` marker deferred P3; AC3 doctest runner CI deferred P5). Todas as deferrals tracked em COUNCIL-27 §5 + COUNCIL-28 §3. |
+| 4. No regressions    | PASS      | Suite full integration (73 tests em 4 arquivos) PASS em 125.91s. `test_public_api_history.py` relax test alinha com bump 0.3.0 → 1.0.0 (formato + MAJOR>=1 em vez de hardcoded). Zero regressão Story 4.3. |
+| 5. Performance       | PASS      | Story 4.3 é formalização documental + tests de shape — sem componente performance. Suite Story 4.3 scope <2s. |
+| 6. Security          | PASS      | Sem credenciais novas; sem deps novas (decorator usa stdlib); guardrail anti-leak `test_public_api_no_internal_imports.py` (6 AST-scan tests) impede vazamento de internals para tests consumer; whitelist controlada (D4 COUNCIL-27) com TODO V1.x para reduzir. |
+| 7. Documentation     | PASS      | Module docstring exhaustivo + USAGE.md (~507 linhas, 3 exemplos copy-paste backtest/signal/risk) + DEPRECATION_POLICY.md (~215 linhas, SemVer estrito + lifecycle ≥ 2 minor + ≥ 6 meses + workflow + tracker) + CHANGELOG.md (~200 linhas, Keep a Changelog 1.1.0 + SemVer 2.0, backfill v0.1..v0.4 + entry V1.0.0). COUNCIL-27 documenta D1-D7 + sign-offs. COUNCIL-28 documenta verdict tríade + release readiness. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict      | Justificativa |
+|-----------------|--------------|---------------|
+| Aria (design)   | **APPROVED** | `docs/qa/AUDIT_REPORTS/4.3-design-2026-05-04.md` — fronteira pública estável V1.0; ADR-007a (DownloadHandle) + ADR-011 (8 exceções) preservados intactos; `__all__` 17 símbolos idênticos a V0.4 baseline (Constitutional Article IV — No Invention); module docstring exhaustivo (157 linhas, 7 garantias contratuais R5/R7 + cobertura SemVer + histórico de bumps); USAGE.md robusto (3 personas backtest/signal/risk); DEPRECATION_POLICY.md formal (≥ 2 minor + ≥ 6 meses); decorator `@deprecated` infraestrutural pronto; CHANGELOG retroativo Keep a Changelog 1.1.0 + SemVer 2.0. 5 checklists customizados (design_review V1.0 release + adr_007a_conformance + adr_011_conformance + changelog_format + fronteira_publica_invariantes). 0 findings >= MEDIUM, 3 LOW (CI enforcement deferrals — todos com mitigação) + 2 INFO. SemVer impact: MAJOR (0.x → 1.0) declarado intencionalmente — formaliza contrato estável, não breaking change. |
+| Gage (devops)   | **APPROVED** | CHANGELOG validation §6 + COUNCIL-27 §3 (Gage section) — Keep a Changelog 1.1.0 format respeitado; backfill retroativo correto (v0.1.0 → Story 1.5b, v0.2.0 → 1.6, v0.3.0 → 1.7b, v0.4.0 → 2.11 com soft-break documentado, v1.0.0 → 4.3); entry V1.0.0 lista 7 garantias contratuais + 17 exports estáveis + NÃO coberto por SemVer + roadmap V1.x e V2.0 (intencionalmente vazio); sign-off Gage como release authority registrado. Pendências P3 (py.typed PyPI), P4 (GitHub Release tag api-v1.0.0) deferred para Story 4.4 packaging release. |
+| Sol (storage)   | N/A          | Story 4.3 NÃO toca `storage/`. 17 campos canônicos preservados. |
+| Nelo (DLL)      | N/A          | Story 4.3 NÃO toca `dll/`. `DLLInitError` exception preserved. |
+| Pyro (perf)     | N/A          | Story 4.3 não tem componente performance. |
+| Uma (microcopy) | N/A          | Story 4.3 não introduz microcopy nova. `humanized_message` mapa preservado intacto. |
+
+### Findings
+
+| Severity  | Count | Detalhes |
+|-----------|-------|----------|
+| CRITICAL  | 0     | -        |
+| HIGH      | 0     | -        |
+| MEDIUM    | 0     | -        |
+| LOW       | 3     | F-Q-1 (cobertura `_deprecation.py` 0% até primeiro uso real V1.x — não bloqueia stability porque decorator não aplicado a nenhum símbolo em baseline) / F-Q-2 (linter docstring CI deferred — P2 Story 4.3-followup) / F-Q-3 (doctest runner CI deferred — P5 Story 4.3-followup) |
+| INFO      | 2     | F-Q-4 (`py.typed` marker deferred para Story 4.4 packaging — P3) / F-Q-5 (whitelist legacy storage helpers em guardrail anti-leak — P1, refactor para `data_downloader.testing.fixtures` quando publicado) |
+
+### Verdict
+
+**PASS** — Story 4.3 fechada. Status `Ready for Review` → **`Done`**.
+
+**Verdict tríade COUNCIL-28 (Quinn+Aria+Gage):** GO-WITH-DEFERRED para
+release V1.0 oficial.
+
+**Esta gate desbloqueia:**
+
+- **Story 4.4 (release V1 packaging)** — fronteira V1.0 declarada
+  estável (`__api_version__ = "1.0.0"` formaliza contrato vinculante a
+  partir de `9304106`). Story 4.4 pode prosseguir com PyPI publishing
+  decision (`py.typed` marker — P3) + GitHub Release tag `api-v1.0.0`
+  com CHANGELOG inline (P4) + `.exe` distribution + auto-updater
+  bootstrap.
+- **Backtest engine** (próximo projeto squad) — pode pinar
+  `data-downloader>=1.0,<2.0` no `pyproject.toml` HOJE com confiança
+  SemVer estrita (vinculante a partir de `9304106`).
+
+**Highlight V1.0 stability declared:** module docstring 157 linhas com
+7 garantias contratuais (R5 idempotência, R7 BRT naive, dedup canônico,
+ordem cronológica, schema estável, cancel graceful, sem leak interno)
++ política SemVer estrito (PATCH/MINOR/MAJOR matrix + regra dura ≥ 2
+minor + 6 meses) + cobertura explícita (coberto vs NÃO coberto) +
+histórico de bumps (0.1.0 → 1.0.0). 17 símbolos em `__all__` idênticos
+a V0.4 baseline (Article IV — No Invention) com regression test
+enforce. Decorator `@deprecated` infraestrutural pronto mas SEM uso
+real ainda (V1.0 é baseline; tracker DEPRECATION_POLICY.md vazio).
+
+**Bloqueios remanescentes (NÃO bloqueiam Story 4.3, BLOQUEIAM release V1 oficial):**
+
+- **B1 — Smoke real DLL multi-symbol** (Story 1.7b-followup, humano):
+  bloqueia release V1 conforme COUNCIL-09 política. Pré-requisito
+  Q17-OPEN respondido (licença Nelogica multi-instância).
+- **B2 — Story 4.4 (packaging)**: fecha Epic 4 + entrega `.exe` com
+  `__api_version__=1.0.0` embutido + GitHub Release tag inline.
+
+**Pendências de polimento (débito V1.x ou Story 4.3-followup):**
+
+- P1: refactor `test_public_api_history.py` → `data_downloader.testing.fixtures`.
+- P2: `interrogate`/`pydocstyle` em CI.
+- P3: `py.typed` marker (Story 4.4).
+- P4: GitHub Release tag `api-v1.0.0` (Story 4.4).
+- P5: doctest runner CI para USAGE.md.
+- P6: `test_deprecation_decorator.py` formal (V1.x quando primeiro símbolo deprecado).
+
+---
+
 — Quinn, no portão
