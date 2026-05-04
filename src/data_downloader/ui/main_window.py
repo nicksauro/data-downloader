@@ -169,7 +169,18 @@ class MainWindow(QMainWindow):
         self._screen_indices[screen_id] = idx
 
     def _build_status_bar(self) -> None:
-        """StatusBar com DLL status (esquerda), pasta (centro), versão (direita)."""
+        """StatusBar com DLL status (esquerda), métricas (centro), versão (direita).
+
+        Story 3.3 (Wave 18) — agora consome ``MetricsAdapter`` polling
+        :class:`PrometheusExporter` (opt-in via :meth:`set_metrics_exporter`).
+        Quando exporter desabilitado: status bar mostra apenas DLL + versão
+        (graceful degradation — Pyro audit).
+        """
+        from data_downloader.ui.widgets.metrics_panel import (
+            MetricsAdapter,
+            MetricsPanel,
+        )
+
         bar = QStatusBar(self)
         self.setStatusBar(bar)
 
@@ -180,6 +191,17 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._dll_status_label)
 
         bar.addWidget(QLabel("  •  ", self))
+
+        # Metrics panel — compact, embed direto na status bar (Story 3.3).
+        # Inicia em modo "off" — adapter só faz trabalho se exporter setado.
+        self._metrics_panel = MetricsPanel(self, compact=True)
+        bar.addWidget(self._metrics_panel)
+
+        # Adapter em QThread separada — D2 COUNCIL-23 (sem parent Qt).
+        self._metrics_adapter = MetricsAdapter(owner=self)
+        self._metrics_adapter.metrics_updated.connect(self._metrics_panel.set_snapshot)
+        self._metrics_adapter.exporter_unavailable.connect(self._on_metrics_unavailable)
+        self._metrics_adapter.start()
 
         # Versão app (direita) — usa __api_version__ do public_api como
         # proxy enquanto não há __version__ exposto pela UI.
@@ -193,6 +215,27 @@ class MainWindow(QMainWindow):
         )
         version_label.setProperty("role", "muted")
         bar.addPermanentWidget(version_label)
+
+    def set_metrics_exporter(self, exporter: object | None) -> None:
+        """Liga (ou desliga) consumo de métricas do PrometheusExporter.
+
+        Args:
+            exporter: Instância de :class:`PrometheusExporter` (ou ``None``
+                para desabilitar). Adapter em QThread já existente continua
+                vivo — apenas troca o target.
+
+        Graceful degradation: ``None`` faz status bar mostrar apenas DLL +
+        versão (sem panel de métricas — Pyro audit).
+        """
+        if not hasattr(self, "_metrics_adapter"):
+            return
+        self._metrics_adapter.set_exporter(exporter)
+
+    def _on_metrics_unavailable(self) -> None:
+        """Slot chamado quando exporter está indisponível (graceful)."""
+        # Panel já renderiza 'off' state via snapshot vazio. Não precisamos
+        # esconder; o usuário vê "Métricas: off" e sabe o estado.
+        # Mantemos hook para futuras extensões (ex.: ocultar panel V2).
 
     # ------------------------------------------------------------------
     # Navegação
@@ -321,3 +364,16 @@ class MainWindow(QMainWindow):
                     if handled:
                         return True
         return super().eventFilter(watched, event)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):  # noqa: N802
+        """Encerra worker threads (D3 COUNCIL-23) — metrics adapter + screens."""
+        # Shutdown metrics adapter primeiro (background polling).
+        adapter = getattr(self, "_metrics_adapter", None)
+        if adapter is not None:
+            with contextlib.suppress(Exception):
+                adapter.shutdown()
+        super().closeEvent(event)

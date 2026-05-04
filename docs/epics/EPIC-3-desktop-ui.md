@@ -1,9 +1,9 @@
 # EPIC 3 — Desktop UI
 
-**Status:** in_progress (Stories 3.1 + 3.2 Done — 3 telas reais entregues via COUNCIL-23 + COUNCIL-24)
+**Status:** in_progress (Stories 3.1 + 3.2 + 3.3 Done — 3 telas reais + theming polido + status bar metrics integrados via COUNCIL-23 + COUNCIL-24 + COUNCIL-26)
 **Owner:** 📋 Morgan
 **Data criação:** 2026-05-03
-**Última atualização:** 2026-05-03 (COUNCIL-24 — Story 3.2 Done; CatalogScreen + SettingsScreen reais)
+**Última atualização:** 2026-05-03 (COUNCIL-26 — Story 3.3 Done; QSS dark mode completo + MetricsPanel/Adapter integrados na status bar)
 **Target:** entregar UI desktop nativa (PySide6) consumindo public_api estável (Epic 1) — golden path de download via clique, não terminal. Pós-Epic 2.
 
 ## Preparatório completo (COUNCIL-12)
@@ -64,9 +64,9 @@ Empacotar foundation + qualidade (Epics 1 + 2) em uma UI desktop usável por qua
 |----|--------|-------|------------|----------------------|
 | 3.1 | **DONE** — MainWindow + DownloadScreen funcional consumindo public_api (COUNCIL-23) | 🖼️ Felix | 3d (real) | WIREFRAMES MainWindow + Tela 1 + skeleton + style.qss seções 1/7/8 |
 | 3.2 | **DONE** — CatalogScreen + SettingsScreen reais (consolida 3.3+3.4 — COUNCIL-24) | 🖼️ Felix + 🎨 Uma | 2d (real) | WIREFRAMES Tela 2 + Tela 3 + skeleton + microcopy §17b.2 + §17b.3 |
-| 3.3 | (consolidado em 3.2) Tela Catálogo (lista partições + filtros) | 🖼️ Felix + 💾 Sol | — | (Story 3.2 entregou) |
+| 3.3 | **DONE** — Theming dark mode polido + integração métricas Story 2.4 na status bar (consolida 3.5 do plan + Wave 18 metrics) (COUNCIL-26) | 🖼️ Felix + 🎨 Uma + ⚡ Pyro | 1d (real) | THEME.md completa + skeleton style.qss + Story 2.4 PrometheusExporter |
 | 3.4 | (consolidado em 3.2) Tela Settings (env vars, paths, theme) | 🖼️ Felix + 🎨 Uma | — | (Story 3.2 entregou) |
-| 3.5 | Theming (light/dark, QSS, DontUseNativeDialog) | 🖼️ Felix + 🎨 Uma | 1d | style.qss esqueleto completo (Felix refina/expande) |
+| 3.5 | (consolidado em 3.3) Theming (light/dark, QSS, DontUseNativeDialog) | 🖼️ Felix + 🎨 Uma | — | (Story 3.3 entregou — light mode V2) |
 | 3.6 | pytest-qt setup (finding L6) + UI tests | 🧪 Quinn + 🖼️ Felix | 1d | (depende de stories implementadas) |
 | 3.7 | Packaging PyInstaller `--onedir` | 🖼️ Felix + ⚙️ Gage | 2d | ADR-003 amendment + COUNCIL-12 D8 |
 | 3.8 | Métrica ui_progress_dropped + current_contract no progress | 🖼️ Felix + ⚡ Pyro | 1d | M11 + M16 referenciados em download_adapter.py + ProgressCard |

@@ -1,10 +1,15 @@
 /* ============================================================================
- * data_downloader.ui.assets.style.qss — Tema Qt Style Sheet (Dark Mode V1)
+ * data_downloader.ui.assets.style.qss — Tema Qt Style Sheet (Dark Mode V1.1)
  *
  * Owner: Felix (impl) | Design: Uma (paleta autoridade — THEME.md).
  *
- * Status: Epic 3 prep — esqueleto QSS aplicando paleta canônica de THEME.md.
- *         Felix refina nas Stories 3.1-3.5.
+ * Status: Story 3.3 (Wave 18) — refinamento Felix+Uma. Paleta dark mode
+ *         COMPLETA aplicada com estados visuais para QPushButton (normal/
+ *         hover/pressed/disabled), QProgressBar gradiente + amarelo durante
+ *         99% reconnect, QTableView header/alternating/selection, QGroupBox
+ *         transparente com label accent, QLineEdit/QComboBox/QDateEdit
+ *         border accent on focus, QStatusBar dark + text accent,
+ *         QScrollArea bordas removidas, QTabBar/QTabWidget.
  *
  * Fonte de verdade da paleta: docs/ux/THEME.md §2 (cores) + §4 (tipografia).
  * Mudanças aqui exigem alinhamento com THEME.md (Uma autoridade).
@@ -15,7 +20,15 @@
  * Referências:
  *   - docs/ux/THEME.md (paleta + tipografia + iconografia)
  *   - docs/ux/QT_PATTERNS.md §5 (theming central)
- *   - docs/decisions/COUNCIL-12-epic3-prep.md
+ *   - docs/decisions/COUNCIL-26-epic3-theming-metrics.md
+ *
+ * Tokens canônicos (THEME.md §2):
+ *   bg.primary    #0E0E10  | bg.surface     #17171A  | bg.elevated  #1F1F23
+ *   bg.input      #26262B  | border.subtle  #2D2D33  | border.strong #3D3D45
+ *   text.primary  #E8E8EA  | text.secondary #A8A8AC  | text.muted   #6E6E74
+ *   text.disabled #4A4A50  | accent.cyan    #3DD0E1  | primary      #4F8CFF
+ *   success.green #3FCB6F  | error.red      #F25656  | warning.yellow #F2C94C
+ *   info.blue     #5E9FFF
  * ========================================================================== */
 
 /* ----------------------------------------------------------------------------
@@ -34,6 +47,17 @@ QWidget {
     color: #E8E8EA;                 /* text.primary */
 }
 
+/* MessageBox / dialog content reaproveita paleta. */
+QMessageBox {
+    background: #17171A;
+    color: #E8E8EA;
+}
+
+QMessageBox QLabel {
+    color: #E8E8EA;
+    font-size: 14px;
+}
+
 /* ----------------------------------------------------------------------------
  * 2. Typography helpers — via dynamic property [role=...]
  * -------------------------------------------------------------------------- */
@@ -42,6 +66,7 @@ QLabel[role="title"] {
     font-size: 18px;                /* font.title */
     font-weight: 600;
     color: #E8E8EA;
+    padding: 4px 0;
 }
 
 QLabel[role="subtitle"] {
@@ -57,44 +82,87 @@ QLabel[role="secondary"] {
 
 QLabel[role="muted"] {
     color: #6E6E74;                 /* text.muted */
+    font-size: 12px;
 }
 
 QLabel[role="code"] {
-    font-family: "Cascadia Code", "Consolas", monospace;
+    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
     font-size: 13px;                /* font.code */
     color: #A8A8AC;
 }
 
+QLabel[role="accent"] {
+    color: #3DD0E1;                 /* accent.cyan */
+    font-weight: 500;
+}
+
+QLabel[role="success"] {
+    color: #3FCB6F;
+    font-weight: 600;
+}
+
+QLabel[role="error"] {
+    color: #F25656;
+    font-weight: 600;
+}
+
+QLabel[role="warning"] {
+    color: #F2C94C;
+    font-weight: 600;
+}
+
 /* ----------------------------------------------------------------------------
- * 3. Surface / Cards / Panels
+ * 3. Surface / Cards / Panels — QFrame[elevated], QGroupBox transparente
  * -------------------------------------------------------------------------- */
 
-QFrame[elevated="true"],
-QGroupBox {
+QFrame[elevated="true"] {
     background: #17171A;            /* bg.surface */
     border: 1px solid #2D2D33;      /* border.subtle */
     border-radius: 6px;
     padding: 16px;                  /* space.lg */
-    margin-top: 8px;
+}
+
+QGroupBox {
+    background: transparent;        /* transparente — herda do parent */
+    border: 1px solid #2D2D33;      /* border.subtle */
+    border-radius: 6px;
+    padding: 20px 16px 16px 16px;   /* top maior para acomodar título */
+    margin-top: 12px;               /* espaço para título flutuante */
+    font-size: 13px;
+    font-weight: 500;
 }
 
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
     padding: 0 8px;
-    color: #A8A8AC;
-    font-weight: 500;
+    margin-left: 12px;
+    color: #3DD0E1;                 /* accent.cyan — label accent */
+    background: transparent;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+QGroupBox:disabled {
+    border-color: #1F1F23;
+}
+
+QGroupBox:disabled::title {
+    color: #4A4A50;
 }
 
 /* ----------------------------------------------------------------------------
  * 4. Inputs — QLineEdit, QComboBox, QDateEdit, QSpinBox
+ *    Border accent on focus (THEME state.focus 2px accent.cyan)
  * -------------------------------------------------------------------------- */
 
 QLineEdit,
 QComboBox,
 QDateEdit,
 QSpinBox,
-QDoubleSpinBox {
+QDoubleSpinBox,
+QTimeEdit,
+QDateTimeEdit {
     background: #26262B;            /* bg.input */
     color: #E8E8EA;
     border: 1px solid #2D2D33;
@@ -102,27 +170,85 @@ QDoubleSpinBox {
     padding: 6px 10px;              /* space.sm + space.md */
     selection-background-color: #3DD0E1;
     selection-color: #0E0E10;
+    min-height: 20px;
+}
+
+QLineEdit:hover,
+QComboBox:hover,
+QDateEdit:hover,
+QSpinBox:hover,
+QDoubleSpinBox:hover {
+    border-color: #3D3D45;          /* border.strong */
 }
 
 QLineEdit:focus,
 QComboBox:focus,
 QDateEdit:focus,
 QSpinBox:focus,
-QDoubleSpinBox:focus {
+QDoubleSpinBox:focus,
+QTimeEdit:focus,
+QDateTimeEdit:focus {
     border-color: #3DD0E1;          /* accent.cyan — state.focus */
     border-width: 2px;
+    padding: 5px 9px;               /* compensa border 1->2px (mantém box) */
 }
 
 QLineEdit:disabled,
 QComboBox:disabled,
 QDateEdit:disabled,
-QSpinBox:disabled {
+QSpinBox:disabled,
+QDoubleSpinBox:disabled {
     color: #4A4A50;                 /* text.disabled */
     background: #1F1F23;            /* bg.elevated dim */
+    border-color: #1F1F23;
+}
+
+QLineEdit[readOnly="true"] {
+    background: #1F1F23;
+    color: #A8A8AC;
+}
+
+/* ComboBox dropdown arrow */
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid #A8A8AC;
+    width: 0;
+    height: 0;
+    margin-right: 8px;
+}
+
+QComboBox QAbstractItemView {
+    background: #1F1F23;            /* bg.elevated — popover */
+    color: #E8E8EA;
+    border: 1px solid #2D2D33;
+    border-radius: 4px;
+    selection-background-color: rgba(61, 208, 225, 0.16);
+    selection-color: #E8E8EA;
+    padding: 4px;
+    outline: none;
+}
+
+/* SpinBox up/down arrows — minimalista */
+QSpinBox::up-button,
+QSpinBox::down-button,
+QDoubleSpinBox::up-button,
+QDoubleSpinBox::down-button {
+    width: 16px;
+    background: transparent;
+    border: none;
 }
 
 /* ----------------------------------------------------------------------------
- * 5. Buttons — primary / secondary / destructive
+ * 5. Buttons — primary / secondary / destructive / link
+ *    Estados visuais COMPLETOS: normal/hover/pressed/disabled
  * -------------------------------------------------------------------------- */
 
 QPushButton {
@@ -132,6 +258,7 @@ QPushButton {
     border-radius: 6px;
     padding: 8px 16px;
     font-weight: 500;
+    min-height: 20px;
 }
 
 QPushButton:hover {
@@ -141,6 +268,12 @@ QPushButton:hover {
 
 QPushButton:pressed {
     background: #1F1F23;
+    border-color: #2D2D33;
+}
+
+QPushButton:focus {
+    border-color: #3DD0E1;          /* accent.cyan focus ring */
+    outline: none;
 }
 
 QPushButton:disabled {
@@ -157,6 +290,7 @@ QPushButton[variant="primary"] {
     padding: 10px 20px;
     border-radius: 6px;
     font-weight: 600;
+    font-size: 14px;
 }
 
 QPushButton[variant="primary"]:hover {
@@ -165,6 +299,16 @@ QPushButton[variant="primary"]:hover {
 
 QPushButton[variant="primary"]:pressed {
     background: #3D7AE8;
+}
+
+QPushButton[variant="primary"]:focus {
+    border: 2px solid #3DD0E1;
+    padding: 8px 18px;
+}
+
+QPushButton[variant="primary"]:disabled {
+    background: #2D2D33;
+    color: #6E6E74;
 }
 
 /* Destructive button — CANCELAR / APAGAR */
@@ -181,60 +325,110 @@ QPushButton[variant="destructive"]:hover {
     background: #FF6B6B;
 }
 
+QPushButton[variant="destructive"]:pressed {
+    background: #D14A4A;
+}
+
 QPushButton[variant="destructive"]:disabled {
     background: #2D2D33;
     color: #6E6E74;
 }
 
-/* Link-style button — sucesso "Ver no Catálogo" */
+/* Link-style button */
 QPushButton[variant="link"] {
     background: transparent;
     color: #3DD0E1;                 /* accent.cyan */
     border: none;
     padding: 4px 8px;
-    text-decoration: underline;
+    text-align: left;
 }
 
 QPushButton[variant="link"]:hover {
     color: #5DDDED;
+    text-decoration: underline;
+}
+
+QPushButton[variant="link"]:pressed {
+    color: #2BB8C9;
+}
+
+QPushButton[variant="link"]:disabled {
+    color: #4A4A50;
+}
+
+/* Success-tinted button (raro, para CTA pós-sucesso) */
+QPushButton[variant="success"] {
+    background: #3FCB6F;
+    color: #0E0E10;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+}
+
+QPushButton[variant="success"]:hover {
+    background: #5BD884;
 }
 
 /* ----------------------------------------------------------------------------
- * 6. Progress Bar — state-aware (THEME §3 + Flow 4 quirk 99%)
+ * 6. Progress Bar — state-aware com gradiente (THEME §3 + Flow 4 quirk 99%)
  * -------------------------------------------------------------------------- */
 
 QProgressBar {
     background: #26262B;
-    border: none;
+    border: 1px solid #2D2D33;
     border-radius: 4px;
-    height: 8px;
+    height: 10px;
     text-align: center;
-    color: transparent;             /* texto separado em label sibling */
+    color: #A8A8AC;                 /* texto opcional sobreposto */
+    font-size: 11px;
+    font-weight: 500;
 }
 
 QProgressBar::chunk {
-    background: #3DD0E1;            /* accent.cyan — normal */
-    border-radius: 4px;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #3DD0E1,            /* accent.cyan */
+        stop: 1 #5DDDED
+    );
+    border-radius: 3px;
+    margin: 1px;
 }
 
-/* state="reconnecting" → quirk 99% (Flow 4) */
+/* state="reconnecting" → quirk 99% (Flow 4) — amarelo */
 QProgressBar[state="reconnecting"]::chunk {
-    background: #F2C94C;            /* warning.yellow */
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #F2C94C,            /* warning.yellow */
+        stop: 1 #FFD86B
+    );
 }
 
-/* state="cancelling" → drain em andamento (Flow 3) */
+/* state="cancelling" → drain em andamento (Flow 3) — amarelo */
 QProgressBar[state="cancelling"]::chunk {
-    background: #F2C94C;            /* warning.yellow */
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #F2C94C,
+        stop: 1 #FFD86B
+    );
 }
 
 /* state="complete" → 100% concluído */
 QProgressBar[state="complete"]::chunk {
-    background: #3FCB6F;            /* success.green */
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #3FCB6F,            /* success.green */
+        stop: 1 #5BD884
+    );
 }
 
 /* state="error" → erro fatal */
 QProgressBar[state="error"]::chunk {
-    background: #F25656;            /* error.red */
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #F25656,            /* error.red */
+        stop: 1 #FF6B6B
+    );
 }
 
 /* ----------------------------------------------------------------------------
@@ -270,8 +464,13 @@ QPushButton[role="nav-item"][active="true"] {
     border-left-color: #3DD0E1;     /* accent.cyan — active indicator */
 }
 
+QPushButton[role="nav-item"]:focus {
+    outline: none;
+    background: rgba(61, 208, 225, 0.04);
+}
+
 /* ----------------------------------------------------------------------------
- * 8. Status Bar
+ * 8. Status Bar — dark com text accent + clickable metrics URL
  * -------------------------------------------------------------------------- */
 
 QStatusBar {
@@ -280,32 +479,98 @@ QStatusBar {
     border-top: 1px solid #2D2D33;
     font-size: 12px;
     padding: 4px 12px;
+    min-height: 26px;
+}
+
+QStatusBar::item {
+    border: none;                   /* remove separadores chatos default */
+}
+
+QStatusBar QLabel {
+    color: #A8A8AC;
+    padding: 0 6px;
+    font-size: 12px;
 }
 
 QStatusBar QLabel[status="connected"] {
     color: #3FCB6F;                 /* success.green */
+    font-weight: 500;
 }
 
 QStatusBar QLabel[status="disconnected"] {
     color: #F25656;                 /* error.red */
+    font-weight: 500;
 }
 
 QStatusBar QLabel[status="connecting"] {
     color: #F2C94C;                 /* warning.yellow */
+    font-weight: 500;
+}
+
+QStatusBar QLabel[role="metric"] {
+    color: #A8A8AC;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 11px;
+}
+
+QStatusBar QLabel[role="metric"][active="true"] {
+    color: #3DD0E1;                 /* accent.cyan — quando há atividade */
+    font-weight: 500;
+}
+
+QStatusBar QLabel[role="metric-link"] {
+    color: #3DD0E1;
+    text-decoration: underline;
+}
+
+QStatusBar QLabel[role="metric-off"] {
+    color: #6E6E74;                 /* text.muted — exporter desabilitado */
+    font-style: italic;
+}
+
+QStatusBar QLabel[role="metric-link"]:hover {
+    color: #5DDDED;
 }
 
 /* ----------------------------------------------------------------------------
- * 9. Table — QTableView (CatalogScreen)
+ * 9. Table — QTableView (CatalogScreen) — header dark, alt-rows sutis,
+ *    selection accent
  * -------------------------------------------------------------------------- */
 
 QTableView {
     background: #0E0E10;
+    alternate-background-color: #131316;     /* alternating rows sutil */
     color: #E8E8EA;
-    gridline-color: #2D2D33;
+    gridline-color: #1F1F23;                 /* mais sutil que border.subtle */
     selection-background-color: rgba(61, 208, 225, 0.16);
     selection-color: #E8E8EA;
     border: 1px solid #2D2D33;
     border-radius: 6px;
+    outline: none;
+}
+
+QTableView::item {
+    padding: 6px 12px;
+    border: none;
+}
+
+QTableView::item:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+QTableView::item:selected {
+    background: rgba(61, 208, 225, 0.20);
+    color: #E8E8EA;
+}
+
+QTableView::item:focus {
+    outline: none;
+}
+
+/* Header — fundo dark com underline accent quando sorted */
+QHeaderView {
+    background: #17171A;
+    border: none;
 }
 
 QHeaderView::section {
@@ -315,15 +580,34 @@ QHeaderView::section {
     border: none;
     border-bottom: 1px solid #2D2D33;
     border-right: 1px solid #2D2D33;
-    font-weight: 500;
+    font-weight: 600;
+    font-size: 12px;
 }
 
-QTableView::item {
-    padding: 8px 12px;
+QHeaderView::section:hover {
+    background: #1F1F23;
+    color: #E8E8EA;
 }
 
-QTableView::item:hover {
-    background: rgba(255, 255, 255, 0.04);
+QHeaderView::section:checked {
+    background: #1F1F23;
+    color: #3DD0E1;                 /* accent quando ordenado por essa col */
+    border-bottom: 2px solid #3DD0E1;
+}
+
+QHeaderView::section:first {
+    border-top-left-radius: 6px;
+}
+
+QHeaderView::section:last {
+    border-top-right-radius: 6px;
+    border-right: none;
+}
+
+QTableCornerButton::section {
+    background: #17171A;
+    border: none;
+    border-bottom: 1px solid #2D2D33;
 }
 
 /* ----------------------------------------------------------------------------
@@ -371,6 +655,20 @@ QFrame[role="warning-card"] {
     padding: 16px;
 }
 
+QFrame[role="success-card"] {
+    background: rgba(63, 203, 111, 0.08);
+    border: 1px solid #3FCB6F;
+    border-radius: 6px;
+    padding: 16px;
+}
+
+QFrame[role="info-card"] {
+    background: rgba(61, 208, 225, 0.06);
+    border: 1px solid #3DD0E1;
+    border-radius: 6px;
+    padding: 16px;
+}
+
 /* ----------------------------------------------------------------------------
  * 12. ScrollBar — minimalista
  * -------------------------------------------------------------------------- */
@@ -379,32 +677,69 @@ QScrollBar:vertical {
     background: transparent;
     width: 10px;
     margin: 0;
+    border: none;
 }
 
 QScrollBar::handle:vertical {
     background: #3D3D45;
     border-radius: 4px;
     min-height: 24px;
+    margin: 2px;
 }
 
 QScrollBar::handle:vertical:hover {
     background: #4A4A50;
 }
 
+QScrollBar::handle:vertical:pressed {
+    background: #5A5A62;
+}
+
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical {
     height: 0;
+    background: transparent;
+    border: none;
+}
+
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
 }
 
 QScrollBar:horizontal {
     background: transparent;
     height: 10px;
+    margin: 0;
+    border: none;
 }
 
 QScrollBar::handle:horizontal {
     background: #3D3D45;
     border-radius: 4px;
     min-width: 24px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #4A4A50;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+    background: transparent;
+    border: none;
+}
+
+/* ScrollArea — sem borda dupla quando aninhada */
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+
+QScrollArea > QWidget > QWidget {
+    background: transparent;
 }
 
 /* ----------------------------------------------------------------------------
@@ -414,19 +749,199 @@ QScrollBar::handle:horizontal {
 QToolTip {
     background: #1F1F23;
     color: #E8E8EA;
-    border: 1px solid #2D2D33;
+    border: 1px solid #3D3D45;
     border-radius: 4px;
     padding: 6px 10px;
     font-size: 12px;
+    opacity: 240;                   /* leve transparência */
 }
 
 /* ----------------------------------------------------------------------------
- * Notas para Felix (Epic 3 Stories 3.1-3.5):
+ * 14. TabBar / TabWidget — caso futuro use abas
+ * -------------------------------------------------------------------------- */
+
+QTabWidget::pane {
+    background: #0E0E10;
+    border: 1px solid #2D2D33;
+    border-radius: 4px;
+    top: -1px;
+}
+
+QTabBar {
+    background: transparent;
+    qproperty-drawBase: 0;
+}
+
+QTabBar::tab {
+    background: #17171A;
+    color: #A8A8AC;
+    padding: 8px 16px;
+    border: 1px solid #2D2D33;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+    font-weight: 500;
+}
+
+QTabBar::tab:hover {
+    background: #1F1F23;
+    color: #E8E8EA;
+}
+
+QTabBar::tab:selected {
+    background: #0E0E10;
+    color: #3DD0E1;                 /* accent quando ativa */
+    border-bottom: 2px solid #3DD0E1;
+}
+
+QTabBar::tab:disabled {
+    color: #4A4A50;
+}
+
+/* ----------------------------------------------------------------------------
+ * 15. CheckBox / RadioButton
+ * -------------------------------------------------------------------------- */
+
+QCheckBox,
+QRadioButton {
+    color: #E8E8EA;
+    spacing: 8px;
+    font-size: 14px;
+}
+
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #3D3D45;
+    background: #26262B;
+}
+
+QCheckBox::indicator {
+    border-radius: 3px;
+}
+
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover {
+    border-color: #3DD0E1;
+}
+
+QCheckBox::indicator:checked {
+    background: #3DD0E1;
+    border-color: #3DD0E1;
+}
+
+QRadioButton::indicator:checked {
+    background: #3DD0E1;
+    border-color: #3DD0E1;
+}
+
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    background: #1F1F23;
+    border-color: #2D2D33;
+}
+
+/* ----------------------------------------------------------------------------
+ * 16. Splitter
+ * -------------------------------------------------------------------------- */
+
+QSplitter::handle {
+    background: #2D2D33;
+}
+
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+
+QSplitter::handle:vertical {
+    height: 1px;
+}
+
+QSplitter::handle:hover {
+    background: #3DD0E1;
+}
+
+/* ----------------------------------------------------------------------------
+ * 17. Menu / MenuBar
+ * -------------------------------------------------------------------------- */
+
+QMenuBar {
+    background: #17171A;
+    color: #E8E8EA;
+    border-bottom: 1px solid #2D2D33;
+    padding: 2px;
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+
+QMenuBar::item:selected {
+    background: rgba(61, 208, 225, 0.10);
+    color: #E8E8EA;
+}
+
+QMenu {
+    background: #1F1F23;
+    color: #E8E8EA;
+    border: 1px solid #2D2D33;
+    border-radius: 4px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 6px 24px;
+    border-radius: 3px;
+}
+
+QMenu::item:selected {
+    background: rgba(61, 208, 225, 0.16);
+    color: #E8E8EA;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: #2D2D33;
+    margin: 4px 8px;
+}
+
+/* ----------------------------------------------------------------------------
+ * 18. TextEdit / PlainTextEdit (log_view do ProgressCard)
+ * -------------------------------------------------------------------------- */
+
+QTextEdit,
+QPlainTextEdit {
+    background: #1F1F23;            /* bg.elevated — diferenciar do bg base */
+    color: #A8A8AC;
+    border: 1px solid #2D2D33;
+    border-radius: 4px;
+    padding: 8px;
+    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    selection-background-color: #3DD0E1;
+    selection-color: #0E0E10;
+}
+
+QTextEdit:focus,
+QPlainTextEdit:focus {
+    border-color: #3DD0E1;
+}
+
+/* ----------------------------------------------------------------------------
+ * 19. Notas para Felix — manutenção do tema
  *
- * - Refinar este QSS conforme telas vão sendo implementadas.
- * - Adicionar seletores específicos para widgets custom (toast, file_dialog
- *   wrapper, log_view) conforme criados.
- * - Manter cores SEMPRE referenciando paleta de THEME.md (sem hex inventado).
- * - Property dinâmica via setProperty + style.unpolish/polish para state changes.
+ * - QSS é cosmético: app deve funcionar 100% sem este arquivo (best-effort
+ *   load em app.py via contextlib.suppress).
+ * - Property dinâmica: chame setProperty + style().unpolish/polish após
+ *   mudança de estado.
  * - Light mode V2 (placeholder; não bloquear MVP).
+ * - Re-validar contraste WCAG AA quando mudar paleta (THEME §10).
  * ========================================================================== */

@@ -678,6 +678,20 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         title="Bem-vindo ao data-downloader",
         detail="Selecione um símbolo + período + clique em Baixar.",
     ),
+    # =================================================================
+    # §17b.6 — Metrics panel (Story 3.3 — Wave 18 — Felix+Uma+Pyro)
+    # Status bar metrics integrados com Story 2.4 PrometheusExporter.
+    # =================================================================
+    "LBL_STATUSBAR_METRICS_PORT": MicrocopyEntry(msg_type="label", title="Métricas: :{port}"),
+    "LBL_METRICS_OFF": MicrocopyEntry(msg_type="label", title="Métricas: off"),
+    "LBL_METRICS_ACTIVE_DOWNLOADS": MicrocopyEntry(msg_type="label", title="↓ {n}"),
+    "LBL_METRICS_QUEUE_DEPTH": MicrocopyEntry(msg_type="label", title="Q: {dll}/{write}"),
+    "LBL_METRICS_TRADES_TOTAL": MicrocopyEntry(msg_type="label", title="Σ {n}"),
+    "BTN_COPY_METRICS_URL": MicrocopyEntry(msg_type="button", title="Copiar URL"),
+    "TST_METRICS_URL_COPIED": MicrocopyEntry(
+        msg_type="success", title="✓ URL copiada para clipboard"
+    ),
+    "MOD_METRICS_DETAILS_TITLE": MicrocopyEntry(msg_type="label", title="Métricas Detalhadas"),
 }
 
 
