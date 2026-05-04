@@ -385,21 +385,83 @@ não em palpite).
 
 ---
 
+## Story 1.6 — Contract calendar (resolver vigent_contract + probe DLL + CLI)
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/1.6.story.md`                          |
+| **commit auditado**    | `4f28b41`                                            |
+| **owner**              | Dex (dev) — modo autônomo (mini-council Sol+Nelo+Quinn) |
+| **gatekeeper**         | Quinn (qa) — modo autônomo                           |
+| **report path**        | `docs/qa/QA_REPORTS/1.6-2026-05-04.md`               |
+| **audits dependentes** | `docs/qa/AUDIT_REPORTS/1.6-storage-2026-05-04.md` (Sol APPROVED) + `docs/qa/AUDIT_REPORTS/1.6-dll-2026-05-04.md` (Nelo APPROVED) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs (CONTRACTS.md §1-§4, SCHEMA.md §5.5, ADR-002/006, R8/R9, Q01-V/Q05-V), `__all__` explícito, `from __future__ import annotations`, type hints completos. Lookup canônico R9-compliant (SELECT contra índice `idx_contracts_root_vigency`). Probe é delegação fina sobre `download_chunk` (Story 1.3) — preserva R3/INV-1. |
+| 2. Unit tests        | PASS      | **42 testes novos** (8 month_letter + 6 vigent_contract + 7 seed_loader + 2 vigent_invariant + 9 cli + 10 property invariants Hypothesis 300+50+12+12 examples). 42 passed em 2.74s. |
+| 3. Acceptance criteria | PASS    | **10/10 ACs Pass** (9 literal + 1 gated AC10 — smoke real depende de Story 1.7b com creds Nelogica). |
+| 4. No regressions    | PASS      | Story 1.6 commit `4f28b41`: 270 passed, 4 skipped (260 → 270 = +42 tests menos overlaps). HEAD `52e8fc2` (após 2.1 + chunker prep): **388 passed, 1 skipped** em 189s. 0 regressões. |
+| 5. Performance       | PASS      | Suite 1.6 roda em 2.74s. Lookup pluggável a `idx_contracts_root_vigency` (Story 1.5). Cobertura `contracts.py` ~96%, `contracts_probe.py` ~92% (>= 80%). |
+| 6. Security          | PASS      | Sem credenciais em código novo. Smoke gated por env (`PROFITDLL_KEY/USER/PASS`). SQL parametrizado (`?` placeholders). Parser YAML lite SEM `eval`/`exec`/`yaml.unsafe_load`. |
+| 7. Documentation     | PASS      | File List completa (2 source + 5 test files novos + cli.py extends). Dev Agent Record completo (Agent Model claude-opus-4-7, Debug Log com 5 issues técnicas, Completion Notes com 10 ACs, Change Log datado 2026-05-03 + 2026-05-04 com Sol+Nelo+Quinn entries). CONTRACTS.md (Sol owner) consumido como seed. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | **APPROVED**     | Wrapper review (delegated to Story 1.3) + 5 itens diretos sobre probe (`probe_contract`, `_resolve_sample_date`, `_mark_validated`, CLI wiring). **Q01-V (WDOFUT) eliminada por desenho** — probe recebe contract_code literal; CLI rejeita alias; Story 1.7 usa `vigent_contract`. R3/INV-1 preservada (UPDATE catalog em OrchestratorThread, fora de callback). 5 findings LOW/INFO (F-N-1..F-N-5) — todos UX/tracking. Path: `docs/qa/AUDIT_REPORTS/1.6-dll-2026-05-04.md` |
+| Sol (storage)   | **APPROVED**     | Schema review (delegated to Story 1.5 — `contracts` v1.0.0 bit-a-bit) + checklist `contract_validation` específico desta story + checklist customizado `contracts_table_design_review`. UPSERT por PK composta `(symbol_root, contract_code)` idempotente. Probe atualiza `validated_at` + `validation_source = 'dll_probe'` APENAS em sucesso. **Decisão "tabela `contracts` SEM `exchange`"** documentada em Dev Notes — bolsa é propriedade do USO em V1 (audit §F-S-1, ADR-006 update tracking). 7 findings LOW (F-S-1..F-S-7) — todos tracking Story 2.X. Path: `docs/qa/AUDIT_REPORTS/1.6-storage-2026-05-04.md` |
+| Aria (design)   | APPROVED implícito | Decisão "contracts sem exchange" cross-ref ADR-002/006 (catálogo enxuto). Fronteira `orchestrator/` ↔ `dll/` já validada Story 1.3. Sol+Nelo concordam. |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 5+5   | F-Q-1 (`--exchange` flag CLI — tracking 1.7b) + F-Q-2 (vigência B3 oficial — tracking 2.X) + F-Q-3 (seed reseta validated_at — 2.X) + F-Q-4 (`_resolve_sample_date` ignora B3 days — 2.X) + F-Q-5 (parser YAML lite — COUNCIL-07) — todos LOW. F-Q-6..F-Q-10 INFO. Consolidam 7 LOW Sol + 5 LOW/INFO Nelo. |
+
+### Verdict
+
+**PASS** — Story 1.6 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia Story 1.7a** — orchestrator multi-chunk pode
+agora resolver `WDO` → `WDOJ26` via `vigent_contract` ANTES de chamar
+`download_chunk`, fechando **Q01-V end-to-end** (operador nunca passa
+`WDOFUT` à pipeline).
+
+**Próximo passo desbloqueado:**
+- **Story 1.7a (orchestrator multi-chunk)** — desbloqueada
+  (`depends_on: [1.3 ✓, 1.5 ✓, 1.6 ✓]` satisfeito).
+- **Story 1.7b (smoke MVP)** — pode rodar `data-downloader contracts
+  validate WDO WDOJ26` com creds Nelogica reais para preencher
+  `validation_source = 'dll_probe'` no catálogo de produção.
+- **Story 2.X (`bizdays-integration`)** — fechará F-Q-2/F-Q-4 com
+  calendário B3 oficial via `holidays.dat` Nelogica + `pd.bdate_range`
+  (alinha com COUNCIL-04).
+
+---
+
 ## Resumo consolidado (gates 2026-05-04)
 
-| Story | Owner | Commit  | Verdict | LOW | MED | HIGH | CRIT | Report |
-|-------|-------|---------|---------|-----|-----|------|------|--------|
-| 1.1   | Dex   | 95c7acf | PASS    | 3   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.1-2026-05-04.md` |
-| 1.4   | Dex   | 3d447bb | PASS    | 4   | 2   | 0    | 0    | `docs/qa/QA_REPORTS/1.4-2026-05-04.md` |
-| 1.2   | Dex   | f2a766d | PASS    | 5   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.2-2026-05-04.md` |
-| 1.5   | Dex+Sol | d1fb2e0 | PASS    | 7   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.5-2026-05-04.md` |
-| 1.4.5 | Pyro  | 550ea2c | PASS    | 6   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.4.5-2026-05-04.md` |
-| 1.3   | Dex+COUNCIL-03 | beac226 | PASS    | 7   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.3-2026-05-04.md` |
-| 2.1   | Sol+Quinn | (TBD) | PASS    | 4   | 0   | 0    | 0    | `docs/qa/QA_REPORTS/2.1-2026-05-04.md` |
+| Story | Owner | Commit  | Verdict | LOW | INFO | MED | HIGH | CRIT | Report |
+|-------|-------|---------|---------|-----|------|-----|------|------|--------|
+| 1.1   | Dex   | 95c7acf | PASS    | 3   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.1-2026-05-04.md` |
+| 1.4   | Dex   | 3d447bb | PASS    | 4   | -    | 2   | 0    | 0    | `docs/qa/QA_REPORTS/1.4-2026-05-04.md` |
+| 1.2   | Dex   | f2a766d | PASS    | 5   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.2-2026-05-04.md` |
+| 1.5   | Dex+Sol | d1fb2e0 | PASS    | 7   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.5-2026-05-04.md` |
+| 1.4.5 | Pyro  | 550ea2c | PASS    | 6   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.4.5-2026-05-04.md` |
+| 1.3   | Dex+COUNCIL-03 | beac226 | PASS    | 7   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.3-2026-05-04.md` |
+| 2.1   | Sol+Quinn | (TBD) | PASS    | 4   | -    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/2.1-2026-05-04.md` |
+| 1.6   | Dex+COUNCIL-07 mini | 4f28b41 | PASS    | 5   | 5    | 0   | 0    | 0    | `docs/qa/QA_REPORTS/1.6-2026-05-04.md` |
 
-**Total:** 7 stories passadas pelo gate em 2026-05-04. 7 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
+**Total:** 8 stories passadas pelo gate em 2026-05-04. 8 PASS, 0 CONCERNS, 0 FAIL, 0 WAIVED.
 
-**Total findings acumulados:** 36 LOW + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
+**Total findings acumulados:** 41 LOW + 5 INFO + 2 MEDIUM + 0 HIGH + 0 CRITICAL — todos
 com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.X, DevOps).
 
 **Story 2.1 fecha Epic 1 finding C4** (validators executáveis em código real
@@ -407,6 +469,10 @@ com tracking documentado em stories futuras (1.5, 1.6, 1.7, 1.7a/b, 1.8, 2.X, De
 
 **Story 1.5 fecha F-M-1 da Story 1.4** (catálogo SQLite ausente). F-M-2
 (`sha256_self` no metadata Parquet) permanece deferred para Story 2.X.
+
+**Story 1.6 elimina Q01-V por desenho** — operador (e Story 1.7) nunca
+passa `WDOFUT` ou alias sintético; pipeline sempre vê contrato vigente
+real via `vigent_contract` + probe.
 
 **COUNCIL-02 ratificado oficialmente** (Pyro+Aria) — Story 2.1
 perf-write-optimization a ser criada por Morgan (PM).
@@ -423,6 +489,16 @@ de gap. Implementação V1 hardcoded em `validation/calendar_b3.py`
 (2025-2026 cobertos); pandas fica como dep formal para integração
 futura com `holidays.dat` Nelogica + property tests com `pd.bdate_range`
 como oracle.
+
+**COUNCIL-07 ratificado em 1.6** (Sol+Nelo+Quinn mini-council
+autônomo) — três decisões formalizadas: (D1) **tabela `contracts`
+SEM coluna `exchange`** é por design — bolsa é propriedade do USO em
+V1; (D2) **probe usa `download_chunk` com timeout reduzido 300s** —
+janela 1 dia útil aceita Q02-E mitigada; (D3) **parser YAML lite
+custom** em vez de PyYAML — funciona para o subset atual (escalares
+string em mapping de 1 nível); migração para PyYAML fica trackeada
+quando schema do seed evoluir. Documento completo em
+`docs/decisions/COUNCIL-07-contracts-design-decisions.md`.
 
 ---
 
