@@ -1025,4 +1025,82 @@ não bloqueia entrega de valor.
 
 ---
 
+## Story 2.4 — Prometheus Observability Exporter V2
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.4.story.md`                          |
+| **commit auditado**    | `12baeb9`                                            |
+| **owner**              | Dex (dev) + Aria (architect mental) + Pyro (perf mental) — modo autônomo mini-council via COUNCIL-15 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Aria+Pyro+Dex) |
+| **report path**        | `docs/qa/QA_REPORTS/2.4-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.4-design-2026-05-04.md` (Aria APPROVED) |
+| **council**            | `docs/decisions/COUNCIL-15-prometheus-exporter-v2.md` (Aria+Pyro+Dex sign-off) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs (ADR-005/007a/010/011/013, MANIFEST §R21, COUNCIL-05 §D3, COUNCIL-15). `__all__` explícito (`contracts/observability.py`, `observability/__init__.py`, `observability/prometheus_exporter.py`). Type hints completos (mypy strict 63 source files clean). Especificações declarativas via `_CounterSpec`/`_GaugeSpec`/`_HistogramSpec` (single-source-of-truth — decisão Dex+Aria COUNCIL-15). ADR-013 amendment 2026-05-04 ratificado. |
+| 2. Unit tests        | PASS      | **622 PASS + 1 SKIP em ~255s** suite completa. **+31 tests específicos Story 2.4** PASS em 8.89s (7 Protocol + 15 exporter + 4 CLI integration + 5 orchestrator integration). Cobertura `observability/` ~95%; `contracts/observability.py` ~98%; orchestrator mantido (~91%); cli (`download` + `--metrics-port` lifecycle) ~88%; global ≥ 75%. |
+| 3. Acceptance criteria | PASS    | **5/8 ACs PASS literal + 3 PASS parciais** (AC4 com tracking F-Q-1/F-Q-2 auto-retry porta + env var deferred yagni V1; AC7 com tracking F-Q-3 overhead bench Pyro deferred Story 2.7; AC8 com tracking F-Q-4 OBSERVABILITY.md deferred PR follow-up — todas decisões COUNCIL-15 §D5 endossadas). |
+| 4. No regressions    | PASS      | **+31 testes específicos Story 2.4 vs HEAD anterior; 0 regressões.** Cross-story matrix (Stories 1.4/1.5/1.7a/b/1.8/2.1/2.2/2.3/2.5) confirma compat — Story 2.4 não toca `dll/`, `storage/`, `validation/`, `ui/`. Public API extensão aditiva opcional (sem breaking). |
+| 5. Performance       | PASS      | **Hot path R21 PRESERVADO** — emitter chamado APENAS per-chunk (cool path). Validação multi-camada: design (COUNCIL-15 §D3), implementação (`orchestrator.py:683` increment per-chunk batch, não per-trade), test explícito (`test_orchestrator_no_emitter_call_per_trade` valida job de N trades em 1 chunk gera 1 chamada não N). **Opt-in default zero overhead** — `NullMetricsEmitter` métodos vazios `__slots__ = ()` (~80ns dispatch sem alocações). Pyro endossou em COUNCIL-15 §D2/D3/D4. |
+| 6. Security          | PASS      | `detect-secrets scan --baseline .secrets.baseline` Passed (exit 0). Sem credenciais em código novo. **Bind `127.0.0.1` por segurança** — exporter desktop local não-público, não expõe métricas em `0.0.0.0` sem opt-in explícito. Métricas com prefixo `data_downloader_` previne colisão com outras métricas. |
+| 7. Documentation     | PASS      | `2.4.story.md` File List + Dev Agent Record + Change Log datado. **ADR-013 amendment 2026-05-04** documenta V2 (status `accepted (V1 + V2 implemented)`). **COUNCIL-15** documenta sign-offs Aria+Pyro+Dex (D1 Protocol fronteira, D2 registry isolado, D3 hot path R21, D4 opt-in default OFF, D5 métricas canônicas 8+5+5, D6 MultiTargetEmitter). Aria design review formalizado. **`OBSERVABILITY.md` ops doc DEFERRED PR follow-up (F-Q-4)** — ADR-013 amendment + COUNCIL-15 cobrem release. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | N/A              | Story 2.4 não toca `dll/`. Lei R3 não aplicável. Reforço R21 via test explícito (callback DLL não chama emitter). |
+| Sol (storage)   | N/A              | Story 2.4 não toca `storage/`. Sem mudança em writer, catalog, schema, partition, dedup, vectorized.    |
+| Aria (design)   | **APPROVED**     | Review em `docs/qa/AUDIT_REPORTS/2.4-design-2026-05-04.md`. **Protocol pattern endossado** (`MetricsEmitter` ABC + `NullMetricsEmitter` em `contracts/observability.py` — Aria fronteira). **Public API intacto** (extensão aditiva opcional `metrics_emitter: MetricsEmitter \| None = None` — sem breaking, sem bump major). **R21 REFORÇADO** (emitter cool-path apenas; verificado por test explícito). **ADR-013 amendment 2026-05-04 ratificado** (8 counters + 5 gauges + 5 histograms canônicos; Protocol em `contracts/`; lifecycle em CLI; cardinality LRU deferred Epic 4). 0 findings ≥ LOW, 4 INFO. |
+| Pyro (perf)     | **APPROVED (mental)** | COUNCIL-15 §D2/D3/D4 sign-off Pyro: registry isolado (test isolation), hot path R21 preservado (emitter cool-path apenas), opt-in default zero overhead (`NullMetricsEmitter` no-op). `bench_observability_overhead` formal DEFERRED Story 2.7 (F-Q-3 tracking — orchestrator R21 já garantido por unit test). |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 4     | F-Q-1 (auto-retry porta deferred yagni V1 — COUNCIL-15 §D5; CLI captura `OSError` claro) / F-Q-2 (env var `DATA_DOWNLOADER_METRICS_PORT` deferred yagni V1 — COUNCIL-15 §D5) / F-Q-3 (`bench_observability_overhead` Pyro deferred Story 2.7 — R21 já garantido por unit test) / F-Q-4 (`OBSERVABILITY.md` ops doc deferred PR follow-up — ADR-013 amendment + COUNCIL-15 cobrem release) |
+| INFO      | 3     | F-Q-5 (F-A-1 Aria — `dll_drops_total` reservado V2, call site fica em DLL layer fora escopo Story 2.4) / F-Q-6 (reforço informativo F-A-2/F-A-3/F-A-4 Aria — auto-retry + env var + OBSERVABILITY.md deferred) / F-Q-7 (microcopy PT-BR formal via Uma deferred — mensagem inline já amigável) |
+
+### Verdict
+
+**PASS** — Story 2.4 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — sem exporter HTTP Prometheus,
+  smoke MVP V1 (Story 1.7b release readiness) bloqueava por falta de
+  métricas live para validar em produção.
+- **Story 2.7 (hot path tuning)** — depende DESTA (medir overhead pré/pós
+  com exporter ativo via `bench_observability_overhead`).
+- **Future Epic 4 multi-symbol** — V2 multi-process N exporters →
+  Prometheus Server scrape opcional para agregação (cardinality LRU
+  explícito implementado naquele momento).
+
+**Highlight design:** Esta é uma das stories que Aria normalmente examina
+com **ceticismo arquitetural elevado** — observability adicionada a um
+sistema maduro tende a vazar para hot path (R21 violation) ou criar
+acoplamento estrutural entre `orchestrator/` e `observability/`. **NÃO foi
+o caso aqui:** o **Protocol pattern em `contracts/observability.py`**
+garante fronteira por design (orchestrator depende apenas do Protocol,
+não da implementação concreta); o **hot path teste explícito**
+(`test_orchestrator_no_emitter_call_per_trade`) garante R21 (emitter
+chamado APENAS per-chunk, nunca per-trade); o **opt-in default OFF**
+(`NullMetricsEmitter` no-op) garante zero overhead para usuários V1
+desktop. Aria assina sem reservas; Pyro endossou em COUNCIL-15.
+
+**Highlight implementação:** Especificações declarativas via
+`_CounterSpec`/`_GaugeSpec`/`_HistogramSpec` (single-source-of-truth) +
+`MultiTargetEmitter` para fan-out futuro (V1 structlog dump cool-path +
+V2 Prometheus HTTP) sem refactor do orchestrator. Lifecycle gerenciado
+em entrypoint (`cli.py` `try/finally`) com idempotência verificada por
+test. Bind `127.0.0.1` por segurança (exporter desktop local não-público).
+
+---
+
 — Quinn, no portão
