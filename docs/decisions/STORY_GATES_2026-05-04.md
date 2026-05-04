@@ -892,4 +892,137 @@ Hypothesis >600 examples).
 
 ---
 
+## Story 2.3 — Schema Migration Framework
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.3.story.md`                          |
+| **commit auditado**    | `c6d61ae`                                            |
+| **owner**              | Dex (dev) + Sol (storage) — modo autônomo mini-council via COUNCIL-14 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Sol+Aria+Dex) |
+| **report path**        | `docs/qa/QA_REPORTS/2.3-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.3-storage-2026-05-04.md` (Sol APPROVED) + `docs/qa/AUDIT_REPORTS/2.3-design-2026-05-04.md` (Aria APPROVED) |
+| **council**            | `docs/decisions/COUNCIL-14-schema-migration-framework.md` (Sol+Aria+Dex sign-off) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs (MIGRATIONS.md, SCHEMA.md, INTEGRITY.md, ADR-002/004/011, COUNCIL-14). `__all__` explícito em `__init__.py` (10 entries). Prefixo `_` em `_base`, `_registry`, `_runner` sinaliza módulos privados. Type hints completos. ABC + mixin pattern; dataclasses imutáveis (`@dataclass(frozen=True)`). |
+| 2. Unit tests        | PASS      | **622 PASS + 1 SKIP em ~230s** (+31 testes vs HEAD anterior 591 PASS). Cobertura `storage/migrations/` ~90%; `cli.py` sub-app `migrate_app` ~85%; storage geral ≥ 80%. |
+| 3. Acceptance criteria | PASS    | **8/10 ACs PASS literal + 2 PASS parciais** (AC9 com tracking pre-conditions COUNCIL-14 §4; AC10 com tracking MIGRATIONS.md §6 update deferred — ambos não bloqueantes). |
+| 4. No regressions    | PASS      | **+31 testes vs HEAD anterior; 0 regressões.** Cross-story matrix (Stories 1.4/1.5/1.6/1.7a/b/1.8/2.1/2.2) confirma compat. Sol audit §3.4 confirma idempotência preservada (R5), atomicity preservada (INV-3), R4 (schema canônico v1.0.0 INTACTO). |
+| 5. Performance       | PASS      | Migration é operação one-shot (não hot path). Suite roda em ~230s (+~3% vs Story 2.2 baseline — esperado dado +31 tests). Property test Hypothesis 100 examples completa em < 2s. |
+| 6. Security          | PASS      | `pre-commit run detect-secrets` Passed. SQL `_migration_log` DDL é literal (sem string interpolation de input externo). UPDATE em catalog usa parameterized queries. |
+| 7. Documentation     | PASS      | `2.3.story.md` File List + Dev Agent Record + Change Log datado. `migrations/__init__.py` docstring ~95 linhas com template + checklist + convenção AC1. `COUNCIL-14-schema-migration-framework.md` documenta sign-offs Sol+Aria+Dex. Sol audit + Aria review formalizados. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | N/A              | Story 2.3 não toca `dll/`. Lei R3 não aplicável.                                                       |
+| Sol (storage)   | **APPROVED**     | Audit em `docs/qa/AUDIT_REPORTS/2.3-storage-2026-05-04.md`. **Schema canônico Parquet v1.0.0 INTACTO** (`SCHEMA_VERSION` + `pyarrow_schema()` preservados). **R4/R5/INV-3 preservadas**. Catalog version bump 1.0.0 → 1.1.0 aditivo puro (nova tabela `_migration_log` + index). Two-phase commit reusado (Story 1.5). 0 findings ≥ MEDIUM, 3 LOW + 1 INFO com tracking. |
+| Aria (design)   | **APPROVED**     | Review em `docs/qa/AUDIT_REPORTS/2.3-design-2026-05-04.md`. **Fronteira `public_api/` intocada** (diff vazio). **Sem ADR amendment necessário** — framework é realização concreta de ADR-002 §"Migrações" + MIGRATIONS.md SCAFFOLD. CLI `migrate plan|execute|rollback|cleanup` segue Typer pattern estabelecido. 0 findings ≥ LOW, 2 INFO. |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 4     | F-Q-1 (AC9 pre-conditions test deferred — COUNCIL-14 §4) / F-Q-2 (AC10 MIGRATIONS.md §6 update deferred — README extensivo no `__init__.py` cobre) / F-Q-3 (`fsync(parent_dir)` ausente em mixin — F-S-1 Sol; mitigado por `.bak` + catálogo) / F-Q-4 (DDL `_migration_log` duplicada Python+SQL — F-S-3 Sol; idênticas hoje, drift futuro é risco) |
+| INFO      | 1     | F-Q-5 (pre-conditions delegadas ao caller — reforço informativo F-A-2 Aria + F-S-2 Sol)               |
+
+### Verdict
+
+**PASS** — Story 2.3 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — sem migration framework, primeiro
+  bump de schema em Epic 4 bloqueava.
+- **Future bumps de schema canônico** — V100ToV110 serve de **referência
+  executável** para próximas migrations aditivas (e quebradoras com ADR
+  quando necessário).
+
+**Highlight design:** Esta é uma das stories que Aria normalmente examina
+com **ceticismo arquitetural elevado** — frameworks adicionados após o
+sistema estar maduro tendem a vazar para `public_api/` ou criar
+cross-cutting dependencies. **NÃO foi o caso aqui:** o framework é
+hermético (prefixo `_` em `_base`, `_registry`, `_runner`), exposto
+apenas via CLI controlado, e respeita a fronteira que ADR-007a definiu.
+Sol+Aria assinam sem reservas.
+
+---
+
+## Story 2.5 — Calendar B3 holidays.dat Integration
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.5.story.md`                          |
+| **commit auditado**    | `678520c`                                            |
+| **owner**              | Dex (dev) + Sol (storage) + Nelo (DLL) — modo autônomo mini-council via COUNCIL-16 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Sol+Nelo+Dex) |
+| **report path**        | `docs/qa/QA_REPORTS/2.5-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.5-storage-2026-05-04.md` (Sol APPROVED) + `docs/qa/AUDIT_REPORTS/2.5-dll-2026-05-04.md` (Nelo APPROVED) |
+| **council**            | `docs/decisions/COUNCIL-16-holidays-dat-integration.md` (Sol+Nelo+Dex sign-off) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota                                                                  |
+|----------------------|-----------|-----------------------------------------------------------------------|
+| 1. Code review       | PASS      | Docstrings ricos com refs (PROFITDLL_KNOWLEDGE.md, INTEGRITY.md M17, CONTRACTS.md §0, COUNCIL-16). Erros tipados (`HolidaysDatNotFoundError`, `HolidaysDatParseError(line_number, line_content, reason)`). Cache mtime-based + thread lock. Comentários extensos sobre ASCII codes do exchange (66='B', 70='F', 35='#', 88='X', 99='c'). Type hints completos. |
+| 2. Unit tests        | PASS      | **622 PASS + 5 SKIP em ~245s** (+76 testes novos no validation/; 4 SKIPs novos condicionais ao real DAT). Cobertura `holidays_dat_parser.py` ~95%; `calendar_b3.py` ~92%; validation geral ≥ 80%. |
+| 3. Acceptance criteria | PASS    | **8/8 ACs PASS literal**. Investigação de formato (AC1) + parser (AC2) + integração transparente (AC3) + cobertura ≥ 143 entradas (AC4) + refresh mtime (AC5) + ground truth (AC6) + doc formato (AC7) + graceful fallback (AC8). |
+| 4. No regressions    | PASS      | **+76 testes novos; 0 regressões.** API pública preservada (`is_holiday`, `is_b3_business_day`, `b3_business_days_range`). Tests Story 2.1 (gap detection) PASS sem mudança. DST boundary ≥ 2020 (M17) preservada. |
+| 5. Performance       | PASS      | Cache mtime-based em ambas camadas (parser + calendar) — custo amortizado O(1) por chamada após boot. Lock thread-safe em primeiro uso. Re-parse automático quando DAT muda. Property test Hypothesis 5 tests completa em < 3s. |
+| 6. Security          | PASS      | `pre-commit run detect-secrets` Passed. Parser usa apenas stdlib (`re`, `pathlib`, `threading`, `datetime`); sem string interpolation; sem deserialização insegura (texto plano). Filtro de exchanges estrangeiros previne contaminação por dados não-B3. |
+| 7. Documentation     | PASS      | `2.5.story.md` File List + Dev Agent Record completos. `HOLIDAYS_DAT_FORMAT.md` ~200 linhas (9 seções: status validation + caveat reverse-eng, layout, ASCII codes, cobertura + quirk Nelogica, estratégia parse, limitações, ground truth 2025, refs, Q16-OPEN). `COUNCIL-16-holidays-dat-integration.md` documenta sign-offs. Sol + Nelo audits formalizados. **`Q16-VALIDATED` adicionado a `QUIRKS.md`**. |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | **APPROVED**     | Audit em `docs/qa/AUDIT_REPORTS/2.5-dll-2026-05-04.md`. Reverse engineering rigoroso documentado byte-a-byte. `validation_source: reverse_engineered` declarado. ASCII codes do exchange preservados. Quirk Nelogica (feriados FDS omitidos) documentado. **Q16-OPEN ratificado como resolved-com-caveat** (parser funcional; OPEN para confirmação oficial Nelogica futura). **Q16-VALIDATED adicionado a `QUIRKS.md`**. 1 LOW + 2 INFO findings. |
+| Sol (storage)   | **APPROVED**     | Audit em `docs/qa/AUDIT_REPORTS/2.5-storage-2026-05-04.md`. **API pública preservada** (`is_holiday`, `is_b3_business_day`, `b3_business_days_range`). **Graceful fallback** (`hardcoded_only` mode em CI). **Cache mtime-based** + thread-safe. **União parser ∪ hardcoded** captura superset semântico (FDS via hardcoded; pontos facultativos via parser). **Cobertura hardcoded estendida 2020-2030** (143 entradas). **DST boundary ≥ 2020 preservada**. 0 findings ≥ MEDIUM, 3 LOW + 2 INFO. |
+| Aria (design)   | N/A (delegação implícita) | Story 2.5 é substituição de fonte de dados internal a `validation/`; não cruza fronteira `public_api/` (Aria endossa via padrão estabelecido). |
+
+### Findings
+
+| Severity  | Count | Detalhes                                                                                              |
+|-----------|-------|-------------------------------------------------------------------------------------------------------|
+| CRITICAL  | 0     | -                                                                                                     |
+| HIGH      | 0     | -                                                                                                     |
+| MEDIUM    | 0     | -                                                                                                     |
+| LOW       | 3     | F-Q-1 (cobertura hardcoded até 2030 — anos 2031-2035 dependem só do parser; F-S-2 Sol) / F-Q-2 (SHA-256 do DAT placeholder em HOLIDAYS_DAT_FORMAT.md §1; F-S-3 Sol + F-N-2 Nelo) / F-Q-3 (regex `\d+` para exchange é design defensivo; F-S-1 Sol) |
+| INFO      | 2     | F-Q-4 (estratégia união conservadora + Q16-OPEN resolved-com-caveat — F-S-4 Sol + F-N-3 Nelo) / F-Q-5 (**Q16-VALIDATED adicionado a `QUIRKS.md`** por esta gate — F-N-1 Nelo) |
+
+### Verdict
+
+**PASS** — Story 2.5 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — uma das condições era "Calendar
+  B3 lê `holidays.dat` Nelogica em runtime"; **satisfeita**.
+- **Future Epic 4 multi-asset** — extensão de DataValidator para validar
+  gaps em datasets multi-anos pode confiar no calendar estendido.
+
+**Highlight reverse engineering:** Esta gate ratifica o **uso correto do
+status `validation_source: reverse_engineered`** quando o manual oficial
+é silente sobre auxiliary files. Nelo aplicou checklist
+`reverse_engineering_review` (20 itens) com rigor: documentação
+byte-a-byte, caveats explícitos, ground truth comparison vs B3 oficial,
+erros tipados com offset, fallback graceful, quirk Nelogica catalogado
+em `QUIRKS.md` como **Q16-VALIDATED**. Q16-OPEN mantido aberto para
+confirmação oficial Nelogica futura via probe — postura responsável que
+não bloqueia entrega de valor.
+
+**Fechamento de débitos pré-existentes:**
+- ✅ **Finding F-S-1 Sol audit Story 2.1** (calendário hardcoded como
+  caveat) — fechado.
+- ✅ **Caveat COUNCIL-04** (pandas para business-days com calendário
+  ainda placeholder) — fechado.
+
+---
+
 — Quinn, no portão

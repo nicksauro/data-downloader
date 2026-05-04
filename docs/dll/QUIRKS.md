@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-03
+**Última atualização:** 2026-05-04
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -32,6 +32,7 @@
 | [Q13-V](#q13-v) | ✅ validated | api | Funções V1 obsoletas — usar V2 sempre que existir |
 | [Q14-E](#q14-e) | 🔬 empirical | metadata | `GetAgentName` requer `GetAgentNameLength` PRIMEIRO |
 | [Q15-OPEN](#q15-open) | ❓ open | threading | Comportamento ConnectorThread quando `put_nowait` bloqueia (drop ou wait?) |
+| [Q16-VALIDATED](#q16-validated) | ✅ validated | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
 
 ---
 
@@ -321,6 +322,29 @@
 - **Resposta detalhada:** ver [`OPEN_QUESTIONS_RESPONSES.md`](./OPEN_QUESTIONS_RESPONSES.md) Q1.
 - **Data descoberta:** 2026-05-03 (Pyro plan review).
 - **Aplica a stories:** 1.4.5 (probe), 1.7a (queue policy final).
+
+---
+
+## Q16-VALIDATED
+
+- **ID:** Q16-VALIDATED
+- **Status:** ✅ validated (com sub-status `reverse_engineered` — manual silente sobre auxiliary file)
+- **Categoria:** auxiliary file / calendar
+- **Sintoma:** Arquivo auxiliar `profitdll/DLLs/Win64/holidays.dat` distribuído com a DLL **omite feriados oficiais que caem em fim de semana** (sábado/domingo). Exemplos observados em 2025: `2025-09-07` Independência (domingo), `2025-10-12` Aparecida (domingo), `2025-11-02` Finados (domingo), `2025-11-15` Proclamação (sábado) — todos AUSENTES do DAT.
+- **Causa raiz:** Provavelmente otimização Nelogica — já não há pregão nesses dias, então o arquivo (~34 KB, 843 linhas dados) lista apenas datas que afetariam pregão se fossem em dia útil. Especulação — manual silencioso sobre o critério.
+- **Evidência:** Inspeção byte-a-byte do DAT distribuído em `2025-12-29 14:16:19.813` UTC (33 976 bytes, 843 linhas dados, cobertura 2013-2035). 100% das linhas com `OPEN` vazio que caem em FDS estão **ausentes**. Validado por ground truth comparison vs tabela B3 oficial publicada (`docs/dll/HOLIDAYS_DAT_FORMAT.md` §7).
+- **Workaround:** Manter tabela hardcoded estendida (2020-2030) em `src/data_downloader/validation/calendar_b3.py` que **inclui** feriados FDS para completude semântica. Estratégia de **união parser ∪ hardcoded** captura superset semântico (caller pode querer saber "é feriado?" mesmo num fim de semana — gap detection conservadora).
+- **Manual diz:** silencioso sobre `holidays.dat` (auxiliary file não documentado em `PROFITDLL_KNOWLEDGE.md` §1-8).
+- **Data descoberta:** 2026-05-03 (Story 2.5 mini-council Sol+Nelo+Dex — COUNCIL-16).
+- **Data validated:** 2026-05-04 (gate Quinn `*qa-gate 2.5` + Nelo `*audit` formato).
+- **Validation source:** `reverse_engineered` (parser funcional via reverse engineering; **Q16-OPEN** mantido aberto para confirmação oficial Nelogica futura via `Nelo *probe-manual`).
+- **Aplica a stories:** 2.5 (calendar B3 holidays.dat — esta story); futuro 4.X (multi-asset gap detection que dependa de calendar B3 estendido).
+- **Refs:**
+  - `src/data_downloader/validation/holidays_dat_parser.py` — parser
+  - `src/data_downloader/validation/calendar_b3.py` — consumer + fallback
+  - `docs/dll/HOLIDAYS_DAT_FORMAT.md` — formato byte-a-byte (Nelo authority)
+  - `docs/decisions/COUNCIL-16-holidays-dat-integration.md` — sign-offs
+  - `docs/qa/AUDIT_REPORTS/2.5-dll-2026-05-04.md` — esta validação
 
 ---
 
