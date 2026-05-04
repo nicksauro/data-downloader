@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from data_downloader.validation.calendar_b3 import (
     b3_business_days_range,
+    b3_holidays,
     is_b3_business_day,
 )
 from data_downloader.validation.data_validator import (
@@ -51,6 +52,7 @@ __all__ = [
     "IntegrityChecker",
     "IntegrityReport",
     "b3_business_days_range",
+    "b3_holidays",
     "is_b3_business_day",
     "validate_dataset",
 ]
