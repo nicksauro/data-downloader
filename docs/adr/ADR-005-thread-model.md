@@ -426,3 +426,165 @@ Quinn — testes unit `test_state_machine.py` validam todas as 4
 transições para FAILED + 1 transição FAILED → IDLE. Audit Aria
 `*review-design 1.7a` confirmou consistência (sem regressão de
 INV-11/INV-12).
+
+---
+
+## Amendment 2026-05-04 (b) — DLL init sequence Nelogica example
+
+**Autor:** 🏛️ Aria (review-design Story 1.7b-followup, autônomo)
+**Origem:** Smoke real falhou com MARKET_DATA estancado em `result=1`
+(MARKET_WAITING_TICKETS) sem progredir para `result=4`
+(MARKET_CONNECTED). Usuário reorientou: "manual e exemplo não estão
+errados, basta seguir". Comparação arquitetural exemplo Nelogica
+(`profitdll/Exemplo Python/main.py:729-764`) vs nosso wrapper
+(`src/data_downloader/dll/wrapper.py`).
+**Related:** Story 1.2 AC2 (11 callback slots), Q-DRIFT-02 (handshake
+lento), Q11-E (Sentinel — None nos slots), R3 (callback-only
+put_nowait).
+
+### Problema endereçado
+
+Smoke 2026-05-04 mostrou que `wait_market_connected` recebia
+sequência de states travando em MARKET_DATA `result=1`
+(MARKET_WAITING_TICKETS) — nunca alcançando `result=4`. Hipóteses
+em paralelo:
+
+1. **Nelo** investiga semântica de state codes (paralelo).
+2. **Aria (este amendment)** investiga divergência de SEQUÊNCIA DE
+   INICIALIZAÇÃO entre nosso wrapper e o exemplo oficial Nelogica.
+
+### Comparação estrutural exemplo vs wrapper
+
+#### A. Sequência de inicialização
+
+| Passo | Exemplo Nelogica (`main.py:729-764`) | Nosso wrapper (`wrapper.py:240-375`) |
+|-------|--------------------------------------|--------------------------------------|
+| 1 | `DLLInitializeMarketLogin(key, user, pwd, stateCallback, None, newDailyCB, None, None, None, progressCB, tinyBookCB)` (11 args) | `DLLInitializeMarketLogin(key, user, pwd, stateCB, *7 NoopCB)` (11 args) |
+| 2 | `SetAssetListCallback`, `SetAdjustHistoryCallbackV2`, `SetAssetListInfoCallback`, `SetAssetListInfoCallbackV2`, `SetOfferBookCallbackV2`, `SetOrderCallback`, `SetOrderHistoryCallback`, `SetInvalidTickerCallback`, `SetTradeCallbackV2`, `SetAssetPositionListCallback`, `SetBrokerAccountListChangedCallback`, `SetBrokerSubAccountListChangedCallback`, `SetPriceDepthCallback`, `SetTradingMessageResultCallback` (**14 calls**) | (NENHUM `SetXxxCallback` chamado entre init e wait) |
+| 3 | `wait_login()` — busy-loop em flag `bMarketConnected` | `wait_market_connected()` — drain queue |
+
+**Divergência arquitetural identificada:** o exemplo oficial registra
+**14 callbacks adicionais via `SetXxxCallback` ANTES de aguardar a
+conexão**. Nosso wrapper omite essa fase. **Hipótese:** a DLL pode
+condicionar o handshake completo de MARKET_DATA (transição de
+`result=1` para `result=4`) à presença de callbacks pré-registrados
+para feed-types específicos (asset-list, adjust-history, trade-V2,
+offer-book-V2). Ausência dos slots faz a DLL completar o login mas
+nunca declarar MARKET_CONNECTED — porque, do ponto de vista da DLL,
+não há "consumidor" para o feed.
+
+#### B. Critério de "conectado"
+
+| | Exemplo (`main.py:222-228, 568-579`) | Nosso wrapper (`wrapper.py:464-470`) |
+|---|--------------------------------------|--------------------------------------|
+| Aceita | `conn_type==2 AND result==4` (somente) | `conn_type==2 AND result ∈ {2, 4}` |
+
+**Análise:** o exemplo é mais estrito (apenas `result=4`); o manual
+canônico §3.2 L3317-3329 confirma `4 = MARKET_CONNECTED`. Nosso
+wrapper introduziu `result=2` (MARKET_WAITING) como aceito sob
+"flexibilidade defensiva" (Q-AMB-01) — mas isso é uma **inflação de
+estados válidos**: `result=2` significa que a DLL está apenas
+aguardando ticket-data, NÃO conectada. Aceitar `2` pode declarar
+sucesso prematuro e mascarar bugs reais (como o smoke atual onde
+`result=1` aparece e nunca avança — se aparecesse `2`, nosso wrapper
+declararia "conectado" indevidamente). **Recomendação:** alinhar com
+exemplo — aceitar SOMENTE `result=4` (consistente com manual canônico).
+
+#### C. Slots de callback no init (None vs Noop)
+
+| | Exemplo | Nosso wrapper |
+|---|---------|---------------|
+| Slots ativos | state, daily, progress, tinyBook (4) | state (1) |
+| Slots `None` | 4 (trade, priceBook, offerBook, histTrade) | 0 |
+| Slots Noop | 0 | 7 |
+
+**Análise:** o exemplo passa **`None` nos slots não-usados**, contrariando
+o que documentamos em Q11-E / Sentinel §12 ("None corrompe registro
+interno"). Esta evidência empírica do código oficial sugere que o
+guard Q11-E pode ter sido **defesa em demasia**. Porém, NoopCallback
+é estritamente mais defensivo (não há custo runtime) e mantém a regra
+"nunca passar ponteiro nulo". **Decisão:** manter NoopCallback (custo
+zero, robustez extra), mas reconhecer que a estrutura do exemplo é
+válida.
+
+Mais importante: **o exemplo deixa `histTrade` (slot 8) como `None`
+no init** e depois registra `SetTradeCallbackV2` (note: TradeCallback
+V2 ≠ HistoryTradeCallback V2). Isso confirma que `Set*Callback` pós-init
+para handlers reais é o padrão canônico — exatamente o que Story 1.3
+faz (`set_history_trade_callback_v2`).
+
+#### D. Threading
+
+| | Exemplo | Nosso wrapper |
+|---|---------|---------------|
+| State callback body | escreve em flag global (`bMarketConnected = True`) | `state_queue.put_nowait((conn_type, result))` |
+| Wait loop | busy-loop sobre flag (sem sleep) | `queue.get(timeout=...)` com heartbeat 30s |
+
+**Decisão arquitetural CONFIRMADA:** nosso modelo (queue + drain)
+é **estritamente superior** ao exemplo:
+
+- **R3 / INV-1 preservado:** callback faz APENAS put_nowait —
+  exemplo escreve em flag (também simples, mas sem debugging útil).
+- **Sem CPU-burn:** exemplo busy-loops sem sleep (consume 100% CPU
+  até MARKET_CONNECTED chegar) — nosso `get(timeout=...)` cede CPU.
+- **Heartbeat:** Q-DRIFT-02 emite log a cada 30s; exemplo é
+  silencioso, operador não sabe se travou.
+- **Inspecção externa:** counter `dll_state_queue_full_total`
+  (ADR-013) detecta saturação; flag global é opaca.
+
+**NÃO retroceder para flags globais.** Manter padrão queue (R3).
+
+### Decisão arquitetural
+
+1. **Manter** padrão queue + drain (R3 / INV-1) — modelo superior
+   ao exemplo, sem regressão.
+2. **Manter** NoopCallback nos 7 slots não-state do init — custo
+   zero, defesa em profundidade, alinhado com Q11-E (mesmo que
+   exemplo use `None`, NoopCallback é estritamente mais defensivo).
+3. **Recomendação para Dex (próximo agente, paralelo):**
+   pre-registrar callbacks adicionais via `SetXxxCallback` ENTRE
+   init e `wait_market_connected`, replicando a sequência do
+   exemplo. Hipótese: DLL pode requerer callbacks pré-registrados
+   para feed-types específicos para completar handshake MARKET_DATA.
+   Slots críticos a investigar (em ordem de probabilidade):
+   - `SetTradeCallbackV2` (feed live trade — pode ser pré-requisito
+     para MARKET_DATA `result=4`)
+   - `SetOfferBookCallbackV2` (book live)
+   - `SetAdjustHistoryCallbackV2` (adjust feed)
+   - `SetAssetListCallback` + `SetAssetListInfoCallback{V2}`
+     (registro de tickers ativos)
+4. **Recomendação adicional:** alinhar critério de "conectado" com
+   exemplo — aceitar SOMENTE `result=4` para `conn_type=2`. O
+   `result=2` (MARKET_WAITING) é estado intermediário, não terminal.
+   Atualizar `wait_market_connected` (`wrapper.py:464-470`) e doc
+   AC5 / Q-AMB-01. Esta mudança restringe o critério, alinha com
+   manual + exemplo, e elimina risco de "sucesso prematuro".
+
+### Risco arquitetural
+
+A hipótese (3) cria nova superfície de falha: cada `SetXxxCallback`
+adicionado é um trampoline ctypes a mais para sustentar em
+`_cb_refs` (anti-GC, Q07-V). Lista crescerá de 8 entries para
+~22 entries — ainda trivial, mas formaliza que **factories
+correspondentes** (`make_trade_callback_v2`, `make_offer_book_v2`,
+etc.) precisam ser criadas em `callbacks.py` com mesma disciplina
+(R3 — só put_nowait). Story dedicada (ex. 1.7c ou refactor
+de 1.2) para Dex implementar com testes.
+
+**Não há dependência circular.** Os novos callbacks viveriam em
+`callbacks.py` (já existente), tipos em `types.py` (já estendido com
+V2 em Story 1.3). Diff mecânico sobre wrapper.
+
+### Sign-off
+
+- **Aria (architect):** APPROVED — review-design conclusivo. A
+  divergência (A) é a hipótese mais forte para o smoke real travado;
+  (B) é fix seguro e baixo custo; (C/D) confirma decisões prévias.
+
+### Auditor
+
+Story 1.7c (futura, owner Dex) — implementação dos `SetXxxCallback`
+pré-conexão + smoke real após mudança. Quinn validar via test
+property: `wait_market_connected` retorna True SOMENTE em
+`result=4`; smoke real demonstra MARKET_DATA progredindo de
+`result=1` para `result=4`.
