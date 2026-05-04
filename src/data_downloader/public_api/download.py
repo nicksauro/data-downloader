@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     import threading
     from collections.abc import Callable
 
+    from data_downloader.contracts.observability import MetricsEmitter
+
 __all__ = [
     "DownloadHandle",
     "DownloadProgress",
@@ -71,6 +73,7 @@ def download(
     dll_factory: Callable[[], object] | None = None,
     catalog_factory: Callable[[Path], object] | None = None,
     writer_factory: Callable[[Path], object] | None = None,
+    metrics_emitter: MetricsEmitter | None = None,
 ) -> DownloadHandle:
     """Inicia download assíncrono de histórico para ``symbol`` em ``[start, end]``.
 
@@ -99,6 +102,11 @@ def download(
         writer_factory: Override para testes — callable que recebe
             ``data_dir`` e retorna :class:`ParquetWriter`. Default:
             ``ParquetWriter(data_dir=data_dir)``.
+        metrics_emitter: Story 2.4 — emitter de métricas opcional
+            (e.g. :class:`PrometheusExporter`). Default: ``None`` →
+            orchestrator usa :class:`NullMetricsEmitter` (zero overhead).
+            Lifecycle do exporter (start/stop HTTP server) é
+            responsabilidade do caller.
 
     Returns:
         :class:`DownloadHandle` — async handle.
@@ -137,6 +145,7 @@ def download(
             dll_factory=dll_factory,
             catalog_factory=catalog_factory,
             writer_factory=writer_factory,
+            metrics_emitter=metrics_emitter,
         )
 
     return DownloadHandle(worker_target=_worker)
@@ -160,6 +169,7 @@ def _run_download_worker(
     dll_factory: Callable[[], object] | None,
     catalog_factory: Callable[[Path], object] | None,
     writer_factory: Callable[[Path], object] | None,
+    metrics_emitter: MetricsEmitter | None = None,
 ) -> None:
     """Worker: instancia componentes, roda Orchestrator.run, traduz JobResult.
 
@@ -241,6 +251,7 @@ def _run_download_worker(
             dll=dll,  # type: ignore[arg-type]
             catalog=catalog,
             writer=writer,
+            metrics_emitter=metrics_emitter,
         )
         config = JobConfig(
             symbol=symbol,

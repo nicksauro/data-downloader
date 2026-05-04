@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 
+from data_downloader.contracts.observability import MetricsEmitter, NullMetricsEmitter
 from data_downloader.orchestrator.chunker import ChunkRange, chunk_date_range
 from data_downloader.orchestrator.contracts import vigent_contract
 from data_downloader.orchestrator.download_primitive import (
@@ -233,11 +234,18 @@ class Orchestrator:
         writer: ParquetWriter,
         *,
         cleanup_orphans_on_start: bool = True,
+        metrics_emitter: MetricsEmitter | None = None,
     ) -> None:
         self._dll = dll
         self._catalog = catalog
         self._writer = writer
         self._cleanup_orphans_on_start = cleanup_orphans_on_start
+        # Story 2.4 — emitter de métricas via Protocol (Aria fronteira).
+        # Default = NullMetricsEmitter (zero overhead opt-in default off).
+        # Hot path R21: emitter chamado APENAS per-chunk (cool path).
+        self._metrics: MetricsEmitter = (
+            metrics_emitter if metrics_emitter is not None else NullMetricsEmitter()
+        )
 
     # ------------------------------------------------------------------
     # Public — run
@@ -316,6 +324,8 @@ class Orchestrator:
                     dll_version=self._safe_dll_version(),
                 )
                 metrics.completed_at = datetime.now(UTC)
+                # Story 2.4 — cache hit conta como job finalizado.
+                self._metrics.incr_counter("download_jobs_total", labels={"status": "cache_hit"})
                 # Cache hit pula DRAINING — direto para COMMITTED via FAILED-skip.
                 # Por simplicidade, não usa state machine no cache hit (nada para
                 # drenar); apenas marca run como concluído.
@@ -341,6 +351,9 @@ class Orchestrator:
             )
 
             # 6. Loop chunks.
+            # Story 2.4: gauge active_downloads = 1 enquanto job ativo
+            # (cool path — set 1x antes do loop, 0 ao final no finally).
+            self._metrics.set_gauge("active_downloads", 1.0)
             partitions_written: list[Path] = []
             for chunk in chunks:
                 result = self._process_chunk(
@@ -382,6 +395,10 @@ class Orchestrator:
                 trades_count=metrics.trades_persisted,
             )
 
+            # Story 2.4 — métricas finais do job (cool path, 1x por job).
+            self._metrics.incr_counter("download_jobs_total", labels={"status": final_status})
+            self._metrics.set_gauge("active_downloads", 0.0)
+
             sm.force_idle()
 
             log.info(
@@ -408,6 +425,12 @@ class Orchestrator:
             # Erro fatal — transita para FAILED via melhor caminho disponível
             # antes de re-raise.
             metrics.completed_at = datetime.now(UTC)
+            # Story 2.4 — métrica de job failed + reset gauge.
+            try:
+                self._metrics.incr_counter("download_jobs_total", labels={"status": "failed"})
+                self._metrics.set_gauge("active_downloads", 0.0)
+            except Exception:  # pragma: no cover defensive
+                pass
             self._handle_fatal_error(sm, job_id, exc)
             raise
 
@@ -622,6 +645,18 @@ class Orchestrator:
         except RetryError as exc:
             # Falha definitiva após todas as tentativas.
             metrics.chunks_failed += 1
+            chunk_duration = time.monotonic() - chunk_t0
+            # Story 2.4 — métricas chunk failed (cool path, 1x por chunk).
+            self._metrics.incr_counter(
+                "chunks_completed_total",
+                labels={"symbol": contract_code, "status": "failed"},
+            )
+            self._metrics.observe_histogram(
+                "chunk_duration_seconds",
+                chunk_duration,
+                labels={"symbol": contract_code},
+            )
+            self._metrics.set_gauge("last_chunk_duration_seconds", chunk_duration)
             self._catalog.register_gap(
                 symbol=contract_code,
                 exchange=config.exchange,
@@ -641,12 +676,29 @@ class Orchestrator:
             return None
 
         metrics.callbacks_received += len(chunk_result.trades)
+        # Story 2.4 — counter trades recebidos (per-chunk batch — R21 OK).
+        # Increment em batch (len(trades)) é cool path; NÃO chamamos
+        # per-trade no callback DLL.
+        if chunk_result.trades:
+            self._metrics.incr_counter("trades_received_total", labels={"symbol": contract_code})
 
         # Caminho de sucesso — escreve Parquet + registra no catalog.
         if not chunk_result.trades:
             # Chunk válido sem trades (e.g. dia útil sem pregão real,
             # holiday não mapeado, etc.) — registra gap e continua.
             metrics.chunks_completed += 1
+            chunk_duration = time.monotonic() - chunk_t0
+            # Story 2.4 — métricas chunk completed sem trades.
+            self._metrics.incr_counter(
+                "chunks_completed_total",
+                labels={"symbol": contract_code, "status": "no_trades"},
+            )
+            self._metrics.observe_histogram(
+                "chunk_duration_seconds",
+                chunk_duration,
+                labels={"symbol": contract_code},
+            )
+            self._metrics.set_gauge("last_chunk_duration_seconds", chunk_duration)
             self._catalog.register_gap(
                 symbol=contract_code,
                 exchange=config.exchange,
@@ -661,7 +713,7 @@ class Orchestrator:
                 chunk_start=chunk.start.isoformat(),
                 chunk_end=chunk.end.isoformat(),
                 n_trades=0,
-                duration_ms=int((time.monotonic() - chunk_t0) * 1000),
+                duration_ms=int(chunk_duration * 1000),
                 cache_hit=False,
             )
             return None
@@ -696,6 +748,18 @@ class Orchestrator:
         # não como métrica de progresso de job.
         metrics.trades_persisted += len(chunk_result.trades)
 
+        # Story 2.4 — métricas chunk success (cool path, 1x por chunk).
+        chunk_duration = time.monotonic() - chunk_t0
+        self._metrics.incr_counter(
+            "chunks_completed_total",
+            labels={"symbol": contract_code, "status": "success"},
+        )
+        self._metrics.incr_counter("parquet_writes_total", labels={"symbol": contract_code})
+        self._metrics.observe_histogram(
+            "chunk_duration_seconds", chunk_duration, labels={"symbol": contract_code}
+        )
+        self._metrics.set_gauge("last_chunk_duration_seconds", chunk_duration)
+
         log.info(
             "orchestrator.chunk_complete",
             job_id=job_id,
@@ -705,7 +769,7 @@ class Orchestrator:
             chunk_end=chunk.end.isoformat(),
             n_trades=len(chunk_result.trades),
             partition_total_rows=write_result.row_count,
-            duration_ms=int((time.monotonic() - chunk_t0) * 1000),
+            duration_ms=int(chunk_duration * 1000),
         )
         return write_result
 

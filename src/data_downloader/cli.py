@@ -593,6 +593,15 @@ _DOWNLOAD_DATA_DIR_OPT = typer.Option(
 _DOWNLOAD_RESUME_OPT = typer.Option(
     None, "--resume", help="(Reservado V2) Continuar download por job_id."
 )
+# Story 2.4 — flag opt-in para Prometheus exporter HTTP.
+_DOWNLOAD_METRICS_PORT_OPT = typer.Option(
+    None,
+    "--metrics-port",
+    help=(
+        "Porta HTTP do exporter Prometheus (ex.: 9090). "
+        "Se omitida, exporter NÃO inicia (default — zero overhead)."
+    ),
+)
 
 
 # Path do cache de last_symbol (CLI_PATTERNS §10).
@@ -651,6 +660,7 @@ def download_cmd(
     exchange: str = _DOWNLOAD_EXCHANGE_OPT,
     data_dir: Path | None = _DOWNLOAD_DATA_DIR_OPT,
     resume: str | None = _DOWNLOAD_RESUME_OPT,
+    metrics_port: int | None = _DOWNLOAD_METRICS_PORT_OPT,
 ) -> None:
     """Baixa histórico de trades para ``symbol`` em ``[start, end]`` (HLP_DOWNLOAD).
 
@@ -754,6 +764,27 @@ def download_cmd(
     # ---- 4. Início do download via public_api ----
     from data_downloader.public_api.download import download as api_download
 
+    # Story 2.4 — opt-in PrometheusExporter HTTP (lifecycle gerenciado aqui;
+    # stop garantido em ``finally`` no fim do comando para liberar a porta
+    # mesmo em erro/cancel).
+    metrics_exporter = None
+    if metrics_port is not None:
+        from data_downloader.observability import PrometheusExporter
+
+        metrics_exporter = PrometheusExporter(port=metrics_port)
+        try:
+            metrics_exporter.start()
+        except OSError as exc:
+            console.print(
+                f"[red]✗ Não foi possível iniciar o exporter Prometheus "
+                f"em :{metrics_port}:[/red] {exc}"
+            )
+            raise typer.Exit(code=2) from exc
+        console.print(
+            f"[cyan]📊 Métricas Prometheus expostas em "
+            f"http://localhost:{metrics_port}/metrics[/cyan]"
+        )
+
     try:
         handle = api_download(
             symbol=symbol,
@@ -761,8 +792,12 @@ def download_cmd(
             end=end_date,
             exchange=exchange,
             data_dir=resolved_data_dir,
+            metrics_emitter=metrics_exporter,
         )
     except ValueError as exc:
+        if metrics_exporter is not None:
+            with contextlib.suppress(Exception):
+                metrics_exporter.stop()
         console.print(f"[red]✗ Erro de input:[/red] {exc}")
         raise typer.Exit(code=2) from exc
 
@@ -865,6 +900,10 @@ def download_cmd(
         signal.signal(signal.SIGINT, orig_handler)
         # Drena thread de eventos (já deve ter terminado).
         drain_thread.join(timeout=2.0)
+        # Story 2.4 — stop exporter HTTP (libera porta) — best-effort.
+        if metrics_exporter is not None:
+            with contextlib.suppress(Exception):
+                metrics_exporter.stop()
 
     if final_result is None:  # pragma: no cover defensive
         console.print("[red]✗ Erro interno: download não retornou resultado[/red]")

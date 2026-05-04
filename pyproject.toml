@@ -30,6 +30,10 @@ dependencies = [
     # Decisão COUNCIL-04 (Sol+Aria mini-council 2026-05-04): aceitar
     # pandas como dep transversal em vez de implementar do zero.
     "pandas>=2.0",
+    # Story 2.4 — Prometheus exporter V2 (counters/gauges/histograms).
+    # Autorização: ADR-013 §Decisão (Opção A). Increment lock-free O(1)
+    # garante hot-path safe (R21). HTTP exporter é opt-in via --metrics-port.
+    "prometheus_client>=0.20",
 ]
 
 [project.optional-dependencies]

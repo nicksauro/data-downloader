@@ -1,11 +1,13 @@
 # ADR-013 — Runtime observability: counters, gauges, histograms
 
-**Status:** accepted
+**Status:** accepted (V1 + V2 implemented)
 **Aceito em:** 2026-05-03 — Aria
-**Data:** 2026-05-03
+**V2 implementada:** 2026-05-04 — Story 2.4 (Dex + mini-council Aria/Pyro — COUNCIL-15)
+**Data:** 2026-05-03 (criação) / 2026-05-04 (amendment V2)
 **Autor:** 🏛️ Aria
-**Consultados:** ⚡ Pyro, 🧪 Quinn
-**Related:** ADR-005 (thread model), ADR-010 (logging — R21), MANIFEST §R21, PLAN_REVIEW H22
+**Consultados:** ⚡ Pyro, 🧪 Quinn, 💻 Dex (V2)
+**Related:** ADR-005 (thread model), ADR-010 (logging — R21), MANIFEST §R21,
+PLAN_REVIEW H22, COUNCIL-05 §D3, COUNCIL-15 (V2 design)
 
 ---
 
@@ -308,6 +310,43 @@ start_http_server(port=9090)   # /metrics endpoint
 Quando multi-symbol = N processos, cada processo expõe `/metrics`. Prometheus Server (opcional, dev avançado) faz scrape e agrega.
 
 V1 desktop single-user **não precisa**. Documentar no ADR como "deferred to Epic 4".
+
+#### Amendment 2026-05-04 — V2 antecipada para Epic 2 (Story 2.4)
+
+**Decisão:** V2 implementada via `prometheus_client` na Story 2.4
+(antecipada de Epic 4 para Epic 2). Motivação: Story 1.7b release
+readiness exige métricas live para validar smoke MVP em produção.
+
+**Arquitetura:**
+- `MetricsEmitter` Protocol em `src/data_downloader/contracts/observability.py`
+  (Aria fronteira) — interface mínima `incr_counter`/`set_gauge`/`observe_histogram`.
+- `PrometheusExporter` em `src/data_downloader/observability/prometheus_exporter.py`
+  implementa o Protocol + serve HTTP `/metrics`.
+- Orchestrator aceita `metrics_emitter: MetricsEmitter | None` (default
+  `NullMetricsEmitter` — zero overhead opt-in).
+- CLI `download --metrics-port 9090` ativa exporter (lifecycle gerenciado
+  por `cli.py` — start antes do download, stop em `finally`).
+
+**Métricas implementadas (8 + 5 + 5):**
+- Counters: `trades_received_total{symbol}`, `parquet_writes_total{symbol}`,
+  `parquet_bytes_written_total{symbol}`, `dll_reconnects_total`,
+  `dll_drops_total{symbol}`, `chunks_completed_total{symbol,status}`,
+  `download_jobs_total{status}`, `dedup_dropped_total{symbol}`.
+- Gauges: `dll_queue_depth`, `write_queue_depth`, `ui_progress_queue_depth`,
+  `active_downloads`, `last_chunk_duration_seconds`.
+- Histograms: `chunk_duration_seconds{symbol}`,
+  `callback_to_disk_seconds_p99{symbol}`, `parquet_write_duration_seconds`,
+  `dedup_duration_seconds`, `migration_duration_seconds`.
+
+**R21 reforçado:** orchestrator hooka emitter APENAS per-chunk (cool path).
+Test `test_orchestrator_no_emitter_call_per_trade` valida que job de N
+trades em 1 chunk gera 1 chamada (não N).
+
+**Cardinality control:** símbolo é label de cardinalidade média (~50
+ativos vivos). LRU explícito (top-50 + `other`) deferred para Epic 4
+(multi-symbol — cardinality real > 50).
+
+**Decisões detalhadas:** `docs/decisions/COUNCIL-15-prometheus-exporter-v2.md`.
 
 ---
 
