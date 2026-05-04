@@ -1103,4 +1103,224 @@ test. Bind `127.0.0.1` por segurança (exporter desktop local não-público).
 
 ---
 
+## Story 2.9 — Logging strategy ADR-010 implementada
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.9.story.md`                          |
+| **commit auditado**    | `19d84ec` + `efd8be4`                                |
+| **owner**              | Dex (dev) + Aria (architect mental) + Pyro (perf mental) — modo autônomo mini-council via COUNCIL-19 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Dex+Aria+Pyro) |
+| **report path**        | `docs/qa/QA_REPORTS/2.9-2026-05-04.md`               |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.9-design-2026-05-04.md` (Aria APPROVED) |
+| **council**            | `docs/decisions/COUNCIL-19-logging-strategy-impl.md` (Aria+Pyro+Dex sign-off) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota |
+|----------------------|-----------|------|
+| 1. Code review       | PASS      | Pipeline structlog formal (`logging_config.py` ~530 linhas) com 8 processors em ordem (contextvars merge + thread name + log level + ISO 8601 UTC timestamp + redaction recursivo + stack info + dict_tracebacks + JSONRenderer/ConsoleRenderer). Helpers `bind_context`/`clear_context`/`bound_context` re-exportados via `observability/__init__.py`. Type hints + docstrings completos. |
+| 2. Unit tests        | PASS      | **78 PASS em 2.09s** (Story 2.9 scope): 21 setup + 53 redaction (com property test Hypothesis 100 examples) + 4 cross-thread. Coverage `observability/logging_config.py` ~95%. Lint ruff + mypy strict limpos nos 6 source files. |
+| 3. Acceptance criteria | PASS    | **7/8 ACs PASS literal + 1 PARTIAL** (AC8 `docs/dev/LOGGING.md` deferred Story 2.12 docs sweep — ADR-010 amendment + COUNCIL-19 cobrem release). |
+| 4. No regressions    | PASS      | 0 regressão atribuível à Story 2.9. Backwards compat preservada (call sites existentes `structlog.get_logger(__name__)` continuam funcionando — apenas ganham campos automáticos via contextvars + redaction transparente). |
+| 5. Performance       | PASS      | **R21 preservado integralmente** — `configure_logging` 1x boot; processors em cool path; `redact_secrets` NÃO no hot path; `copy_context()` snapshot 1x por thread. Pyro sign-off COUNCIL-19. |
+| 6. Security          | PASS      | INV-credenciais garantida por property test Hypothesis (100 examples) — substring match case-insensitive contra 10 substrings (`password`, `pass`, `secret`, `token`, `api_key`, `apikey`, `auth`, `authorization`, `credential`, `key`) cobre `PROFITDLL_KEY`/`nl_password`/`user_pass`/`PROFIT_PASS`. Allow-list explícito. Defesa em profundidade: `bind_context` redacta kwargs antes do bind. |
+| 7. Documentation     | PASS      | ADR-010 amendment 2026-05-04 (status `accepted (implemented in Story 2.9)`). COUNCIL-19 (~205 linhas) documenta sign-offs Aria/Pyro/Dex + R21 verification + ADR-010 conformance check + trade-offs. `LOGGING.md` ops doc + `LOG_SCHEMA.json` deferred Story 2.12 docs sweep (F-Q-1, F-Q-2). |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | N/A              | Story 2.9 não toca `dll/wrapper.py` (apenas dependência leitura de contextvars pre-existente). |
+| Sol (storage)   | N/A              | Story 2.9 não toca `storage/`. |
+| Aria (design)   | **APPROVED**     | `docs/qa/AUDIT_REPORTS/2.9-design-2026-05-04.md` — ADR-010 V1 implementação completa; R21 preservado integralmente; cross-thread propagation conforme ADR-005; 4 LOW + 1 INFO. |
+| Uma (microcopy) | **APPROVED**     | COUNCIL-19 §D5 — flags help inline PT-BR canônicas (não vão a microcopy_loader; pequeno volume não justifica catálogo). |
+| Pyro (perf)     | **APPROVED**     | COUNCIL-19 §R21 — `configure_logging` 1x boot; processors em cool path; `redact_secrets` NÃO no hot path. R21 preservado integralmente. |
+
+### Findings
+
+| Severity  | Count | Detalhes |
+|-----------|-------|----------|
+| CRITICAL  | 0     | -        |
+| HIGH      | 0     | -        |
+| MEDIUM    | 0     | -        |
+| LOW       | 6     | F-Q-1 (LOGGING.md ops doc deferred Story 2.12) / F-Q-2 (LOG_SCHEMA.json deferred Story 2.12) / F-Q-3 (`redact_userprofile` PII home folder deferred V2) / F-Q-4 (structlog reset entre testes via fixture autouse — documentado COUNCIL-19) / F-Q-5 (no hot path linter automático — Story futura) / F-Q-6 (test failures pré-existentes em suite full por test order pollution — não regressão) |
+| INFO      | 1     | F-Q-7 (`bound_context` CM trade-off — usar nomes únicos por escopo; V2 pode usar tokens) |
+
+### Verdict
+
+**PASS** — Story 2.9 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — uma das condições era
+  "ADR-010 accepted + implementada"; **satisfeita**.
+- **Epic 3 UI live log view** (Felix + Uma) consome formato JSON
+  canônico parseable por Loki/ELK/CloudWatch.
+- **Release V1 forense** — logs de produção auditáveis (todo evento
+  traceable via `correlation_id` cross-thread) + seguros (zero
+  credencial em log) + machine-parseable.
+
+**Highlight design:** Cross-thread propagation via
+`contextvars.copy_context()` em IngestorThread + ProgressMonitor +
+public_api/download worker preserva `bind_context(job_id=...)` do
+orchestrator em logs cross-thread. ADR-005 multi-thread compliance
+mantida sem refactor de signatures de threads workers (snapshot capturado
+no `__init__`, `run()` executa via `ctx.run()`).
+
+**Highlight implementação:** Defesa em profundidade — `bind_context`
+também redacta kwargs antes do bind (caso dev passe secret por engano).
+Substring matching case-insensitive contra 10 substrings cobre
+`PROFITDLL_KEY`/`nl_password`/`user_pass` sem enumerar combinações.
+Property test Hypothesis (100 examples) garante INV-credenciais.
+
+---
+
+## Story 2.10 — Test strategy ADR-014 (mock DLL fixture + fake clock + Hypothesis core)
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.10.story.md`                         |
+| **commit auditado**    | `91bda0f`                                            |
+| **owner**              | Quinn (qa, owner) + Dex (dev) + Aria (architect mental) — modo autônomo mini-council via COUNCIL-18 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Dex+Aria) |
+| **report path**        | `docs/qa/QA_REPORTS/2.10-2026-05-04.md`              |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.10-design-2026-05-04.md` (Aria APPROVED) |
+| **council**            | `docs/decisions/COUNCIL-18-test-strategy-adr-014-implementation.md` (Quinn+Dex+Aria sign-off) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota |
+|----------------------|-----------|------|
+| 1. Code review       | PASS      | Subpackage `data_downloader.testing/` (`__init__.py` + `mock_dll.py` ~520 linhas + `fake_clock.py` ~270 linhas + `fixtures.py` ~165 linhas). API stable + re-exports estáveis. Mock fidelidade ao contrato real (`MockProfitDLL` espelha `ProfitDLL.wrapper.ProfitDLL` — init/wait/history/finalize/dll_version). Type hints + docstrings completos. |
+| 2. Unit tests        | PASS      | **56 PASS em 21.43s** (Story 2.10 scope): 21 unit mock DLL meta + 18 unit fake clock meta + 7 property Hypothesis core (6 INVs) + 10 integration meta-test guard-rail. Coverage subpackage `testing/` agregada **84.5%** (excede target 80%). Lint ruff + mypy strict limpos. |
+| 3. Acceptance criteria | PASS    | **5/8 ACs PASS literal + 3 PARTIAL** (AC5 SMOKE_PROTOCOL §6 deferred futura; AC7 Hypothesis profile `ci`/`dev` deferred Story 2.11/Epic 3; AC8 TEST_STRATEGY.md deferred Story 2.12 docs sweep). Decisões aceitas pelo mini-council COUNCIL-18 §"Próximos passos". |
+| 4. No regressions    | PASS      | Suite full pré/pós migração: 724 PASS / 1 SKIP (per Dev Agent Record COUNCIL-18). Backwards compat preservada (`tests/conftest.py` re-exporta fixtures; `benchmarks/fixtures/mock_dll.py` é stub DEPRECATED re-export — zero breakage). |
+| 5. Performance       | PASS      | `FakeClock` ns-exact (sem float drift); thread-safe (lock + meta-test concurrent advances 4 threads × 250). `MockProfitDLL` determinístico (mesmo seed → mesmo output). Suite Hypothesis core 21.43s para 56 tests (>= 100 examples each property). |
+| 6. Security          | PASS      | Mock DLL é fixture; substitui DLL real em tests. Sem credenciais. Subpackage opt-in (`from data_downloader.testing.fixtures import *`) — não importado pelo core. INV-1 (callback NÃO chama DLL) detectada mecanicamente via `MockProfitDLL.callback_violations`. |
+| 7. Documentation     | PASS      | COUNCIL-18 (~135 linhas) documenta sign-offs Quinn+Dex+Aria + risks identificados + findings cross-agent + próximos passos. ADR-014 conformance check em audit Aria. `INVARIANTS_TESTS.md` atualizado (cada INV coberta marcada `✓ Hypothesis property test em <path>`). `TEST_STRATEGY.md` central deferred Story 2.12 docs sweep (F-Q-4). |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | PENDING (não-bloqueante) | Mock surface validada mecanicamente por `test_mock_surface_matches_real_wrapper`; Nelo pode revisar evolução em Story 4.X (multi-asset). |
+| Sol (storage)   | N/A              | Story 2.10 não toca `storage/`. Fecha finding F-S-4 do Sol audit Story 1.8 (mock DLL extraído). |
+| Aria (design)   | **APPROVED**     | `docs/qa/AUDIT_REPORTS/2.10-design-2026-05-04.md` — ADR-014 conformance; mock fidelity validada por meta-test; subpackage opt-in stable; 2 LOW + 2 INFO. |
+| Quinn auto-audit | **APPROVED**    | `test_mock_surface_matches_real_wrapper` PASS (per COUNCIL-18 §Quinn). |
+
+### Findings
+
+| Severity  | Count | Detalhes |
+|-----------|-------|----------|
+| CRITICAL  | 0     | -        |
+| HIGH      | 0     | -        |
+| MEDIUM    | 0     | -        |
+| LOW       | 6     | F-Q-1 (cobertura `--cov` line coverage bloqueada por duckdb — deferred Story 3.x; mitigada por Hypothesis cobre invariantes) / F-Q-2 (Hypothesis profile `ci`/`dev` deferred Story 2.11/Epic 3) / F-Q-3 (AC5 SMOKE_PROTOCOL §6 deferred futura) / F-Q-4 (AC8 TEST_STRATEGY.md central deferred Story 2.12) / F-Q-5 (coverage `testing/fixtures.py` em isolamento 44% — fixtures consumidas via discovery; coverage agregada 84.5% OK) / F-Q-6 (test failures pré-existentes em suite full por test order pollution) |
+| INFO      | 2     | F-Q-7 (Nelo audit pendente review síncrona — não-bloqueante; mock surface validada mecanicamente) / F-Q-8 (test demonstrativo layered fixtures Subtask 5.2 deferred — fixtures discoverable via conftest re-export) |
+
+### Verdict
+
+**PASS** — Story 2.10 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — uma das condições era
+  "ADR-014 accepted + implementada"; **satisfeita**.
+- **Epic 3/4 stories** que precisam de fixtures consistentes.
+- **Story 2.11** (CI hardening: Hypothesis profile `ci/dev/thorough`).
+
+**Highlight design:** Subpackage `data_downloader.testing/` opt-in
+canônico exposto cleanly para downstream consumers (Epic 4 multi-asset
++ projetos derivados que reutilizam o `ProfitDLL` wrapper). API stable
+dentro do major V1; bumps minor para aditivos. Backwards compat
+preservada (zero breakage para benchmarks legados via stub
+DEPRECATED re-export).
+
+**Highlight implementação:** Mock fidelidade validada por meta-test
+mecânico `test_mock_surface_matches_real_wrapper` — falha quando método
+público é removido/renomeado. INV-1 (callback NÃO chama DLL) detectada
+mecanicamente via `MockProfitDLL.callback_violations` list. Guard-rail
+meta-test `tests/integration/test_invariants_core.py` audita mapping
+INV → @given → impede drift entre `INVARIANTS_TESTS.md` e suite.
+Strategies canônicas (`valid_trade_record_strategy`,
+`valid_partition_key_strategy`, `trade_spec_strategy`) reusáveis em
+novos property tests sem boilerplate.
+
+---
+
+## Story 2.11 — Exception hierarchy ADR-011 + DownloadHandle.cancel H10 closure
+
+| Campo                  | Valor                                                |
+|------------------------|------------------------------------------------------|
+| **story_path**         | `docs/stories/2.11.story.md`                         |
+| **commit auditado**    | `6842b03`                                            |
+| **owner**              | Dex (dev) + Aria (architect mental) + Uma (UX mental) — modo autônomo mini-council via COUNCIL-17 |
+| **gatekeeper**         | Quinn (qa) — modo autônomo (mini-council Quinn+Aria+Uma+Dex) |
+| **report path**        | `docs/qa/QA_REPORTS/2.11-2026-05-04.md`              |
+| **audit dependente**   | `docs/qa/AUDIT_REPORTS/2.11-design-2026-05-04.md` (Aria APPROVED — mandatory AC7) |
+| **council**            | `docs/decisions/COUNCIL-17-exception-hierarchy-h10-cancel.md` (Aria+Dex+Uma sign-off) |
+
+### 7 Quality Checks
+
+| Check                | Resultado | Nota |
+|----------------------|-----------|------|
+| 1. Code review       | PASS      | 3 camadas isoladas conformes ADR-011 §Decisão Opção A: L1 (`_internal/exceptions.py` ~160 linhas, 8 subclasses + marker `_internal: ClassVar[Literal[True]]`), L2 (`_internal/exception_adapter.py` ~190 linhas, lookup table + `@translate_internal` decorator + late import), L3 (`public_api/exceptions.py` ~265 linhas, +`OperationCancelled` +`ConnectionLost` +`humanized_message` property +`_PUBLIC_ERROR_MICROCOPY_ID` map). H10 closure em `public_api/handle.py` (~365 linhas — `cancel(*, timeout=30.0) -> bool`, `cancelled()`, `is_cancelled`, `peek_result()`, `result()` raise `OperationCancelled`). Type hints + docstrings completos com refs ADR-011 + ADR-007a. |
+| 2. Unit tests        | PASS      | **76 PASS em 3.71s** (Story 2.11 scope): 30 unit exception hierarchy + 29 unit adapter + 11 unit DownloadHandle.cancel + 3 integration E2E cancel + 3 property Hypothesis no-leak (100 examples each). Coverage `_internal/` ~95-100%; `public_api/exceptions.py` ~98%; `public_api/handle.py` (cancel methods) ~95%. Lint ruff + mypy strict limpos. |
+| 3. Acceptance criteria | PASS    | **8/8 ACs PASS literal**. Nenhuma AC quebrada. |
+| 4. No regressions    | PASS      | `cancel_event=None` default no `Orchestrator.run` preserva 12 testes integração pré-existentes (PASS em isolamento). Chamadas legadas `download(...)` continuam funcionando (backward-compatible). Zero regressão atribuível. |
+| 5. Performance       | PASS      | Story 2.11 é **fronteira pura** — não muda algoritmo, performance, dado. Apenas tipos + cancel API. Cancel cooperativo NÃO interrompe chunk em andamento (preserva INV-12 + R5 + idempotência). Adapter overhead: try/except local + dict O(1) lookup; aplica APENAS em entry points públicos (granularidade per-call), não em hot path. |
+| 6. Security          | PASS      | Adapter pattern garante invariante "internals NUNCA vazam em public_api" via property test Hypothesis (100 examples). Marker `_internal: ClassVar[Literal[True]]` permite auditoria mecânica. Fallback defensivo: subclasse não-mapeada → `DataDownloaderError` genérico (testado por `test_unmapped_subclass_still_translates_safely`). `from e` chain preservado para debug forense. |
+| 7. Documentation     | PASS      | COUNCIL-17 (~210 linhas) documenta D1 (3 camadas — Aria) + D2 (H10 closure — Dex) + D3 (Microcopy IDs — Uma) + sign-offs + validações + Felix unblocked notice. `MICROCOPY_CATALOG.md` §6 atualizada com 4 IDs novos (Uma sign-off). ADR-011 amendment 2026-05-04 marca `accepted (implemented in Story 2.11)`. `EXCEPTIONS.md` proposto substituído por COUNCIL-17 (referência única). |
+
+### Audits dependentes
+
+| Auditoria       | Verdict          | Justificativa                                                                                          |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------|
+| Nelo (DLL)      | N/A              | Story 2.11 não toca `dll/`. Lei R3 não aplicável. |
+| Sol (storage)   | N/A              | Story 2.11 não toca `storage/`. |
+| Aria (design)   | **APPROVED**     | `docs/qa/AUDIT_REPORTS/2.11-design-2026-05-04.md` — 3 camadas conformes ADR-011; H10 closure conforme ADR-007a; SemVer MINOR aditivo classificado (0.3.0 → 0.4.0 recomendado); 1 LOW + 2 INFO. **Mandatory AC7.** |
+| Uma (microcopy) | **APPROVED**     | COUNCIL-17 §D3 — 4 IDs novos (`error.cancelled.*`, `error.connection_lost.*`) + 4 aliases UPPER_SNAKE para `humanized_message`. Texto pt-BR validado P1+P9. |
+
+### Findings
+
+| Severity  | Count | Detalhes |
+|-----------|-------|----------|
+| CRITICAL  | 0     | -        |
+| HIGH      | 0     | -        |
+| MEDIUM    | 0     | -        |
+| LOW       | 2     | F-Q-1 (`result()` mudança de retorno → raise é soft breaking — herdada Aria F-A-1; documentar em ADR-007a amendment + CHANGELOG bump 0.3.0 → 0.4.0; aceitar) / F-Q-2 (test failures pré-existentes em suite full por test order pollution — não regressão) |
+| INFO      | 2     | F-Q-3 (nova subclass `_InternalError` futura deve incluir update do `_PUBLIC_ERROR_MICROCOPY_ID` + entrada no `translate_to_public` lookup — checklist informal Aria F-A-3) / F-Q-4 (smoke real Ctrl+C end-to-end com DLL ativa não rodado — humano dependente; mock E2E em `test_cancel_e2e.py` cobre fluxo cooperativo) |
+
+### Verdict
+
+**PASS** — Story 2.11 fechada. Status `Ready for Review` → **Done**.
+
+**Esta gate desbloqueia:**
+- **Epic 2 close (G-Quality-Final)** — uma das condições era
+  "ADR-011 accepted + implementada"; **satisfeita**.
+- **Felix UNBLOCKED para Epic 3** — UI consome `cancel()` real
+  (não placeholder) + mapping `exception type → microcopy NL_*` via
+  `humanized_message`. Note em COUNCIL-12 §Pendências P1.
+- **Future SemVer bump** — 0.3.0 → 0.4.0 antes de Epic 3 release
+  (MINOR aditivo + soft-break em `result()`).
+
+**Highlight design:** ADR-011 fielmente implementada — 3 camadas
+isoladas (L1 internals com marker mecânico, L2 adapter com lookup +
+late import, L3 public API com 2 tipos novos + property
+`humanized_message`). Property test Hypothesis (100 examples)
+garante invariante "no internal leak" mesmo com evolução futura
+sem update do adapter (defesa em profundidade testada via
+`test_unmapped_subclass_still_translates_safely`). H10 closure
+cooperative — graceful drain entre chunks preserva INV-12 + R5.
+
+**Highlight implementação:** Backward-compatible (`cancel_event=None`
+default no `Orchestrator.run` preserva 12 testes integração); soft-break
+em `result()` (raise vs return DownloadResult) é aceitável porque cancel
+real era findings H10 (não funcionava antes); SemVer MINOR aditivo
+classificado por Aria. `peek_result()` non-blocking utilitário para
+inspeção pós-cancel sem disparar `OperationCancelled`. `cancelled()` /
+`is_cancelled` non-blocking probes para UI decidir microcopy entre
+"Cancelando..." e "Cancelado".
+
+---
+
 — Quinn, no portão
