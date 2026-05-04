@@ -20,6 +20,23 @@ Módulos previstos:
 
 from __future__ import annotations
 
+from data_downloader.public_api.exceptions import (
+    DataDownloaderError,
+    DiskFull,
+    DLLInitError,
+    DownloadError,
+    IntegrityError,
+    InvalidContract,
+)
+
 __api_version__ = "0.1.0"
 
-__all__ = ["__api_version__"]
+__all__ = [
+    "DLLInitError",
+    "DataDownloaderError",
+    "DiskFull",
+    "DownloadError",
+    "IntegrityError",
+    "InvalidContract",
+    "__api_version__",
+]
