@@ -54,7 +54,7 @@
 
 **Caminho crítico para ship v1.0.0:**
 
-`item 6 (smoke real 1.7b-followup) → item 7 (baselines) → item 10 (build) → item 11 (release)` — total ~1h30 corrido quando ProfitChart estiver disponível.
+`item 6 (smoke real 1.7b-followup) → item 7 (baselines) → item 10 (build) → item 11 (release)` — total ~1h30 corrido. Pré-requisitos: `.env` com `PROFITDLL_KEY/USER/PASS` válidos + máquina Windows. **ProfitChart NÃO precisa estar aberto** (Q-DRIFT-02 refutado 2026-05-05).
 
 ---
 
@@ -62,7 +62,7 @@
 
 | Bloqueio | Status | Resolução |
 |----------|--------|-----------|
-| Q-DRIFT-02 (handshake travado) | ⚠️ refuted (root cause = 11/12/33/34/35) | probe `probe_init.py` 2026-05-05 conectou 1.6s sem ProfitChart aberto |
+| Q-DRIFT-02 (handshake travado) | ⚠️ refuted (root cause = 11/12/33/34/35) | probe `probe_init.py` 2026-05-05 conectou 1.6s — handshake autônomo, ProfitChart não é pré-requisito |
 | Q-DRIFT-33 (TranslateTrade.argtypes em minimal_handshake) | 🐛 HOTFIX-APPLIED | postfix-35 commit `0f6c2ea` |
 | Q-DRIFT-34 (sentinel struct wYear≤1900) | 🐛 HOTFIX-APPLIED | guard `_process_trade` + 3 testes unit (Story 1.7g) |
 | Q-DRIFT-35 (NL_NOT_FOUND comment + signatures) | 🐛 HOTFIX-APPLIED | wrapper.py L731-748 + GetAgentName argtypes (Story 1.7g) |
@@ -76,8 +76,7 @@
 
 ```powershell
 # 1. Verificar .env com PROFITDLL_KEY/USER/PASS
-# 2. (Opcional, recomendado) abrir ProfitChart para garantir login ativo
-# 3. Baixar 1 símbolo:
+# 2. Baixar 1 símbolo (ProfitChart NÃO precisa estar aberto — Q-DRIFT-02 refutado):
 python -m data_downloader.cli download --symbol WDOFUT --start 2026-04-28 --end 2026-05-02
 
 # 4. Para múltiplos símbolos: invocar 1 vez por símbolo (ADR-022 — serial):
@@ -104,8 +103,8 @@ Trabalho offline restante **autônomo viável**:
 - Broker dead-code annotation (Dex/Orion)
 - Q-DRIFT-18 probe design (Aria + Nelo)
 
-**Quando você abrir ProfitChart:**
-- Smoke real 1.7b-followup destrava ship v1.0.0 (item 6 acima)
+**Quando você quiser destravar ship v1.0.0:**
+- Rodar smoke real 1.7b-followup com `.env` válido (item 6 acima — ~45 min, ProfitChart não precisa estar aberto)
 
 ---
 
