@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 (Q-DRIFT-09 NOVO — smoke 5 falhou com múltiplas Access Violations + 1 Stack Overflow durante `wait_market_connected`; hipótese: signatures dos 14 NoopCallbacks registrados via `SetXxx` divergem do esperado pela DLL — mesma classe de Q-DRIFT-05; refuta parcialmente Q11-E ao sugerir que `None` pode ser mais seguro que NoopCallback errado)
+**Última atualização:** 2026-05-04 (Q-DRIFT-10 NOVO — smoke 6 commit `7badeea` confirma `MARKET_DATA` trava em `(2,1)` MARKET_CONNECTING após Q-DRIFT-05 fix; audit linha-por-linha vs `dllStart()` (main.py L729-764) revela 3 divergências do exemplo oficial; hipótese primária: substituir Noop por `None` nos slots 5/7/8/9 onde exemplo passa `None` literal — alavanca Q-DRIFT-06 já validado em fonte primária)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -44,6 +44,7 @@
 | [Q-DRIFT-07](#q-drift-07) | ✅ validated | history / subscription | `SubscribeTicker(ticker, exchange)` é PRÉ-REQUISITO de `GetHistoryTrades` — sem subscribe, callback V2 nunca dispara |
 | [Q-DRIFT-08](#q-drift-08) | 🔬 empirical | ctypes / argtypes | argtypes/restype JAMAIS configurados no wrapper; exemplo oficial configura ~30 funções em `profit_dll.py` — sem isso, x64 stdcall pode truncar handles e desalinhar stack |
 | [Q-DRIFT-09](#q-drift-09) | 🔬 empirical → hipótese | callback / signatures | Smoke 5: 14 SetXxxCallback NoopCallback signatures suspeitas → access violations + stack overflow após MARKET_LOGIN_OK; Q11-E refutado parcialmente (passar `None` pode ser MAIS SEGURO que NoopCallback errado) |
+| [Q-DRIFT-10](#q-drift-10) | 🔬 empirical → hipótese forte | init / divergência exemplo | Smoke 6 (commit `7badeea`): `MARKET_DATA` trava em `(2,1)` MARKET_CONNECTING. Audit linha-por-linha vs `dllStart()` (main.py L729-764) revela 3 divergências do exemplo oficial: (a) wrapper passa **7 NoopCallbacks** onde exemplo passa **`None` em 4 slots**; (b) wrapper chama `SetEnabledLogToDebug(0)` ANTES do init (exemplo NÃO chama); (c) wrapper SKIPA os 14 `SetXxxCallback` que exemplo chama ANTES de `wait_login`. Hipótese primária: NoopCallback nos slots 5/7/8/9 onde exemplo usa `None` — DLL pode validar callback no handshake (não só no fire) e signatures Noop divergentes corrompem state machine antes do `result=4`. |
 
 ---
 
@@ -887,6 +888,136 @@ Três opções para resolver Q-DRIFT-09 — Nelo recomenda **C** com fallback **
   - Q11-E — agora **duplamente questionado** (refutado para init em Q-DRIFT-06; refuta parcial para `SetXxx` aqui).
   - `tests/smoke/` — pasta dos smokes.
   - `src/data_downloader/dll/wrapper.py` (escopo Dex — bloco `SetXxx` a auditar/reduzir).
+
+---
+
+## Q-DRIFT-10
+
+- **ID:** Q-DRIFT-10
+- **Status:** 🔬 **empirical → hipótese forte aguardando fix-and-rerun**
+- **Categoria:** init / divergência audit linha-por-linha vs exemplo oficial
+- **Sintoma (smoke 6, commit `7badeea` — 2026-05-04 noite):**
+  - DLL carrega ✅
+  - argtypes/restype configurados (25 funcs) ✅
+  - `DLLInitializeMarketLogin` retorna `code=0` (NL_OK) ✅
+  - State callback recebe `MARKET_LOGIN_OK (3,0)` ✅
+  - State callback recebe `LOGIN_CONNECTED (0,0)` ✅
+  - **`MARKET_DATA` fica em `(conn_type=2, result=1)` MARKET_CONNECTING — NUNCA evolui para `(2,4)` MARKET_CONNECTED** ❌
+  - Manual p.55 confirma: `MARKET_CONNECTED=4` é o ÚNICO valor terminal correto.
+  - Autoridade ProfitDLL real (usuário): "se MARKET_DATA não está conectando, é erro na função de inicialização". NÃO é horário pós-pregão, NÃO é flakiness.
+
+### Audit linha-por-linha — `initialize_market_only` vs `dllStart()` (main.py L729-764)
+
+| Item | Exemplo Nelogica (main.py) | Nosso wrapper (`wrapper.py`) | Diverge? |
+|------|---------------------------|------------------------------|----------|
+| **A1. Slot 4 (state)** | `stateCallback` REAL (`@WINFUNCTYPE(None, c_int32, c_int32)` L195) | `make_state_callback(queue)` REAL (`TStateCallback`) | ✅ EQUAL |
+| **A2. Slot 5 (NewTradeCallback)** | **`None`** (L742) | `make_noop_callback(TTradeCallback)` (10 args c/ TAssetID) | ❌ DIVERGE |
+| **A3. Slot 6 (NewDailyCallback)** | `newDailyCallback` REAL (L348, 19 args) | `make_noop_callback(TDailyCallback)` (Noop) | ⚠️ DIVERGE (real vs noop) |
+| **A4. Slot 7 (PriceBookCallback)** | **`None`** (L742) | `make_noop_callback(TPriceBookCallback)` | ❌ DIVERGE |
+| **A5. Slot 8 (OfferBookCallback)** | **`None`** (L743) | `make_noop_callback(TOfferBookCallback)` | ❌ DIVERGE |
+| **A6. Slot 9 (HistoryTradeCallback)** | **`None`** (L743) | `make_noop_callback(THistoryTradeCallback)` | ❌ DIVERGE |
+| **A7. Slot 10 (ProgressCallback)** | `progressCallBack` REAL (L243-246, `@WINFUNCTYPE(None, TAssetID, c_int)`) | `make_noop_callback(TProgressCallback)` (Noop, mesma sig) | ⚠️ DIVERGE (real vs noop) |
+| **A8. Slot 11 (TinyBookCallback)** | `tinyBookCallBack` REAL (L336-343, `@WINFUNCTYPE(None, TAssetID, c_double, c_int, c_int)`) | `make_noop_callback(TTinyBookCallback)` (Noop, mesma sig) | ⚠️ DIVERGE (real vs noop) |
+| **B1. SetEnabledLogToDebug** | **NÃO chamado** (grep: 0 matches em main.py) | Chamado com `0` ANTES do init (`wrapper.py:579`) | ❌ DIVERGE |
+| **B2. argtypes/restype** | Setados em `profit_dll.initializeDll(path)` ANTES de qualquer chamada (`profit_dll.py:7-101`) | Setados em `_configure_dll_signatures()` após `WinDLL()`, antes do init | ✅ EQUAL (semântico) |
+| **C1. Ordem do init** | `WinDLL → initializeDll(argtypes) → DLLInitializeMarketLogin → SetXxx(14) → wait_login` | `verify_companions → WinDLL → _configure_dll_signatures → SetEnabledLogToDebug(0) → DLLInitializeMarketLogin → wait_market_connected` | ❌ DIVERGE (sem 14 `SetXxx` antes do wait) |
+| **D1. Cast c_wchar_p** | `c_wchar_p(key), c_wchar_p(user), c_wchar_p(password)` (L742) | `c_wchar_p(key), c_wchar_p(user), c_wchar_p(password)` (`wrapper.py:619-622`) | ✅ EQUAL |
+| **D2. Argtypes do init** | Não setados explicitamente (ctypes infere por valor passado) | `argtypes=None, restype=c_int` (`wrapper.py:333`) | ✅ EQUAL (semântico) |
+| **E1. Total de args** | 11 args (3 wchar + 8 callback slots) | 11 args (3 wchar + state + 7 noop) | ✅ EQUAL (count) |
+| **E2. _cb_refs anti-GC** | Funções globais com `@WINFUNCTYPE` (escopo módulo permanente) | `callbacks._cb_refs` lista global + `self._cb_refs` instância (cinto-suspensório) | ✅ EQUAL (semântico — anti-GC garantido) |
+| **F1. SetXxxCallback antes do wait** | **14 chamados** (L745-761): `SetAssetListCallback`, `SetAdjustHistoryCallbackV2`, `SetAssetListInfoCallback`, `SetAssetListInfoCallbackV2`, `SetOfferBookCallbackV2`, `SetOrderCallback`, `SetOrderHistoryCallback`, `SetInvalidTickerCallback`, `SetTradeCallbackV2`, `SetAssetPositionListCallback`, `SetBrokerAccountListChangedCallback`, `SetBrokerSubAccountListChangedCallback`, `SetPriceDepthCallback`, `SetTradingMessageResultCallback` | **0 chamados** (default `register_extra_callbacks=False` desde smoke 5 / Q-DRIFT-09) | ❌ DIVERGE |
+| **F2. Modo do init** | Por default usa `DLLInitializeLogin` (com roteamento, `bRoteamento=True`, L735); `DLLInitializeMarketLogin` é o branch `else` (L742) | `DLLInitializeMarketLogin` (market-only) | ⚠️ DIVERGE intencional (nosso caso de uso é market-only — não é candidato à causa raiz, mas registrado) |
+
+### 3 candidatos por confiança (Nelo)
+
+#### 🥇 #1 (60% confiança) — `None` literal nos slots 5/7/8/9 (alavanca Q-DRIFT-06)
+
+- **Hipótese:** A DLL **valida o ponteiro do callback durante o handshake interno do MARKET_DATA** (não só na hora de invocar). Quando recebe um trampoline ctypes com signature divergente da esperada (mesmo Noop, mesmo nunca-disparado), o validador interno da Nelogica detecta mismatch via algum heurístico (tabela de hash de signatures? leitura prévia de stack frame size?) e **bloqueia a transição `(2,1) → (2,4)` silenciosamente** sem nunca crashar nem retornar erro.
+- **Evidência:**
+  - Q-DRIFT-06 (refutação Q11-E): exemplo oficial passa `None` em 4 slots **e a DLL conecta**.
+  - Q-DRIFT-05 fixou as signatures dos Noop (TAssetID por valor), mas o smoke 6 ainda trava — **se o problema fosse só signature errada, smoke 6 passaria**. O fato de não passar sugere que a presença do Noop em si (mesmo signature certa) é o problema.
+  - Manual p.74 diz callbacks são "obrigatórios" mas exemplo contradiz — **exemplo é a fonte canônica de uso Python**.
+- **Por que NÃO 100%:** ainda não temos evidência empírica direta de que substituir Noop por `None` resolve. É a divergência mais óbvia, mas não é prova.
+
+#### 🥈 #2 (25% confiança) — Faltam `SetTradeCallbackV2` + `SetAssetListCallback` antes do wait
+
+- **Hipótese:** A DLL precisa que **pelo menos 1-2 `SetXxxCallback` reais estejam registrados** antes de evoluir o handshake do market data. Sem nenhum `SetXxxCallback` o servidor pode não enviar o pacote de "first asset list" / "first trade" que destrava `(2,4)`.
+- **Evidência indireta:** exemplo SEMPRE registra os 14 antes do `wait_login`. Pode ser ritualismo, mas pode ser requisito não documentado.
+- **Por que NÃO #1:** Q-DRIFT-09 mostrou que registrar os 14 com Noop signatures crasha. Se fosse só "registre algo", então Noop bastaria — mas Noop crashou. Isso sugere que o requisito (se existe) é **callback real com signature correta**, não qualquer Noop. Custo de validar: alto (precisa implementar 1-2 callbacks reais primeiro).
+
+#### 🥉 #3 (10% confiança) — `SetEnabledLogToDebug(0)` antes do init confunde a DLL
+
+- **Hipótese:** Chamar `SetEnabledLogToDebug(0)` ANTES de `DLLInitializeMarketLogin` toca estado interno da DLL antes que esteja pronta — talvez a DLL inicialize variáveis de log no `Initialize` e nossa chamada prévia as zere. Exemplo NÃO chama esta função (zero matches em main.py).
+- **Por que NÃO #1:** smoke logs de 1.7b mostram que `dll.native_log_silenced` aparece e `DLLInitializeMarketLogin` retorna `code=0` — se houvesse corrupção, o init provavelmente já falharia. Custo de validar: trivial (comentar 1 linha).
+
+#### Outros candidatos descartados
+
+- **(d) Cast `c_wchar_p` errado** — ✅ EQUAL ao exemplo, descartado.
+- **(e) NoopCallback signature errada (Q-DRIFT-05 não fixou)** — improvável: `TProgressCallback`, `TTinyBookCallback`, `TDailyCallback` em `types.py` L242/L250/L165 batem literalmente com `@WINFUNCTYPE` de main.py L243/L336/L346 (TAssetID por valor). Q-DRIFT-05 já corrigiu.
+- **(f) DLLInitializeLogin (14 args) vs DLLInitializeMarketLogin (11 args)** — exemplo usa o de 14 args por default (`bRoteamento=True`), mas o de 11 args TAMBÉM existe (branch `else` L742) — não é candidato à causa raiz.
+
+### Recomendação para Dex (linha exata a mudar)
+
+**Implementar #1 PRIMEIRO** (mudança mínima, alavanca Q-DRIFT-06 já validado em fonte primária):
+
+**Arquivo:** `src/data_downloader/dll/wrapper.py`
+**Linhas:** 590-625 (bloco "AC2 — construir 8 callbacks" + chamada `DLLInitializeMarketLogin`)
+
+**Mudança proposta (espelhar literalmente main.py L742-743):**
+
+```python
+# AC2 — REVISADO Q-DRIFT-10: espelhar exemplo oficial (main.py L742-743).
+# Exemplo passa None em 4 dos 7 slots não-state. Q-DRIFT-06 já refutou
+# Q11-E ("JAMAIS None"). Hipótese primária Q-DRIFT-10: DLL valida
+# signature do callback no handshake (não só no fire), e Noop com
+# signature divergente impede MARKET_DATA → (2,4).
+state_cb = make_state_callback(self._state_queue)
+# Slot 5 (trade), 7 (priceBook), 8 (offerBook), 9 (histTrade) = None
+# (alinhado main.py L742-743). Slots 6 (daily), 10 (progress), 11
+# (tinyBook) = Noop com signature correta (Q-DRIFT-05 fixou).
+daily_cb = make_noop_callback(TDailyCallback)
+progress_cb = make_noop_callback(TProgressCallback)
+tinybook_cb = make_noop_callback(TTinyBookCallback)
+
+ret: int = self._dll.DLLInitializeMarketLogin(
+    c_wchar_p(key),
+    c_wchar_p(user),
+    c_wchar_p(password),
+    state_cb,        # slot 4 — REAL (state)
+    None,            # slot 5 — trade (None, exemplo L742)
+    daily_cb,        # slot 6 — daily (exemplo passa REAL; aqui Noop com sig certa)
+    None,            # slot 7 — priceBook (None, exemplo L742)
+    None,            # slot 8 — offerBook (None, exemplo L743)
+    None,            # slot 9 — histTrade (None, exemplo L743)
+    progress_cb,     # slot 10 — progress (Noop, sig OK)
+    tinybook_cb,     # slot 11 — tinyBook (Noop, sig OK)
+)
+```
+
+**Pré-requisito ctypes:** verificar que `argtypes=None` (já é o caso em `wrapper.py:333`) permite `None` literal — ctypes aceita `None` como `NULL` para `WINFUNCTYPE` quando `argtypes` não força tipo. Confirmar com `mypy`/smoke run.
+
+**Plano de fallback se #1 não resolver smoke 7:**
+
+1. Tentar **#3 (trivial)**: comentar `SetEnabledLogToDebug(0)` em `wrapper.py:579` e re-rodar.
+2. Tentar **#2 (custoso)**: implementar `SetTradeCallbackV2` real (signature `WINFUNCTYPE(None, TConnectorAssetIdentifier, c_size_t, c_uint)`, mesma de `THistoryTradeCallbackV2` em `types.py:419`) e `SetAssetListCallback` real (Noop com signature exata de `types.py` `TAssetListCallback`) ANTES de `wait_market_connected`. Aplicar Q-DRIFT-09 Opção C (subset mínimo, não os 14).
+
+**NÃO mexer em:**
+- `_cb_refs` (Q07-V) — anti-GC continua obrigatório.
+- `_configure_dll_signatures()` (Q-DRIFT-08) — argtypes/restype continuam corretos.
+- `wait_market_connected` (já aceita só `result=4` — alinhado manual + exemplo).
+
+- **Manual diz:**
+  - p.22-23: lista 11 args de `DLLInitializeMarketLogin` (3 wchar + 8 callback). NÃO marca quais são opcionais.
+  - p.55: confirma `MARKET_CONNECTED=4` é o ÚNICO valor terminal.
+  - p.74: diz "callbacks obrigatórios" — **mas exemplo oficial L742-743 passa `None` em 4 slots e funciona**. Divergência manual ↔ exemplo já catalogada em Q-DRIFT-06; **exemplo prevalece como fonte canônica de uso Python**.
+- **Data descoberta:** 2026-05-04 (audit init Nelo, smoke 6 commit `7badeea`).
+- **Aplica a stories:** 1.2 (init wrapper), 1.7b (smoke MVP gate), todas que dependem de MARKET_DATA conectado.
+- **Refs:**
+  - `profitdll/Exemplo Python/main.py` L729-764 (`dllStart` canônico).
+  - `profitdll/Exemplo Python/main.py` L194-241 (`stateCallback` referência `result=4`).
+  - `src/data_downloader/dll/wrapper.py:472-667` (`initialize_market_only`).
+  - `src/data_downloader/dll/callbacks.py:make_noop_callback` (factory a manter — uso reduzido a 3 slots).
+  - Q-DRIFT-02 (sintoma original `(2,1)`), Q-DRIFT-05 (signatures Noop fixadas), Q-DRIFT-06 (refuta Q11-E — alavanca para `None`), Q-DRIFT-08 (argtypes), Q-DRIFT-09 (não registrar 14 SetXxx).
 
 ---
 
