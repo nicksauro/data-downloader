@@ -522,6 +522,166 @@ def test_initialize_minimal_handshake_default_false_preserves_behavior(
         assert a is not None, f"default path: arg[{i}] não pode ser None (Q11-E legacy preservado)"
 
 
+@pytest.mark.unit
+def test_minimal_handshake_configures_translate_trade_signatures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-DRIFT-33 (Story 1.7d): minimal_handshake configura ``TranslateTrade``.
+
+    Mesmo com ``_configure_dll_signatures`` skipado integralmente
+    (Q-DRIFT-12), a signature de hot-path do download
+    (``TranslateTrade``) DEVE ser registrada — handle V2 é ``c_size_t``
+    (64 bits em x64) e default ctypes ``c_int`` (32 bits) overflow no
+    IngestorThread após MARKET_CONNECTED.
+
+    Verifica:
+      - ``TranslateTrade.argtypes = [c_size_t, POINTER(TConnectorTrade)]``
+      - ``TranslateTrade.restype = c_int``
+      - ``_configure_dll_signatures`` NÃO é chamado integralmente
+        (preserva Q-DRIFT-12 — sem AVs de init).
+    """
+    from ctypes import POINTER, c_int, c_size_t
+
+    from data_downloader.dll.types import TConnectorTrade
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+
+    # MagicMock attributes — capturamos atribuições de argtypes/restype
+    # via ``MagicMock`` automaticamente: setar ``mock.X.argtypes = [...]``
+    # registra como atributo inspecionável.
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch.object(dll, "_configure_dll_signatures") as mock_configure_full,
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS", minimal_handshake=True)
+
+    # _configure_dll_signatures (full) NÃO deve ser chamado em minimal mode.
+    mock_configure_full.assert_not_called()
+
+    # TranslateTrade.argtypes/restype DEVEM ter sido configurados.
+    expected_argtypes = [c_size_t, POINTER(TConnectorTrade)]
+    actual_argtypes = dll_instance.TranslateTrade.argtypes
+    assert actual_argtypes == expected_argtypes, (
+        f"Q-DRIFT-33: TranslateTrade.argtypes esperado {expected_argtypes}, "
+        f"recebido {actual_argtypes}"
+    )
+    assert dll_instance.TranslateTrade.restype is c_int, (
+        f"Q-DRIFT-33: TranslateTrade.restype esperado c_int, "
+        f"recebido {dll_instance.TranslateTrade.restype}"
+    )
+
+
+@pytest.mark.unit
+def test_minimal_handshake_configures_agent_resolver_signatures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-DRIFT-35 (Story 1.7d): minimal_handshake configura signatures
+    de ``GetAgentNameLength`` e ``GetAgentName``.
+
+    Smoke postfix-34 falhou em ~35s sem traceback Python; log mostrava
+    4x ``agent_resolver.unknown_id length=-2147483636`` (== 0x80000004
+    reinterpretado como ``c_int`` signed). Sem argtypes/restype explícitos,
+    ctypes default usa ``c_int`` signed e args sem coerção, podendo
+    causar access violation nativa quando o "length" negativo é passado
+    como tamanho de buffer para ``GetAgentName``.
+
+    Verifica:
+      - ``GetAgentNameLength.argtypes = [c_int, c_int]``
+      - ``GetAgentNameLength.restype = c_int``
+      - ``GetAgentName.argtypes = [c_int, c_int, c_wchar_p, c_int]``
+      - ``GetAgentName.restype = c_int``
+
+    Mesmas signatures registradas no path full
+    (``_configure_dll_signatures`` linhas 406-407 do wrapper.py).
+    """
+    from ctypes import c_int, c_wchar_p
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch.object(dll, "_configure_dll_signatures") as mock_configure_full,
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS", minimal_handshake=True)
+
+    # _configure_dll_signatures (full) NÃO deve ser chamado em minimal mode.
+    mock_configure_full.assert_not_called()
+
+    # GetAgentNameLength.argtypes/restype DEVEM ter sido configurados.
+    expected_len_argtypes = [c_int, c_int]
+    actual_len_argtypes = dll_instance.GetAgentNameLength.argtypes
+    assert actual_len_argtypes == expected_len_argtypes, (
+        f"Q-DRIFT-35: GetAgentNameLength.argtypes esperado "
+        f"{expected_len_argtypes}, recebido {actual_len_argtypes}"
+    )
+    assert dll_instance.GetAgentNameLength.restype is c_int, (
+        f"Q-DRIFT-35: GetAgentNameLength.restype esperado c_int, "
+        f"recebido {dll_instance.GetAgentNameLength.restype}"
+    )
+
+    # GetAgentName.argtypes/restype DEVEM ter sido configurados.
+    expected_name_argtypes = [c_int, c_int, c_wchar_p, c_int]
+    actual_name_argtypes = dll_instance.GetAgentName.argtypes
+    assert actual_name_argtypes == expected_name_argtypes, (
+        f"Q-DRIFT-35: GetAgentName.argtypes esperado "
+        f"{expected_name_argtypes}, recebido {actual_name_argtypes}"
+    )
+    assert dll_instance.GetAgentName.restype is c_int, (
+        f"Q-DRIFT-35: GetAgentName.restype esperado c_int, "
+        f"recebido {dll_instance.GetAgentName.restype}"
+    )
+
+
+@pytest.mark.unit
+def test_translate_trade_returns_none_for_sentinel_zero_struct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-DRIFT-34a (Story 1.7d): translate_trade filtra struct sentinela.
+
+    Callback V2 dispara primeiro com ``TConnectorTrade`` ZERADO antes do
+    primeiro trade real. ``TranslateTrade`` retorna ``rc=0`` (DLL
+    contente) mas ``TradeDate.wYear == 0`` (FILETIME 1601-01-01 →
+    timestamp_ns negativo). ``translate_trade`` DEVE retornar ``None``
+    em vez de retornar ``TradeFields(timestamp_ns < 0)`` que mataria o
+    IngestorThread em ``format_brt_timestamp``.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    # Mock _dll com TranslateTrade que zera o struct out-param e retorna 0.
+    # _translate_trade_raw passa o ``byref(struct)``; nossa stub não preenche
+    # nada — mantém o ``Version=0`` setado e wYear=0 (default ctypes struct).
+    mock_dll = MagicMock(name="DLLInstance")
+    mock_dll.TranslateTrade = MagicMock(return_value=0)
+    dll._dll = mock_dll
+
+    handle = 0xDEADBEEF12345678
+    result = dll.translate_trade(handle)
+
+    assert result is None, (
+        "Q-DRIFT-34a: translate_trade deve retornar None para struct "
+        f"sentinela (TradeDate.wYear=0); recebido {result!r}"
+    )
+
+
 # =====================================================================
 # AC5 / Q-AMB-01 — wait_market_connected
 # =====================================================================

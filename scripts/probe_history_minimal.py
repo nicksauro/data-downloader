@@ -41,10 +41,17 @@ Saida: linhas com prefixos [STATE] [INIT] [SUB] [REQ] [HIST] [WAIT] [FINAL]
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import os
 import sys
 import time
-from ctypes import (
+
+# Q-DRIFT-35 (Story 1.7d): habilita faulthandler ANTES de carregar a DLL
+# para capturar access violations nativas (e.g. c_int signed truncation
+# em GetAgentNameLength). Sem isso, o processo morre sem traceback.
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
+from ctypes import (  # noqa: E402
     POINTER,
     WINFUNCTYPE,
     WinDLL,
@@ -57,10 +64,10 @@ from ctypes import (
     c_uint,
     c_wchar_p,
 )
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime, timedelta  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = ROOT / "profitdll" / "Exemplo Python"

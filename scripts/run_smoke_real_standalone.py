@@ -41,13 +41,21 @@ Uso (PowerShell):
 
 from __future__ import annotations
 
+import faulthandler
 import os
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from dotenv import load_dotenv
+# Q-DRIFT-35 (Story 1.7d): habilita faulthandler ANTES de qualquer
+# carregamento de DLL para capturar access violations nativas (e.g.
+# c_int signed truncation passando tamanho negativo para buffer alloc).
+# Sem isso, o processo morre sem traceback Python e o root-cause fica
+# invisível. Stdout para alinhar com Tee-Object dos logs PowerShell.
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
+from dotenv import load_dotenv  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))

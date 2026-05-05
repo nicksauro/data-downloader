@@ -681,7 +681,14 @@ class ProfitDLL:
             # evitar truncamento c_int64 do retorno em x64 stdcall. Probe
             # canônico (``scripts/probe_init.py``) não chama getattr em
             # nenhuma outra função antes do init e funciona — replicamos.
+            from ctypes import POINTER as _POINTER_mh  # noqa: N811
             from ctypes import c_int as _c_int_mh
+            from ctypes import c_size_t as _c_size_t_mh
+            from ctypes import c_wchar_p as _c_wchar_p_mh
+
+            from data_downloader.dll.types import (
+                TConnectorTrade as _TConnectorTrade_mh,
+            )
 
             try:
                 self._dll.DLLInitializeMarketLogin.restype = _c_int_mh
@@ -692,11 +699,81 @@ class ProfitDLL:
                     error=str(_exc),
                     error_type=type(_exc).__name__,
                 )
+
+            # Q-DRIFT-33 (Story 1.7d, Quinn @qa 2026-05-05): MESMO no path
+            # minimal, ``TranslateTrade`` precisa de signatures explícitas
+            # — handle V2 é ``c_size_t`` (64 bits em x64) e ctypes default
+            # ``c_int`` (32 bits) overflow no IngestorThread após o
+            # MARKET_CONNECTED. Skipar ``_configure_dll_signatures``
+            # integralmente é correto para evitar AVs de init (Q-DRIFT-12),
+            # mas o skip deve ser cirúrgico — a signature de hot-path do
+            # download (``TranslateTrade``) é registrada AQUI, fora de
+            # ``_configure_dll_signatures``, antes de qualquer subscribe ou
+            # callback que dispare. Ver QUIRKS.md Q-DRIFT-33.
+            try:
+                self._dll.TranslateTrade.argtypes = [
+                    _c_size_t_mh,
+                    _POINTER_mh(_TConnectorTrade_mh),
+                ]
+                self._dll.TranslateTrade.restype = _c_int_mh
+            except (AttributeError, OSError) as _tt_exc:
+                # Não-fatal — registrar warning. Falha aqui significa drift
+                # entre versões da DLL (sem ``TranslateTrade`` exportado);
+                # o IngestorThread vai falhar mais à frente com erro mais
+                # específico (NL_NOT_FOUND no getattr).
+                log.warning(
+                    "dll.minimal_handshake_translate_trade_signatures_failed",
+                    error=str(_tt_exc),
+                    error_type=type(_tt_exc).__name__,
+                    quirk="Q-DRIFT-33",
+                )
+
+            # Q-DRIFT-35 (Story 1.7d, smoke postfix-34 falhou em ~35s sem
+            # traceback Python; log mostrava 4x ``agent_resolver.unknown_id
+            # length=-2147483636`` (== 0x80000004 reinterpretado como c_int
+            # signed)). Mesmo padrão do Q-DRIFT-33: o path ``minimal_handshake``
+            # pula ``_configure_dll_signatures`` integralmente, então
+            # ``GetAgentNameLength`` e ``GetAgentName`` ficam com defaults
+            # ctypes (argtypes None, restype c_int signed). Em x64 stdcall,
+            # sem argtypes, args ``c_int`` em alguns ABIs viram corrompidos;
+            # o restype ``c_int`` signed default interpreta retornos
+            # ``c_uint32`` (length positivo) como negativo gigantesco, e
+            # quando esse "length" é passado de volta a ``GetAgentName``
+            # como tamanho de buffer pode causar access violation nativa
+            # (processo morre sem traceback Python). Registramos signatures
+            # explícitas idênticas ao path full (linhas 406-407 acima).
+            # Ver QUIRKS.md Q-DRIFT-35.
+            try:
+                self._dll.GetAgentNameLength.argtypes = [_c_int_mh, _c_int_mh]
+                self._dll.GetAgentNameLength.restype = _c_int_mh
+                self._dll.GetAgentName.argtypes = [
+                    _c_int_mh,
+                    _c_int_mh,
+                    _c_wchar_p_mh,
+                    _c_int_mh,
+                ]
+                self._dll.GetAgentName.restype = _c_int_mh
+            except (AttributeError, OSError) as _ag_exc:
+                # Não-fatal — registrar warning. AgentResolver fará fallback
+                # determinístico (``Agent#{id}``) se a chamada falhar.
+                log.warning(
+                    "dll.minimal_handshake_agent_name_signatures_failed",
+                    error=str(_ag_exc),
+                    error_type=type(_ag_exc).__name__,
+                    quirk="Q-DRIFT-35",
+                )
+
             log.info(
                 "dll.minimal_handshake_enabled",
-                story="1.7c",
-                quirk="Q-DRIFT-02-bissection",
-                skipped=["_configure_dll_signatures", "SetEnabledLogToDebug"],
+                story="1.7d",
+                quirk="Q-DRIFT-02-bissection+Q-DRIFT-33+Q-DRIFT-35",
+                skipped=["_configure_dll_signatures (full)", "SetEnabledLogToDebug"],
+                preserved=[
+                    "DLLInitializeMarketLogin.restype",
+                    "TranslateTrade.argtypes/restype",
+                    "GetAgentNameLength.argtypes/restype",
+                    "GetAgentName.argtypes/restype",
+                ],
             )
         else:
             # CRIT-2 (audit Nelo 2026-05-04): configurar argtypes/restype ANTES
@@ -1631,6 +1708,19 @@ class ProfitDLL:
             # NL_* negativo — caller agrega via counter ``translate_failures``
             # e loga 1x no fim (cool path). Não levantar — pipeline continua
             # processando demais trades do chunk.
+            return None
+
+        # Q-DRIFT-34 (Story 1.7d, Quinn @qa 2026-05-05): callback V2 dispara
+        # com struct sentinela ZERADO antes do primeiro trade real — DLL
+        # retorna ``rc=0`` mas ``TradeDate.wYear == 0`` (FILETIME 1601-01-01,
+        # convertido para ns produz timestamp negativo). Tratar como falha
+        # de tradução (mesmo path de NL_*): retornar None para o caller
+        # (IngestorThread) incrementar ``translate_failures`` e descartar
+        # silenciosamente. Sem isso ``_system_time_to_ns_local`` retorna
+        # ``-2209161600...`` e ``format_brt_timestamp(ns < 0)`` levanta
+        # ValueError → IngestorThread morre, drenagem para. Ver QUIRKS.md
+        # Q-DRIFT-34.
+        if int(struct.TradeDate.wYear) <= 1900:
             return None
 
         return TradeFields(
