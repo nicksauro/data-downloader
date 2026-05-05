@@ -517,6 +517,20 @@
   2. Cross-check com calendário B3 oficial PDF (humano + Nova).
   3. Atualizar `validation_source=dll_probe` ou `b3_calendar` quando
      confirmado.
+- **Probe automatizado (2026-05-05, Aria + Nelo mini-council):**
+  `scripts/probe_win_vigency_calendar.py` — itera as 8 entries seed
+  (WINH26..WINZ27), faz `download_chunk` em cada `vigent_from` +
+  `vigent_until`, classifica VIGENT / DIVERGE / NOT_FOUND. Output JSON
+  + tabela. Pré-requisitos: DLL real + `.env`. Comando:
+  ```
+  python scripts/probe_win_vigency_calendar.py
+  ```
+  Será executado em Story 4.2-followup AC1 (humano).
+- **Amendment ADR-006 (2026-05-05):** ADR-006 §"Regras V1" L130 dizia
+  "5º dia útil mês X" para fim WIN — divergente do seed atual. Aria+Nelo
+  identificaram discrepância estática e atualizaram ADR-006 para refletir
+  decisão COUNCIL-29 (regra B3 oficial: "quarta-feira mais próxima do
+  dia 15 do mês X"). Sem mudança no seed; apenas ADR sincronizado.
 - **Manual diz:** silencioso sobre calendário de vencimentos.
 - **Data descoberta:** 2026-05-04 (Story 4.2 mini-council COUNCIL-29).
 - **Aplica a stories:** 4.2 (multi-asset seed), 4.2-followup (smoke real

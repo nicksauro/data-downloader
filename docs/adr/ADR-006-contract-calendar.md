@@ -125,9 +125,17 @@ def vigent_contract(symbol_root: str, on_date: date, *, exchange: str = 'F') -> 
 ### Regras V1 (a validar via probe + tabela oficial Nelogica/B3)
 
 > ⚠️ **Validar antes de hardcodar.** Estas são hipóteses iniciais; Sol valida em Story 1.6.
+>
+> **Amendment 2026-05-05 (Aria + Nelo mini-council Q-DRIFT-18):** regra
+> WIN fim-de-vigência atualizada para refletir decisão COUNCIL-29 (Story
+> 4.2 — 2026-05-04). Regra anterior ("5º dia útil do mês X") era hipótese
+> primeira; regra final acordada é "quarta-feira mais próxima do dia 15
+> do mês X" — alinhada ao calendário B3 oficial para índices. Probe
+> automatizado em `scripts/probe_win_vigency_calendar.py` (criado nesta
+> sessão; bloqueado por DLL real — executa em Story 4.2-followup).
 
 - **WDO** (mini-dólar futuro): mensal. Hipótese — vigente do **penúltimo dia útil do mês X-1** até o **penúltimo dia útil do mês X**. Nelo valida via probe.
-- **WIN** (mini-Ibovespa futuro): trimestral H/M/U/Z. Hipótese — vigente do **5º dia útil do mês de vencimento - 3 meses** até o **5º dia útil do mês de vencimento**. Nelo valida via probe.
+- **WIN** (mini-Ibovespa futuro): trimestral H/M/U/Z. Vigente do **5º dia útil do mês de vencimento - 3 meses** até a **quarta-feira mais próxima do dia 15 do mês de vencimento** (regra B3 oficial para futuros de índice; ver `docs/storage/CONTRACTS.md` §2.2 + Q-DRIFT-18 em `docs/dll/QUIRKS.md`). Probe DLL automatizado pendente — Story 4.2-followup.
 - **Equities** (PETR4, VALE3): não há vigência — ticker é estável. Tabela `contracts` tem entrada com `vigent_from = '1900-01-01', vigent_until = '9999-12-31'`.
 
 ---
