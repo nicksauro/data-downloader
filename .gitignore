@@ -128,6 +128,9 @@ logs/
 benchmarks/results/*-dirty.json
 benchmarks/results/baselines_v1_mock/*-dirty.json
 
+# Claude Code session-local state (scheduled_tasks.lock etc)
+.claude/
+
 # -----------------------------------------------------------------------------
 # IDE / editor
 # -----------------------------------------------------------------------------
