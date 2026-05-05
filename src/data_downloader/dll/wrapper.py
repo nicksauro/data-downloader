@@ -503,6 +503,7 @@ class ProfitDLL:
         password: str,
         *,
         register_extra_callbacks: bool = False,
+        minimal_handshake: bool = False,
     ) -> None:
         """Inicializa a DLL em modo market-only (sem trading).
 
@@ -562,6 +563,29 @@ class ProfitDLL:
                 livro/ordens, este kwarg pode ser ``True`` — mas antes
                 precisamos signatures corretas (TODO: Story 1.7b-Q-DRIFT-09
                 follow-up para auditar e corrigir signatures por callback).
+            minimal_handshake: **Story 1.7c — Bisseção A/B Q-DRIFT-02**.
+                Quando ``True``, espelha EXATAMENTE o caminho do probe
+                canônico ``scripts/probe_init.py`` (que conecta em <3s onde
+                o wrapper trava 600s+). Diferenças vs default:
+
+                - Pula ``_configure_dll_signatures()`` em larga escala —
+                  configura APENAS o mínimo absoluto (restype de
+                  ``DLLInitializeMarketLogin``).
+                - Pula ``SetEnabledLogToDebug(0)`` (probe e exemplo
+                  Nelogica ``main.py:742-743`` NÃO chamam).
+                - Passa ``None`` LITERAL nos slots 4, 6, 7, 8 (newTrade,
+                  newHistory, priceBook, offerBook) — espelho exato do
+                  probe (linhas 239-251) e exemplo Nelogica.
+
+                Mantém em ambos paths: ``os.chdir`` (Q-DRIFT-10 — provado
+                necessário) e state callback REAL (slot 3) com Queue path.
+
+                Default ``False`` preserva 100% do comportamento atual
+                (zero risco de regressão para callers existentes).
+
+                Ver: ``docs/stories/1.7c.story.md`` e
+                ``docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md``
+                (seção *Análise Pós-Mortem*).
 
         Raises:
             DLLInitError: Se companions faltantes (COMPANIONS_MISSING),
@@ -632,64 +656,125 @@ class ProfitDLL:
                 details={"path": str(self._dll_path)},
             ) from exc
 
-        # CRIT-2 (audit Nelo 2026-05-04): configurar argtypes/restype ANTES
-        # de qualquer chamada à DLL. Sem isso ctypes assume args ``c_int`` e
-        # desalinha o stack stdcall em x64 — handles ``c_size_t`` truncam,
-        # ponteiros para struct viram int (32 bits), retornos ``c_int64``
-        # chegam corrompidos. Pode ter causado a flakey de attempt 4
-        # (smoke 2026-05-04).
-        self._configure_dll_signatures()
+        # Story 1.7c — bisseção A/B Q-DRIFT-02: branch entre o caminho
+        # padrão (configura tudo) e o ``minimal_handshake`` (espelha probe).
+        # Default ``minimal_handshake=False`` preserva 100% do comportamento
+        # atual; o caminho mínimo serve para isolar qual divergência
+        # probe ↔ wrapper causa o handshake travar em ``MARKET_DATA/1``.
+        if minimal_handshake:
+            # MINIMAL — apenas restype de DLLInitializeMarketLogin para
+            # evitar truncamento c_int64 do retorno em x64 stdcall. Probe
+            # canônico (``scripts/probe_init.py``) não chama getattr em
+            # nenhuma outra função antes do init e funciona — replicamos.
+            from ctypes import c_int as _c_int_mh
 
-        # AC11 — silenciar log nativo da DLL ANTES do init para não poluir
-        # structlog com formato próprio da DLL. Se função não existe na
-        # versão (AttributeError), apenas warn — não bloquear init.
-        try:
-            self._dll.SetEnabledLogToDebug(0)
-            log.info("dll.native_log_silenced")
-        except (AttributeError, OSError) as exc:
-            # AttributeError: função não exposta. OSError: chamada falhou.
-            # Não-fatal — apenas warn.
-            log.warning(
-                "dll.native_log_silence_failed",
-                error=str(exc),
-                error_type=type(exc).__name__,
+            try:
+                self._dll.DLLInitializeMarketLogin.restype = _c_int_mh
+            except (AttributeError, OSError) as _exc:
+                # Não-fatal — restype default é c_int em ctypes; só logamos.
+                log.warning(
+                    "dll.minimal_handshake_restype_failed",
+                    error=str(_exc),
+                    error_type=type(_exc).__name__,
+                )
+            log.info(
+                "dll.minimal_handshake_enabled",
+                story="1.7c",
+                quirk="Q-DRIFT-02-bissection",
+                skipped=["_configure_dll_signatures", "SetEnabledLogToDebug"],
             )
+        else:
+            # CRIT-2 (audit Nelo 2026-05-04): configurar argtypes/restype ANTES
+            # de qualquer chamada à DLL. Sem isso ctypes assume args ``c_int`` e
+            # desalinha o stack stdcall em x64 — handles ``c_size_t`` truncam,
+            # ponteiros para struct viram int (32 bits), retornos ``c_int64``
+            # chegam corrompidos. Pode ter causado a flakey de attempt 4
+            # (smoke 2026-05-04).
+            self._configure_dll_signatures()
 
-        # AC2 — construir 8 callbacks (1 state ativo + 7 NoopCallback).
-        # JAMAIS passar ``None`` (Q11-E / Sentinel §12 — slots ``None``
-        # corrompem registro interno e Set*Callback posteriores ficam
-        # silenciosamente quebrados).
+            # AC11 — silenciar log nativo da DLL ANTES do init para não poluir
+            # structlog com formato próprio da DLL. Se função não existe na
+            # versão (AttributeError), apenas warn — não bloquear init.
+            try:
+                self._dll.SetEnabledLogToDebug(0)
+                log.info("dll.native_log_silenced")
+            except (AttributeError, OSError) as exc:
+                # AttributeError: função não exposta. OSError: chamada falhou.
+                # Não-fatal — apenas warn.
+                log.warning(
+                    "dll.native_log_silence_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+        # State callback REAL (slot 3) é mantido em AMBOS os paths — probe
+        # canônico também passa state callback REAL (queue path).
         state_cb = make_state_callback(self._state_queue)
-        noop_cbs: list[Any] = [make_noop_callback(sig) for sig in NOOP_SLOT_SIGNATURES]
 
-        # Logger evento de init — args mascarados (R5 redaction +
-        # ADR-010 SENSITIVE_KEYS). Nota: NÃO usar literal ``password=...``
-        # como kwarg do logger — pre-commit secret hook (regex
-        # ``password\s*=\s*['"]...['"]``) gera falso-positivo. Usar
-        # ``credential_redacted=...`` evita o pattern sem perder semântica.
-        log.info(
-            "dll.initialize_call",
-            key_redacted="***",
-            user=user,
-            credential_redacted="***",
-            slots_active=["state"],
-            slots_noop=len(noop_cbs),
-            total_callback_slots=1 + len(noop_cbs),
-        )
-
-        # AC2 — chamada com 11 args: 3 credenciais + 1 state + 7 noop.
-        # Manual §3.1: DLLInitializeMarketLogin(key, user, password, state,
-        # trade, daily, priceBook, offerBook, histTrade, progress, tinyBook).
-        # ``c_wchar_p`` import inline para coerência com WinDLL lazy import
-        # acima — ambos só usados após checagem de plataforma.
+        # Slots 4..10 (7 callbacks): branch entre None literal (espelho probe)
+        # e NoopCallback (caminho default herdado de Q11-E / Sentinel §12 —
+        # premissa "JAMAIS None" REFUTADA empiricamente pelo probe que conecta
+        # em <3s passando ``None`` em slots 4/6/7/8).
         from ctypes import c_wchar_p
 
+        if minimal_handshake:
+            # Espelho EXATO do probe (linhas 239-251) e exemplo Nelogica
+            # (``main.py:742-743``):
+            #   slot 4  = newTradeCallback     -> None
+            #   slot 5  = newDailyCallback     -> None (NoopCallback no probe
+            #                                          é REAL — usamos None
+            #                                          para o caminho mínimo;
+            #                                          se travar aqui, AC3
+            #                                          isolará reintroduzindo
+            #                                          REAL one-by-one)
+            #   slot 6  = newHistoryCallback   -> None
+            #   slot 7  = priceBookCallback    -> None
+            #   slot 8  = offerBookCallback    -> None
+            #   slot 9  = progressCallBack     -> None (idem nota slot 5)
+            #   slot 10 = tinyBookCallBack     -> None (idem)
+            non_state_slots: list[Any] = [None] * 7
+            log.info(
+                "dll.initialize_call",
+                key_redacted="***",
+                user=user,
+                credential_redacted="***",
+                slots_active=["state"],
+                slots_none=7,
+                total_callback_slots=1,
+                minimal_handshake=True,
+            )
+        else:
+            # AC2 — construir 8 callbacks (1 state ativo + 7 NoopCallback).
+            # JAMAIS passar ``None`` (Q11-E / Sentinel §12 — slots ``None``
+            # corrompem registro interno e Set*Callback posteriores ficam
+            # silenciosamente quebrados).
+            non_state_slots = [make_noop_callback(sig) for sig in NOOP_SLOT_SIGNATURES]
+
+            # Logger evento de init — args mascarados (R5 redaction +
+            # ADR-010 SENSITIVE_KEYS). Nota: NÃO usar literal ``password=...``
+            # como kwarg do logger — pre-commit secret hook (regex
+            # ``password\s*=\s*['"]...['"]``) gera falso-positivo. Usar
+            # ``credential_redacted=...`` evita o pattern sem perder semântica.
+            log.info(
+                "dll.initialize_call",
+                key_redacted="***",
+                user=user,
+                credential_redacted="***",
+                slots_active=["state"],
+                slots_noop=len(non_state_slots),
+                total_callback_slots=1 + len(non_state_slots),
+            )
+
+        # AC2 — chamada com 11 args: 3 credenciais + 1 state + 7 callbacks
+        # (Noop OU None conforme branch acima).
+        # Manual §3.1: DLLInitializeMarketLogin(key, user, password, state,
+        # trade, daily, priceBook, offerBook, histTrade, progress, tinyBook).
         ret: int = self._dll.DLLInitializeMarketLogin(
             c_wchar_p(key),
             c_wchar_p(user),
             c_wchar_p(password),
             state_cb,
-            *noop_cbs,
+            *non_state_slots,
         )
 
         # AC7 — retorno < 0 = erro NL_*. Decode + raise DLLInitError.

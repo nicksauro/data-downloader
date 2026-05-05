@@ -488,6 +488,14 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     documenta que o handshake pode levar minutos quando o ProfitChart
     não está aberto concorrentemente.
 
+    **Story 1.7c (bisseção Q-DRIFT-02):** quando
+    ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` ∈ ``{"1","true","yes"}``
+    (case-insensitive), o init usa o caminho ``minimal_handshake=True``
+    que espelha o probe canônico — pula ``_configure_dll_signatures`` em
+    larga escala, pula ``SetEnabledLogToDebug(0)`` e passa ``None``
+    literal nos slots 4/6/7/8 do ``DLLInitializeMarketLogin``. Default
+    (var ausente / vazia) preserva o caminho atual.
+
     Args:
         events_queue: usado para emitir progresso "starting DLL" antes do
             init real (que pode demorar 5-30s em prod).
@@ -518,7 +526,20 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
         ),
     )
     dll = ProfitDLL()
-    dll.initialize_market_only(key, user, password)
+    # Story 1.7c — bisseção A/B Q-DRIFT-02. Quando
+    # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` está definida como ``1``,
+    # ``true`` ou ``yes`` (case-insensitive), o init usa o caminho mínimo
+    # que espelha o probe canônico (``scripts/probe_init.py``) — pula
+    # ``_configure_dll_signatures`` em larga escala, pula
+    # ``SetEnabledLogToDebug(0)`` e passa ``None`` literal nos slots
+    # 4/6/7/8 do ``DLLInitializeMarketLogin``. Default ``False`` preserva
+    # o comportamento atual (zero risco de regressão).
+    minimal_handshake = os.getenv("DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    dll.initialize_market_only(key, user, password, minimal_handshake=minimal_handshake)
     # Story 2.12 — retry policy mitiga flakiness Q-DRIFT-02 revisado.
     # Defaults: 300s/tentativa, 3 tentativas, 30s cooldown — cap superior
     # 990s no pior caso (3*300 + 2*30). Operador ajusta via env vars se

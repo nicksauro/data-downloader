@@ -335,6 +335,125 @@ def test_initialize_market_only_skips_extra_callbacks_on_negative_return(
 
 
 # =====================================================================
+# Story 1.7c — minimal_handshake bisseção A/B Q-DRIFT-02
+# =====================================================================
+
+
+@pytest.mark.unit
+def test_initialize_minimal_handshake_passes_none_in_unused_slots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``minimal_handshake=True`` passa ``None`` literal nos 7 slots não-state.
+
+    Story 1.7c: espelho exato de ``scripts/probe_init.py`` (linhas 239-251) e
+    exemplo Nelogica ``main.py:742-743``. Refuta empiricamente Q11-E
+    ("JAMAIS None") — probe conecta em <3s passando ``None`` em 4 slots.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS", minimal_handshake=True)
+
+    init_call = dll_instance.DLLInitializeMarketLogin.call_args
+    assert init_call is not None, "DLLInitializeMarketLogin não foi chamado"
+    args = init_call.args
+    assert len(args) == 11, f"Esperado 11 args, recebido {len(args)}: {args}"
+    # Slots 0-2 = credenciais (c_wchar_p) — não-None.
+    for i in range(3):
+        assert args[i] is not None, f"credencial arg[{i}] não pode ser None"
+    # Slot 3 = state callback REAL — não-None (sempre).
+    assert args[3] is not None, "state callback (slot 3) não pode ser None"
+    # Slots 4-10 (7 slots restantes) = None LITERAL no minimal path.
+    for i in range(4, 11):
+        assert args[i] is None, f"minimal_handshake: slot {i} esperado None, recebido {args[i]!r}"
+
+
+@pytest.mark.unit
+def test_initialize_minimal_handshake_skips_set_enabled_log_to_debug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``minimal_handshake=True`` NÃO chama ``SetEnabledLogToDebug``.
+
+    Story 1.7c: probe canônico e exemplo Nelogica ``main.py`` NÃO chamam
+    ``SetEnabledLogToDebug`` em lugar nenhum. Hipótese de causa-raiz #2
+    para Q-DRIFT-02 — a chamada pode estar setando flag interna que afeta
+    a promoção do market data.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS", minimal_handshake=True)
+
+    # SetEnabledLogToDebug NÃO deve aparecer nas chamadas registradas.
+    method_names = [c[0] for c in dll_instance.method_calls]
+    assert "SetEnabledLogToDebug" not in method_names, (
+        f"minimal_handshake: SetEnabledLogToDebug NÃO deve ser chamado; "
+        f"chamadas: {method_names}"
+    )
+    # DLLInitializeMarketLogin DEVE ter sido chamado (init em si funciona).
+    assert "DLLInitializeMarketLogin" in method_names
+
+
+@pytest.mark.unit
+def test_initialize_minimal_handshake_default_false_preserves_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``minimal_handshake=False``: comportamento legacy preservado.
+
+    Story 1.7c: zero risco de regressão para callers existentes — mesma
+    sequência (SetEnabledLogToDebug ANTES de init; 7 NoopCallback nos
+    slots não-state, sem ``None``).
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    # Não passa minimal_handshake — usa default False.
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS")
+
+    method_names = [c[0] for c in dll_instance.method_calls]
+    # Default DEVE chamar SetEnabledLogToDebug ANTES do init.
+    assert (
+        "SetEnabledLogToDebug" in method_names
+    ), "default path deve manter SetEnabledLogToDebug (legacy comportamento)"
+    assert method_names.index("SetEnabledLogToDebug") < method_names.index(
+        "DLLInitializeMarketLogin"
+    )
+    # Default: 11 args, NENHUM None (NoopCallback nos 7 slots).
+    init_call = dll_instance.DLLInitializeMarketLogin.call_args
+    args = init_call.args
+    assert len(args) == 11
+    for i, a in enumerate(args):
+        assert a is not None, f"default path: arg[{i}] não pode ser None (Q11-E legacy preservado)"
+
+
+# =====================================================================
 # AC5 / Q-AMB-01 — wait_market_connected
 # =====================================================================
 

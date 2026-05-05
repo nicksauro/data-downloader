@@ -58,8 +58,22 @@ def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
     user = os.environ["PROFITDLL_USER"]
     password = os.environ["PROFITDLL_PASS"]
 
+    # Story 1.7c — bisseção A/B Q-DRIFT-02. Quando
+    # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` está definida como
+    # ``1``/``true``/``yes`` (case-insensitive), o init usa o caminho
+    # mínimo que espelha o probe canônico ``scripts/probe_init.py`` —
+    # pula ``_configure_dll_signatures`` em larga escala, pula
+    # ``SetEnabledLogToDebug(0)`` e passa ``None`` literal nos slots
+    # 4/6/7/8 do ``DLLInitializeMarketLogin``. Default (var ausente)
+    # preserva o caminho atual usado em attempts 4-7.
+    minimal_handshake = os.getenv("DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
     with ProfitDLL() as dll:
-        dll.initialize_market_only(key, user, password)
+        dll.initialize_market_only(key, user, password, minimal_handshake=minimal_handshake)
         # Q-DRIFT-02 (revisado Story 2.12): handshake é flakey — às vezes 1s,
         # às vezes timeout em 300s com mesma config. Retry policy interna
         # (3 tentativas, 300s timeout/tentativa, 30s cooldown) mitiga.
