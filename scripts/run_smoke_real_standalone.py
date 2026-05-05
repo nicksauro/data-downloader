@@ -46,7 +46,7 @@ import os
 import sys
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 # Q-DRIFT-35 (Story 1.7d): habilita faulthandler ANTES de qualquer
@@ -71,8 +71,14 @@ from data_downloader.orchestrator.download_primitive import download_chunk  # no
 # em vez de WDOJ26; janela <= 5 dias (limite empírico do GetHistoryTrades).
 _SMOKE_SYMBOL = "WDOFUT"
 _SMOKE_EXCHANGE = "F"
-_SMOKE_DT_END = datetime.now() - timedelta(minutes=10)
-_SMOKE_DT_START = _SMOKE_DT_END - timedelta(days=4)
+# COUNCIL-37 (Quinn @qa 2026-05-05): experimento 1-DIA para isolar volume gap.
+# Hipótese H-E (queue overflow silencioso) prevê que com janela menor (1 dia
+# → 1 burst de 600-700k trades em vez de 4-day flood), a perda deve diminuir
+# proporcionalmente OU desaparecer. Janela: ontem (04/05/2026 Mon trading
+# day completo) 09:00 → 18:30 BRT (mesmo dia que já temos 307k no parquet
+# de 4-day, esperamos 600-700k aqui).
+_SMOKE_DT_START = datetime(2026, 5, 4, 9, 0, 0)
+_SMOKE_DT_END = datetime(2026, 5, 4, 18, 30, 0)
 
 
 def main() -> int:
