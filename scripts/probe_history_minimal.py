@@ -24,8 +24,8 @@ Fluxo (referencia: PROFITDLL_KNOWLEDGE.md §2.7 + C++ main.cpp:875-892):
        )
     4. wait MARKET_CONNECTED (state callback nType=2, nResult=4) ate 60s
     5. SetHistoryTradeCallbackV2(history_v2_cb) — callback V2 = nosso target
-    6. SubscribeTicker(WDOJ26, F) — pre-requisito Q-DRIFT-07
-    7. GetHistoryTrades(WDOJ26, F, "dd/MM/yyyy", "dd/MM/yyyy")
+    6. SubscribeTicker(WDOFUT, F) — pre-requisito Q-DRIFT-07
+    7. GetHistoryTrades(WDOFUT, F, "dd/MM/yyyy HH:MM:SS", ...) janela <= 5 dias
     8. Aguardar trades por ate 120s
     9. Verdict: A (trades>0 — bug nosso) ou B (zero trades — bug externo)
 
@@ -348,8 +348,10 @@ def main() -> int:
     set_cb_ret = profit_dll.SetHistoryTradeCallbackV2(historyTradeCallbackV2)
     print(f"[CB] SetHistoryTradeCallbackV2 ret={set_cb_ret}", flush=True)
 
-    # ----- SubscribeTicker WDOJ26 / F (Q-DRIFT-07) -----
-    ticker = "WDOJ26"
+    # ----- SubscribeTicker WDOFUT / F (Q-DRIFT-07) -----
+    # Story 1.7d (correção 2026-05-04): usuário corrigiu — WDOFUT (continuous
+    # future) funciona; não é necessário contrato específico WDOJ26/WDOK26.
+    ticker = "WDOFUT"
     exchange = "F"
     print(f"[STEP] SubscribeTicker({ticker}, {exchange})...", flush=True)
     sub_ret = profit_dll.SubscribeTicker(c_wchar_p(ticker), c_wchar_p(exchange))
@@ -365,14 +367,17 @@ def main() -> int:
     # Pequeno delay para subscribe propagar (mesmo padrao do nosso codigo)
     time.sleep(2.0)
 
-    # ----- GetHistoryTrades — replicar formato C++ (data curta) -----
-    # C++ main.cpp:877 usa "12/01/2021" — apenas data, sem hora.
-    # Nosso codigo usa "dd/MM/yyyy HH:mm:ss". Vamos testar ambos.
-    # Janela curta de pregao recente: agora-2h ate agora-10min.
+    # ----- GetHistoryTrades — janela MAX 5 dias (Q-DRIFT-31) -----
+    # Story 1.7d (correção 2026-05-04): usuário corrigiu — limite de janela
+    # do GetHistoryTrades é ~5 dias (chunker.py:56 e QUIRKS.md:310 já indicam
+    # WDO=5 dias úteis). Sintoma B (zero trades) provavelmente era janela
+    # muito grande (não falta de permissão BMF).
+    # C++ main.cpp:877 usa janela de 2 dias ("12/01/2021" -> "13/01/2021"),
+    # apenas data sem hora. Aqui usamos 4 dias para margem.
     end = datetime.now() - timedelta(minutes=10)
-    start = end - timedelta(hours=2)
+    start = end - timedelta(days=4)
 
-    # Formato 1: COM hora (formato que nosso codigo usa)
+    # Formato COM hora (formato que nosso codigo usa)
     start_str = start.strftime("%d/%m/%Y %H:%M:%S")
     end_str = end.strftime("%d/%m/%Y %H:%M:%S")
 

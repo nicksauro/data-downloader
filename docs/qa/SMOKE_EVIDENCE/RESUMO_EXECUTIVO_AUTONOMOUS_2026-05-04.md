@@ -290,3 +290,52 @@ Não mais necessário se Caminho rápido for aceito. Mantém-se como fallback se
 PO/SM rejeitarem PETR4 como caso de smoke aceitável.
 
 **Última atualização:** 2026-05-05 ~11:07 BRT (sanity check PETR4 + WDOK26 completo).
+
+---
+
+## Adendo 2026-05-05 ~11:42 BRT — WDOFUT + 5d (Quinn @qa)
+
+**Verdict:** **diagnóstico H1-parcial REFUTADO; bug real é em código nosso.**
+
+**Diretiva do usuário (2026-05-04):** "A conta TEM permissão BMF. O bug
+era usar WDOJ26/WDOK26 (contratos específicos) — deveria ser WDOFUT
+(continuous future). Adicionalmente, janela máx ~5 dias."
+
+**Validação experimental (2026-05-05 ~11:22 BRT):**
+
+| Execução | Setup | Resultado |
+|----------|-------|-----------|
+| Probe puro (`probe_history_minimal.py`) | WDOFUT/F + 4d | **723.587 trades** + LAST_PACKET ✅ |
+| Standalone wrapper (minimal) | WDOFUT/F + 4d | FAIL — `OverflowError TranslateTrade` (Q-DRIFT-33) |
+| Standalone wrapper (full) | WDOFUT/F + 4d | FAIL — `ValueError timestamp_ns < 0` (Q-DRIFT-34) |
+
+**Refutações:**
+- **H1-parcial REFUTADA** — conta TEM permissão BMF (probe puro com WDOFUT
+  pegou 723k trades).
+- **H4 (contrato vencido) REFUTADA** — WDOFUT (continuous) funciona;
+  o bug original era usar contratos específicos (WDOJ26 abril/2026 = vencido).
+- **Q-DRIFT-02 (handshake 5min) REFUTADA** — MARKET_CONNECTED em 1.6s
+  com ProfitChart NÃO rodando.
+
+**Bugs novos confirmados em código:**
+- **Q-DRIFT-31:** janela máx GetHistoryTrades ~5 dias úteis (já mitigado
+  em chunker.py:56 mas validado empiricamente).
+- **Q-DRIFT-32:** WDOFUT (não WDOJ26) é o ticker correto para histórico.
+- **Q-DRIFT-33:** `minimal_handshake=True` skipa `TranslateTrade.argtypes`
+  → `OverflowError`. Hotfix: registrar argtypes mesmo em modo minimal.
+- **Q-DRIFT-34:** `IngestorThread._process_trade` morre em
+  `format_brt_timestamp(<0)`. Hotfix: guard em `wrapper.translate_trade`
+  ou try/except em `_process_trade`.
+
+**Próxima ação:** Dex deve executar Q-DRIFT-33 + Q-DRIFT-34 hotfix.
+Após isso, smoke real WDOFUT + 5d deve PASS.
+
+**Refs:**
+- `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T114247Z-wdofut-CONSOLIDADO-PARTIAL.md`
+- `docs/qa/SMOKE_EVIDENCE/logs/probe-history-wdofut-20260505T112254Z.log`
+- `docs/qa/SMOKE_EVIDENCE/logs/standalone-wdofut-20260505T112731Z.log`
+- `docs/qa/SMOKE_EVIDENCE/logs/standalone-wdofut-fullconf-20260505T113850Z.log`
+- `docs/dll/QUIRKS.md` (Q-DRIFT-31, 32, 33, 34)
+
+**Última atualização:** 2026-05-05 ~11:42 BRT (Quinn @qa, Story 1.7d
+consolidação WDOFUT — PARTIAL verdict).

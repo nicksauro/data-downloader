@@ -1186,6 +1186,96 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ---
 
+## Q-DRIFT-31
+
+- **ID:** Q-DRIFT-31
+- **Status:** ✅ **VALIDATED — Story 1.7d standalone-pregao 2026-05-05 (Quinn @qa)**
+- **Categoria:** download / history / window-size
+- **Título:** `GetHistoryTrades` janela máxima ~5 dias úteis (servidor Nelogica) — janelas maiores retornam silenciosamente zero trades.
+- **Sintoma:** `GetHistoryTrades(WDOJ26, 'F', '01/03/2026', '31/03/2026')` (30 dias) retorna code=0 mas servidor NÃO despacha trades — callback V2 nunca dispara, timeout em 600s. Já documentado como Q12-E (chunk size adaptativo) mas sem teste empírico isolado até agora.
+- **Causa raiz:** servidor de histórico Nelogica tem limite implícito por request (não documentado). Confirmado por probe minimalista — janela 4 dias úteis (`now-4d` → `now-10min`) com WDOFUT/F entregou 723.587 trades em ~10s; janela 30 dias entregava ZERO trades.
+- **Workaround:** `chunker.py:56` já usa janela 5 dias para WDO (`docs/dll/QUIRKS.md` Q12-E). **Validado empiricamente em 2026-05-05.** O exemplo C++ oficial (`profitdll/Exemplo Python/main.py` C++ main.cpp:877) usa janela de 2 dias ("12/01/2021" → "13/01/2021").
+- **Manual diz:** silencioso sobre limites por request.
+- **Evidência:** `docs/qa/SMOKE_EVIDENCE/logs/probe-history-wdofut-20260505T112254Z.log` (PROBE 4d → 723.587 trades + LAST_PACKET).
+- **Data descoberta (validação):** 2026-05-05 (Quinn @qa, Story 1.7d).
+- **Aplica a stories:** 1.3 (chunker), 1.7a (chunk strategy), 1.7d (smoke real WDOFUT).
+- **Refs:**
+  - [Q12-E](#q12-e) (mesma quirk, sem evidência empírica direta até agora).
+  - `scripts/probe_history_minimal.py:370-378` (janela 4 dias com formato `%d/%m/%Y %H:%M:%S`).
+  - `src/data_downloader/orchestrator/chunker.py:56` (chunk strategy WDO=5d).
+
+---
+
+## Q-DRIFT-32
+
+- **ID:** Q-DRIFT-32
+- **Status:** ✅ **VALIDATED — Story 1.7d 2026-05-05 (Quinn @qa)**
+- **Categoria:** download / symbol / continuous-future
+- **Título:** Símbolo `WDOFUT` (continuous future) deve ser usado para download histórico, NÃO contratos específicos `WDOJ26`/`WDOK26`/etc.
+- **Sintoma:** `GetHistoryTrades(WDOJ26, 'F', ...)` ou `(WDOK26, 'F', ...)` retorna code=0 mas servidor NÃO despacha trades — callback V2 nunca dispara, mesmo em pregão aberto com janela curta. Já era hipótese suspeita (Q11-E permissão BMF) mas mal-formulada — não era falta de permissão, era contrato errado.
+- **Causa raiz:** `WDOJ26` é abril/2026 (já vencido em 2026-05-05); `WDOK26` é maio/2026 (atual mas ainda não tem histórico longo se acabou de virar). `WDOFUT` é ticker continuous-future agregado pela Nelogica que sempre aponta para o contrato vigente. Em download histórico, somente `WDOFUT` retorna dados consistentes.
+- **Workaround:** **sempre usar `WDOFUT` para download histórico**. Para subscription real-time pode-se usar contrato específico, mas histórico exige continuous future.
+- **Refutação implícita:** Q11-E ("requer permissão BMF B3 ou MarketData full") foi REFUTADA novamente — a conta TEM permissão. Bug original era contrato vencido, não permissão.
+- **Manual diz:** silencioso sobre `WDOFUT` vs contratos específicos. Exemplo C++ usa `WDOFUT` (`main.cpp:875`).
+- **Evidência:**
+  - `docs/qa/SMOKE_EVIDENCE/logs/probe-history-wdofut-20260505T112254Z.log` (WDOFUT/F + 4d → 723.587 trades).
+  - `docs/qa/SMOKE_EVIDENCE/logs/standalone-pregao-20260505T103538Z.log` (WDOJ26/F + 2h → 0 trades).
+- **Data descoberta:** 2026-05-04 (correção do usuário); validação 2026-05-05 (Quinn @qa).
+- **Aplica a stories:** 1.7b (smoke MVP gate — usar WDOFUT), 1.7d (smoke real WDOFUT validado), 4.1/4.2 (multi-symbol — WIN, PETR4 etc. usar continuous quando existir).
+
+---
+
+## Q-DRIFT-33
+
+- **ID:** Q-DRIFT-33
+- **Status:** 🐛 **BUG-CÓDIGO — descoberta Story 1.7d 2026-05-05 (Quinn @qa)**
+- **Categoria:** wrapper / dll / signatures / minimal-handshake
+- **Título:** `minimal_handshake=True` skipa `_configure_dll_signatures` integralmente, mas `TranslateTrade.argtypes` é necessário para download — handle V2 (`c_size_t`) overflow em ctypes default `c_int`.
+- **Sintoma:** `run_smoke_real_standalone.py` com `DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE=1` e WDOFUT/F + 4d. DLL inicializa OK (signature skip funciona para handshake), MARKET_CONNECTED OK, GetHistoryTrades ret=0, callback V2 dispara — mas IngestorThread crasha:
+  ```
+  File "...wrapper.py", line 1683, in _translate_trade_raw
+      rc: int = self._dll.TranslateTrade(p_trade_handle, byref(trade_struct))
+  ctypes.ArgumentError: argument 1: OverflowError: int too long to convert
+  ```
+- **Causa raiz:** `minimal_handshake=True` skipa `_configure_dll_signatures` integralmente. Sem `TranslateTrade.argtypes = [c_size_t, POINTER(TConnectorTrade)]`, ctypes default para 1º argumento é `c_int` (32 bits). Handle V2 vem do callback como `c_size_t` (64 bits em x64) → ponteiro grande não cabe em int → overflow.
+- **Workaround proposto (Dex implementar):** em modo minimal, ainda registrar `TranslateTrade.argtypes` + `restype` (e quaisquer outras signatures usadas em hot path do download). Skipar APENAS as signatures de inicialização que comprovadamente trazem o crash de smoke 5 (Q-DRIFT-12 bissection — `SetEnabledLogToDebug` etc.).
+- **Refutação parcial de Q-DRIFT-12:** Q-DRIFT-12 dizia que skipar `_configure_dll_signatures` em smoke 5 evita access violations. Isso continua verdadeiro PARA inicialização. Mas o skip deve ser cirúrgico — não pode tirar `TranslateTrade.argtypes` que é hot path do download.
+- **Manual diz:** silencioso (não menciona ctypes signatures).
+- **Evidência:** `docs/qa/SMOKE_EVIDENCE/logs/standalone-wdofut-20260505T112731Z.log` linhas 32-56 (traceback completo).
+- **Data descoberta:** 2026-05-05 (Quinn @qa, Story 1.7d).
+- **Aplica a stories:** 1.7b (smoke real MVP gate), 1.7d (smoke real WDOFUT), 1.7b-followup (Dex hotfix wrapper).
+- **Refs:**
+  - `src/data_downloader/dll/wrapper.py:402` (signature `TranslateTrade` registrada apenas em modo full).
+  - `src/data_downloader/dll/wrapper.py:720-735` (variante `minimal_handshake=True` — skip integral).
+  - [Q-DRIFT-12](#q-drift-12) (parent quirk — bissection pos-smoke 5).
+
+---
+
+## Q-DRIFT-34
+
+- **ID:** Q-DRIFT-34
+- **Status:** 🐛 **BUG-CÓDIGO — descoberta Story 1.7d 2026-05-05 (Quinn @qa)**
+- **Categoria:** orchestrator / ingestor / error-handling
+- **Título:** `IngestorThread._process_trade` morre silenciosamente em `format_brt_timestamp(timestamp_ns < 0)`, parando drenagem da queue mesmo com callback V2 ativo.
+- **Sintoma:** `run_smoke_real_standalone.py` (modo NÃO-minimal — full signatures) com WDOFUT/F + 4d. DLL OK, MARKET_CONNECTED OK, GetHistoryTrades ret=0, callback V2 dispara — primeira invocação de `translate_trade` retorna `rc=0` (DLL contente) mas `TConnectorTrade.TradeDate` ficou zerado (struct sentinel ou trade vazio inicial). `_system_time_to_ns_local(SystemTime zero)` produz `-2209161600000000000` (1601-01-01 BRT em ns relativo a 1970). `format_brt_timestamp` valida `ns >= 0` e levanta `ValueError`. `_process_trade` NÃO tem try/except → `IngestorThread` morre. Callback V2 segue enfileirando handles em `trade_queue`, ninguém drena, log final reporta `trades_count=0`.
+- **Causa raiz:**
+  1. `_translate_trade_raw` retorna `rc=0` mesmo quando struct fica zerado (DLL não distingue "trade real" de "sentinela inicial" no return code).
+  2. `_process_trade` em `download_primitive.py:344` chama `format_brt_timestamp` SEM guard — primeira exception mata a thread.
+  3. `IngestorThread.run` não tem catch around `_process_trade` para incrementar `translate_failures` e continuar.
+- **Workaround proposto (Dex implementar):**
+  1. **Wrapper** (`wrapper.py:1636-1646`): em `translate_trade`, validar `struct.TradeDate.wYear > 1900` ANTES de retornar `TradeFields`. Se zerado, retornar `None` (mesmo path de `rc != 0`).
+  2. **Orchestrator** (`download_primitive.py:323-344`): envolver `_process_trade` body em try/except, incrementar `self.translate_failures += 1` e RETORNAR (não kill thread). Garantir que log agregado capture isso.
+- **Manual diz:** silencioso sobre invocações sentinela do callback V2.
+- **Evidência:** `docs/qa/SMOKE_EVIDENCE/logs/standalone-wdofut-fullconf-20260505T113850Z.log` linhas 35-56 (traceback completo, processo morto antes de SUMMARY).
+- **Data descoberta:** 2026-05-05 (Quinn @qa, Story 1.7d).
+- **Aplica a stories:** 1.7b (smoke real MVP gate), 1.7d (smoke real), 1.3 (download primitive — gap de error-handling).
+- **Refs:**
+  - `src/data_downloader/dll/wrapper.py:1628-1646` (translate_trade — sem validação de TradeDate zero).
+  - `src/data_downloader/orchestrator/download_primitive.py:323-369` (`_process_trade` — sem try/except).
+  - `src/data_downloader/orchestrator/timestamp.py:141-142` (`format_brt_timestamp` — guard ns < 0 leva a kill thread).
+
+---
+
 ## Manutenção
 
 - **Adicionar quirk:** comando Nelo `*add-quirk {description}` OU edit manual aqui.

@@ -58,11 +58,12 @@ from data_downloader.dll.wrapper import ProfitDLL  # noqa: E402
 from data_downloader.orchestrator.download_primitive import download_chunk  # noqa: E402
 
 # Espelho EXATO do test (linhas 39-42), com data DINAMICA para Q-DRIFT-26.
-# Janela curta de pregao recente: agora-2h até agora-10min (margem seguranca).
-_SMOKE_SYMBOL = "WDOJ26"
+# Story 1.7d (correção 2026-05-04, Q-DRIFT-31): WDOFUT (continuous future)
+# em vez de WDOJ26; janela <= 5 dias (limite empírico do GetHistoryTrades).
+_SMOKE_SYMBOL = "WDOFUT"
 _SMOKE_EXCHANGE = "F"
-_SMOKE_DT_START = datetime.now() - timedelta(hours=2)
 _SMOKE_DT_END = datetime.now() - timedelta(minutes=10)
+_SMOKE_DT_START = _SMOKE_DT_END - timedelta(days=4)
 
 
 def main() -> int:
