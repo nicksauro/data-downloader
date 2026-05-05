@@ -786,3 +786,214 @@ Dex (próximo agente, paralelo) implementa Opção 3a +
 `subscribe_for_handshake` no wrapper. Smoke real é o gate. Quinn
 adiciona property test: `subscribe_for_handshake` retorna >=0 antes
 de `wait_market_connected` ser chamado em testes de integração.
+
+---
+
+## Amendment 2026-05-04 (d) — NoopCallback × ConnectorThread interaction
+
+**Autor:** 🏛️ Aria (mini-council Aria pós-mortem attempt 7)
+**Origem:** Smoke real attempt 7 (`docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md`)
+falhou com MARKET_DATA travado em `result=1` (MARKET_WAITING_TICKETS) por
+600s+, **mesmo após** os fixes de `os.chdir` (Q-DRIFT-10) e
+`subscribe_for_handshake` (amendment c). Probe discriminante
+(`scripts/probe_init.py`) rodado 28 min após o attempt falhar conectou em
+**2.43s** no MESMO horário noturno, mesmo `.env`, mesma DLL, mesmo cwd.
+Prova empírica: **bug está no nosso wrapper, não é ambiental**.
+**Related:** Amendment (b) (slots Noop vs `None`), Amendment (c)
+(subscribe-handshake), Story 1.2 AC2, Q11-E (Sentinel §12 — folclore
+"JAMAIS None"), Q-DRIFT-11 (a ser criado por Sol em paralelo).
+
+### Contexto
+
+A análise pós-mortem do attempt 7 (Quinn + Nelo + Aria, 22:10–22:13 BRT)
+estabeleceu que a **única variável** entre o caminho que falha (wrapper
+completo) e o caminho que conecta (probe minimalista) é o conteúdo dos
+slots não-state do `DLLInitializeMarketLogin`:
+
+| Slot | Função     | Wrapper attempt 7 | Probe (sucesso) | Exemplo Nelogica |
+|------|------------|-------------------|-----------------|------------------|
+| 4    | newTrade   | NoopCallback      | **None**        | **None**         |
+| 5    | newDaily   | NoopCallback      | REAL            | REAL             |
+| 6    | newHistory | NoopCallback      | **None**        | **None**         |
+| 7    | priceBook  | NoopCallback      | **None**        | **None**         |
+| 8    | offerBook  | NoopCallback      | **None**        | **None**         |
+| 9    | progress   | NoopCallback      | REAL            | REAL             |
+| 10   | tinyBook   | NoopCallback      | REAL            | REAL             |
+
+Probe e exemplo oficial Nelogica passam **`None`** em 4 slots não
+utilizados. Wrapper passa NoopCallback em todos os 7 — exatamente o que
+Q11-E (folclore Sentinel §12) prescrevia como obrigatório.
+
+### Decisão técnica original (Q11-E / ADR-005 baseline)
+
+> "JAMAIS passar `None` nos slots não-state de `DLLInitializeMarketLogin`
+> — usar NoopCallback para preservar binding interno da DLL. `None`
+> corrompe o registro e faz `Set*Callback` posteriores nunca dispararem,
+> sem erro reportado." (`callbacks.py:119-156`, docstring `make_noop_callback`)
+
+Esta diretriz vinha de Sentinel §12, sem evidência empírica direta — era
+**folclore** transmitido entre revisões do wrapper.
+
+### Por que estava errada
+
+1. **Sem evidência empírica direta:** Sentinel §12 é narrativa de "semanas
+   debugando", não bug-report reproduzível. Nenhum teste registra
+   `Set*Callback posterior não disparou após init com None`.
+2. **Refutada pelo exemplo oficial:** `profitdll/Exemplo Python/main.py`
+   L742-743 passa `None` em 4 slots e funciona em produção há anos.
+3. **Refutada empiricamente:** probe `scripts/probe_init.py` conecta em
+   1.82–2.43s passando `None` (3 corridas independentes: lab, attempt 7
+   pós-mortem, e replay).
+4. **NoopCallback NÃO é "estritamente mais defensivo":** ao contrário do
+   que o amendment (b) §C concluía, `None` instrui a DLL a NÃO invocar
+   nada naquele slot — `funtype(_noop)` instrui a DLL a invocar uma função
+   válida (que ignora args). A diferença é load-bearing.
+
+### Hipótese refinada (mecanismo arquitetural)
+
+A `ConnectorThread` interna da ProfitDLL é **single-threaded** (Q07-V,
+ADR-005 baseline §"Threads do processo"). Durante o handshake de
+`DLLInitializeMarketLogin → MARKET_CONNECTED`, a DLL emite eventos
+sequencialmente para múltiplos slots (não apenas state):
+
+- `progress` callback dispara para cada ticker da watchlist inicial
+  (cold-start ServerAddr/exchangeinfo2),
+- `tinyBook` snapshot inicial,
+- `daily` snapshot do dia anterior por ativo,
+- ... e SÓ ENTÃO emite `(conn_type=2, result=4)` no slot state.
+
+**Quando o slot é `None`:** a DLL pula a invocação imediatamente
+(branch nativo `if (cb_ptr != NULL) cb_ptr(...)`) — `ConnectorThread`
+fica livre, próximo evento (incluindo o crítico `MARKET_CONNECTED`) é
+despachado em milissegundos.
+
+**Quando o slot é NoopCallback:** a DLL invoca o trampoline ctypes →
+ctypes desempacota a struct (`TAssetID` por valor, `TDailyCallback` com
+19 args mistos `c_double`/`c_int`/`c_wchar_p`) → adquire GIL → chama o
+Python `_noop(*args)` → libera GIL → empacota retorno → continua.
+**Cada invocação custa centenas de microssegundos a milissegundos.**
+Multiplicado por N tickers da watchlist × M tipos de evento, a
+`ConnectorThread` fica saturada por **segundos** drenando trampolines
+no-op antes de poder despachar o `result=4`. Nosso `wait_market_connected`
+timeout (300s) eventualmente vence — mas o handshake real nunca falha:
+está apenas **bufferizado atrás de uma fila de no-ops**.
+
+Isso explica o "flakey" histórico (Q-DRIFT-02): se a watchlist do
+servidor tiver poucos tickers naquele momento (final de pregão, dia
+sem movimento), o gargalo passa em <60s e parece OK; em horário mais
+ativo (cold-start completo), trava. Mesmo `.env`, mesma DLL, mesmo
+binário — comportamento depende de **carga de eventos do servidor**,
+não de "instabilidade ambiental".
+
+### Implicações para o thread model (ADR-005)
+
+1. **Callback no wrapper já é mínimo absoluto** (`make_state_callback`
+   linha 101-109: apenas `state_queue.put_nowait(...)` em
+   `contextlib.suppress(Full)`). MANTER. INV-1 / R3 cumprida.
+2. **Slots não usados devem ser `None`**, NÃO NoopCallback. Isto
+   **inverte** Q11-E.
+3. **`_cb_refs` deve reter SOMENTE callbacks reais** — todo callback que
+   está em `_cb_refs` é um trampoline ctypes vivo, candidato a ser
+   invocado pela `ConnectorThread`. Inflação de `_cb_refs` com no-ops é
+   pegada arquitetural (não anti-GC saudável: anti-throughput).
+4. **Documentação formal:** `ConnectorThread` é recurso crítico
+   single-threaded. Tratá-la como tal — TODA carga colocada em qualquer
+   trampoline registrado é serializada e atrasa state events.
+
+### Diretriz arquitetural (NOVA)
+
+> **Nenhum callback ctypes deve ser registrado se não tem trabalho útil
+> a fazer.** Slots não consumidos em `DLLInitializeMarketLogin` (e em
+> qualquer `Set*Callback` futuro) devem permanecer `None`. NoopCallback
+> é anti-padrão: cada invocação serializa a `ConnectorThread` interna
+> da DLL, atrasando state events críticos (notadamente
+> `MARKET_CONNECTED`).
+
+Esta diretriz vai DIRETO contra Q11-E (Sentinel §12). Q11-E deve ser
+**rebaixada** ("REVISAR — provavelmente errada, refutada por probe
+2026-05-04") ou **invertida** ("Slots não usados DEVEM ser `None`")
+— decisão de @sol (curador de QUIRKS, em paralelo).
+
+### Trade-offs considerados
+
+| Opção                                                             | Vantagem                                                  | Desvantagem                                                                                | Veredicto |
+|-------------------------------------------------------------------|-----------------------------------------------------------|--------------------------------------------------------------------------------------------|-----------|
+| (A) Manter NoopCallback (status quo Q11-E)                        | Zero mudança, "defesa em profundidade" teórica            | **Reproduz o bug do attempt 7 — falha real em produção**                                   | REJEITADA |
+| (B) Trocar NoopCallback por `None` nos 4 slots não usados         | Alinhado com probe + exemplo oficial; ConnectorThread livre | Inverte folclore Q11-E (mas Q11-E refutada empiricamente)                                | **ESCOLHIDA** |
+| (C) Manter NoopCallback mas com bodies vazios em C (sem trampoline) | Throughput máximo                                         | Requer DLL helper externa; viola ADR-001 (pure Python no wrapper); over-engineering        | REJEITADA |
+| (D) Inverter Q11-E para "JAMAIS NoopCallback"                     | Diretriz forte e clara                                    | Pode haver casos legítimos de Noop futuros (ex.: state callback dummy em testes mockados)  | PARCIAL   |
+
+**Decisão final:** (B) para os 4 slots não usados em
+`DLLInitializeMarketLogin` (trade/history/priceBook/offerBook); diretriz
+geral (D-suavizada): "Nenhum callback ctypes registrado sem trabalho
+útil — Noop apenas em mocks de teste, nunca em path de produção".
+
+### Validação pendente
+
+- **Story 1.7c (owner @dev / Dex, em paralelo):** implementar variante
+  bisseccional `minimal_handshake=True` no `initialize_market_only` que
+  passa `None` nos 4 slots (4, 6, 7, 8) e mantém NoopCallback nos demais
+  (5, 9, 10) — **igualando exatamente** a configuração do probe. Smoke
+  real deve confirmar handshake em <60s. Sucesso ⇒ esta hipótese
+  ratificada; falha ⇒ próxima hipótese (Nelo: signature drift em
+  `DLLInitializeMarketLogin`, ou Sol: `SetEnabledLogToDebug(0)` mascarando
+  warnings nativos).
+- **Story 1.7c bisseção secundária:** se `minimal_handshake=True` passa,
+  testar `None` em TODOS os 7 slots não-state (igualar Probe completo).
+  Diferença esperada: 0 (já estava isolado em 4 slots).
+- **Quinn:** property-test que enumera `_cb_refs` durante init e
+  confirma que SOMENTE callbacks reais (state + os 3 com trabalho útil)
+  estão presentes — nunca NoopCallback em path produção.
+
+### Riscos residuais
+
+| Risco | Severidade | Mitigação |
+|-------|-----------|-----------|
+| State callback (real) também tiver corpo pesado | BAIXA | Já é `put_nowait` em fila bounded — INV-1 cumprida; teste `test_state_callback_only_put_nowait` confirma `mock_calls == []` no body. |
+| Daily/progress/tinyBook callbacks "reais" também serializam ConnectorThread | MÉDIA | Eles SÃO úteis (consumidores existem). Aplicar mesma disciplina: corpo APENAS `put_nowait`; consumidor em thread Python. Mitigação preventiva, não nova arquitetura. |
+| `Set*Callback` posterior (e.g. `SetHistoryTradeCallbackV2`) NÃO funcionar após init com `None` no slot 8 (folclore Q11-E real) | BAIXA | Probe não testou isso, mas exemplo Nelogica L745-761 faz exatamente esse padrão (init com `None` no slot 8 → `SetTradeCallbackV2` posterior). Se acontecer no smoke 1.7c, fallback é re-introduzir NoopCallback APENAS no slot 8 (history) e manter `None` nos outros 3 — bisseção fina. |
+| Inversão de Q11-E confunde futuros agentes que leem Sentinel §12 sem ler ADR-005 | BAIXA | Sol cria Q-DRIFT-11 referenciando este amendment; QUIRKS.md vira fonte de verdade primária; Sentinel §12 é arquivo histórico. |
+
+### Constitucionalidade
+
+- **Article IV (No Invention):** este amendment NÃO inventa
+  funcionalidade — refuta uma diretriz prévia (Q11-E) com evidência
+  empírica direta (probe, attempt 7, exemplo oficial). Toda afirmação
+  rastreia para arquivo citado (`probe_init.py`, attempt 7 evidence,
+  `main.py:742-743`).
+- **Article V (Quality First):** sign-off requer Story 1.7c smoke
+  validation; sem smoke, este amendment é **HIPÓTESE
+  ARQUITETURAL**, não decisão ratificada.
+
+### Sign-off
+
+- **Aria (architect):** APPROVED como **hipótese arquitetural** com
+  validação requerida pela Story 1.7c. Refutação de Q11-E é
+  empiricamente sólida (3 corridas de probe + exemplo oficial); o
+  mecanismo proposto (ConnectorThread saturada por trampolines no-op)
+  é coerente com state literal `MARKET_WAITING_TICKETS` e com o "flakey"
+  histórico (carga variável da watchlist do servidor).
+
+### Auditor
+
+- **@dev / Dex (Story 1.7c, paralelo):** implementa
+  `minimal_handshake=True` e roda smoke. Resultado vira ratificação ou
+  refutação deste amendment.
+- **@sol (Q-DRIFT-11, paralelo):** documenta a interação
+  NoopCallback × ConnectorThread como quirk formal e rebaixa Q11-E.
+- **@qa / Quinn:** property-test sobre `_cb_refs` (apenas reais em
+  produção); smoke real ratifica.
+
+### Cross-links
+
+- Evidência primária: `docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md`
+  (seção "Análise Pós-Mortem", 22:10–22:13 BRT).
+- Probe canônico: `scripts/probe_init.py` (commit `3ef7699`).
+- Quirk derivado: `docs/dll/QUIRKS.md` Q-DRIFT-11 (a ser criado por
+  @sol em paralelo).
+- Story de validação: `docs/stories/1.7c.story.md` (a ser criada por
+  @dev em paralelo).
+- Folclore refutado: `docs/dll/QUIRKS.md` Q11-E (Sentinel §12).
+- Amendment relacionado: este ADR-005 amendment (b) §C
+  ("Slots de callback no init") — esta sessão **inverte** a conclusão
+  daquela seção.
