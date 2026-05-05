@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""Probe Q17-OPEN: licença multi-process Nelogica.
+"""Probe Q17-CLOSED: licença multi-process Nelogica (resolvido 2026-05-05).
 
-Spawn N subprocessos paralelos, todos com a MESMA `PROFITDLL_KEY`/USER/PASS,
-inicializa ProfitDLL em cada um e observa se todos conectam ou se algum
-recebe `NL_LICENSE_BUSY` (ou erro equivalente).
+✅ STATUS: Q17-CLOSED — Hipótese B confirmada por Pichau em 2026-05-05.
+Licença Nelogica é **single-session** por chave; segundo init na mesma máquina
+falha. Veredito empírico humano (autoridade ownership) substituiu necessidade
+de rodar este probe.
 
-Hipóteses testadas:
+Política arquitetural resultante: **ADR-022 Single-Session Sequential Download**
+(`docs/adr/ADR-022-single-session-sequential-policy.md`). ADR-015 (broker
+multi-process) foi REVOKED. Sub-package `src/data_downloader/orchestrator/broker/`
+marcado DEAD-CODE.
+
+Este script permanece como ferramenta diagnóstica histórica + sanity-check
+caso a Nelogica mude política comercial no futuro (improvável). Para rodar
+o probe (verificação periódica): credenciais reais em `.env`, comando único
+`python scripts/probe_multi_process_license.py --n 2 --stagger 1.0`.
+Esperado HOJE: B-PARTIAL (segundo worker falha).
+
+Hipóteses testadas (mantidas para referência):
 - A: licença per-machine — todos os N processos conectam (ALL_CONNECTED).
-- B: licença single-session — segundo processo falha com código distinto.
+- B: licença single-session — segundo processo falha. **CONFIRMADA 2026-05-05.**
 - C: degradação — todos conectam, mas timing dos posteriores aumenta
   significativamente (server-side rate limit por chave).
 

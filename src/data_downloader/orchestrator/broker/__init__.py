@@ -1,11 +1,22 @@
 """data_downloader.orchestrator.broker — Multi-symbol broker process (Story 4.1).
 
-Owner: Aria (architectural authority — ADR-015) | Impl: Dex.
+⚠️ DEAD-CODE — ADR-015 REVOKED em 2026-05-05 (Q17-CLOSED Hipótese B confirmada
+por Pichau: licença Nelogica é single-session por chave, segundo init falha).
+Substituido por **ADR-022 Single-Session Sequential Download Policy**.
+
+Este sub-package permanece no repo como histórico mock-tested. **NÃO instanciar
+em produção** — CLI guard (`src/data_downloader/cli.py` download command)
+desabilita `--parallel N>1` e força path single-symbol. Remoção definitiva
+agendada para Story 2.X-cleanup futura.
+
+Owner histórico: Aria (architectural authority — ADR-015 REVOKED) | Impl: Dex.
 Refs:
 
-- ``docs/adr/ADR-015-multiprocess-catalog.md`` (broker process — accepted)
-- ``docs/decisions/COUNCIL-25-multi-symbol-broker-impl.md`` (impl decisions)
-- Story 4.1 — AC1..AC8
+- ``docs/adr/ADR-015-multiprocess-catalog.md`` (REVOKED, supersede ADR-022)
+- ``docs/adr/ADR-022-single-session-sequential-policy.md`` (substitui)
+- ``docs/decisions/COUNCIL-25-multi-symbol-broker-impl.md`` (impl decisions histórico)
+- Story 4.1 — AC1..AC8 (Deprecated 2026-05-05)
+- ``docs/dll/QUIRKS.md`` §Q17-CLOSED
 
 Sub-package que implementa fielmente Opção A do ADR-015: master process
 mantém a única conexão R/W SQLite (broker thread); workers (subprocess) enviam
