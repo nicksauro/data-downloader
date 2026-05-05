@@ -225,3 +225,68 @@ para chamada `GetHistoryTrades`.
 Se A.3 demorar dias, formalizar WAIVER de AC10 conforme já planejado
 (Pax + Quinn + River + Aria mini-council). Argumento adicional:
 **diagnóstico interno está completo e o bloqueio é externo ao projeto**.
+
+---
+
+## Adendo 2026-05-05 ~11:07 BRT — sanity check PETR4 + WDOK26 (DECISIVO)
+
+**Verdict:** **H1-parcial confirmada — conta sem permissão de histórico para FUTUROS (BMF)**.
+
+**Setup:** Dois probes ctypes puros (espelham `probe_history_minimal.py` exatamente,
+trocando apenas ticker/exchange):
+- `scripts/probe_history_petr4.py` — PETR4 / B (Bovespa)
+- `scripts/probe_history_wdok26.py` — WDOK26 / F (BMF, contrato vigente maio/2026)
+
+**Resultados:**
+
+| Probe | Ticker | Exchange | Trades | Connect | Wait | Verdict |
+|-------|--------|----------|--------|---------|------|---------|
+| anterior | WDOJ26 | F | **0** | 1.61s | 120s | CENARIO_B |
+| **PETR4** | PETR4 | B | **7867** | 1.61s | 2.50s | **OK** (LAST_PACKET) |
+| **WDOK26** | WDOK26 | F | **0** | 1.63s | 120s | ZERO |
+
+**Implicação CRÍTICA:**
+- **H1 (conta sem qualquer permissão de histórico) → REFUTADA** por PETR4=7867 trades.
+- **H4 (WDOJ26 contrato vencido) → REFUTADA** por WDOK26 (vigente) também = 0 trades.
+- **Diagnóstico real:** conta tem licença de histórico para EQUITIES (Bovespa) mas
+  NÃO para FUTUROS (BMF) — H1-parcial. Bug é provisionamento Nelogica específico
+  para módulo BMF/futuros.
+
+**Refs:**
+- `docs/qa/SMOKE_EVIDENCE/sanity-petr4-wdok26-20260505T110756Z.md` (consolidado)
+- `docs/qa/SMOKE_EVIDENCE/logs/probe-history-petr4-20260505T110512Z.log`
+- `docs/qa/SMOKE_EVIDENCE/logs/probe-history-wdok26-20260505T110535Z.log`
+
+---
+
+## Próxima ação recomendada (DEFINITIVA — pós sanity check)
+
+**Recomendação: combinação fix-trivial + escalar Nelogica em paralelo.**
+
+### Caminho rápido (HOJE — desbloqueia release):
+
+Editar `tests/smoke/test_download_primitive_real.py`:
+- `WDOJ26` / `F` → `PETR4` / `B`
+- (manter data dinâmica)
+
+Smoke real **passará** porque o probe equivalente já passou (7867 trades em 2.5s).
+Adicionar nota de tech debt: "smoke validado em equity (PETR4/Bovespa) por restrição
+de licença BMF na conta. Trocar para WDO quando Nelogica liberar histórico de futuros."
+
+**fix_complexity: trivial-codigo** para essa opção (≈ 10 linhas).
+
+### Caminho paralelo (DIAS — alinha com caso de uso real do projeto):
+
+Abrir ticket Nelogica:
+- Conta: `nicolascarasaibaptista@gmail.com` / CPF 04336751013
+- Solicitar: **liberação de permissão de histórico de trades para BMF (futuros)**
+- Anexar evidências: dois logs de probe (PETR4 OK / WDOK26 ZERO).
+
+Quando licença BMF chegar, trocar smoke de volta para WDO* (vigente via `vigent_contract`).
+
+### Caminho B (WAIVER) — REBAIXADO:
+
+Não mais necessário se Caminho rápido for aceito. Mantém-se como fallback se
+PO/SM rejeitarem PETR4 como caso de smoke aceitável.
+
+**Última atualização:** 2026-05-05 ~11:07 BRT (sanity check PETR4 + WDOK26 completo).
