@@ -6,6 +6,43 @@
 **Target:** expandir do MVP single-symbol (WDO) para multi-asset (WIN, equities) e estabilizar
 public_api como library consumível por projetos downstream. Última fase de release V1.
 
+> ## Atualização 2026-05-05 — Pax (@po)
+>
+> **Story 4.1 (Multi-symbol broker process) — DEPRECATED.** Story
+> 4.1-followup — **CANCELLED.** Razão: usuário Pichau confirmou em
+> 2026-05-05 que licença Nelogica é **single-session por chave**
+> (Q17-OPEN → Q17-CLOSED, Hipótese B do tripé original). Toda a premissa
+> "N processos = N usos legítimos" do broker desta epic é falsa.
+> **ADR-015 superseded por ADR-022** (Single-Session Sequential Download
+> Policy — Aria, accepted 2026-05-05).
+>
+> **Stories MANTIDAS no Epic 4:**
+> - 4.2 (Multi-asset support) — Done\* (mock); não depende de broker.
+> - 4.2-followup (Smoke real multi-asset) — Pending Human; ajustada para
+>   execução serial single-process.
+> - 4.3 (Public API V1.0.0) — Done; documentação/versionamento.
+> - 4.4 (Auto-updater + packaging) — Done\*; release V1, não depende de
+>   broker.
+> - 4.4-followup (V1.1 polish) — Pending Human; smoke VM + signing + tufup.
+>
+> **Padrão arquitetural correto pós-Q17-CLOSED:** `for symbol in symbols:
+> download_chunk(...)` serial em **1 processo único**. CLI `--parallel`
+> não tem mais sentido como path de produção (mantida no código como
+> histórico até decisão de limpeza).
+>
+> **Gate G-Multi-Asset reformulado:** speedup ≥ 3.2x e `bench_multi_symbol`
+> não se aplicam mais (não há paralelização inter-símbolo). Gate fica:
+> 4.2 mock validado + 4.2-followup smoke real (WIN + PETR4 serial) PASS.
+>
+> **Cross-refs:**
+> - `docs/stories/4.1.story.md` (Deprecated)
+> - `docs/stories/4.1-followup.story.md` (Cancelled)
+> - `docs/stories/4.2-followup.story.md` (ajustada)
+> - `docs/dll/QUIRKS.md` §Q17-CLOSED
+> - `docs/qa/WAIVERS/4.1-real-smoke-deferred-2026-05-04.md` (superseded)
+> - `docs/adr/ADR-022-single-session-sequential-policy.md` (substituto, accepted)
+> - `docs/adr/ADR-015-multiprocess-catalog.md` (superseded por ADR-022)
+
 ---
 
 ## Objetivo
@@ -18,8 +55,11 @@ coordenada com backtest engine.
 
 ## Escopo IN
 
-- **Multi-symbol broker process** (ADR-015 — broker dedicado serializa SQLite write
-  lock; workers paralelos por símbolo; pool persistente mitiga H20 spawn overhead).
+- ~~**Multi-symbol broker process** (ADR-015 — broker dedicado serializa SQLite write
+  lock; workers paralelos por símbolo; pool persistente mitiga H20 spawn overhead).~~
+  **REMOVIDO 2026-05-05** (Q17-CLOSED — Hipótese A refutada). Padrão correto:
+  serial sequencial single-process (`for symbol in symbols: download_chunk(...)`)
+  formalizado em **ADR-022 (Single-Session Sequential Download Policy)**.
 - **Multi-asset support:** WIN (índice futuro trimestral H/M/U/Z) + equities (PETR4,
   VALE3, ITUB4, BBDC4 — papel à vista, sem rollover).
 - **public_api estável v1.0.0:** SemVer enforced, política de deprecação documentada,
@@ -44,14 +84,17 @@ coordenada com backtest engine.
 
 ---
 
-## Stories alocadas (pós-COUNCIL-13)
+## Stories alocadas (pós-COUNCIL-13, atualizado 2026-05-05)
 
-| ID  | Título                                                   | Owner / Implementer        | Estimativa | Depends on             |
-|-----|----------------------------------------------------------|----------------------------|------------|------------------------|
-| 4.1 | Multi-symbol broker process                              | 🏛️ Aria / 💻 Dex           | 4d         | 1.7a, 1.7b-followup    |
-| 4.2 | Multi-asset support (WIN, equities)                      | 💾 Sol                     | 2d         | 1.7b-followup, 4.1     |
-| 4.3 | Public API estável V1.0 release                          | 🏛️ Aria / 💻 Dex           | 1.5d       | 4.1, 4.2               |
-| 4.4 | Auto-updater + packaging final V1 release                | ⚙️ Gage / 🖼️ Felix         | 3d         | 4.3                    |
+| ID            | Título                                                   | Owner / Implementer        | Estimativa | Depends on             | Status (2026-05-05) |
+|---------------|----------------------------------------------------------|----------------------------|------------|------------------------|----------------------|
+| 4.1           | Multi-symbol broker process                              | 🏛️ Aria / 💻 Dex           | 4d         | 1.7a, 1.7b-followup    | **Deprecated** (Q17-CLOSED) |
+| 4.1-followup  | Smoke real multi-symbol broker                           | 🧪 Quinn / humano          | 0.5d       | 4.1, 1.7b-followup     | **Cancelled** (parent deprecated) |
+| 4.2           | Multi-asset support (WIN, equities)                      | 💾 Sol                     | 2d         | 1.7b-followup, ~~4.1~~ | Done\* (mock) |
+| 4.2-followup  | Smoke real multi-asset (serial, ajustada 2026-05-05)     | 🧪 Quinn / humano          | 0.5d       | 4.2, 1.7b-followup     | Pending Human |
+| 4.3           | Public API estável V1.0 release                          | 🏛️ Aria / 💻 Dex           | 1.5d       | ~~4.1~~, 4.2           | Done |
+| 4.4           | Auto-updater + packaging final V1 release                | ⚙️ Gage / 🖼️ Felix         | 3d         | 4.3                    | Done\* |
+| 4.4-followup  | V1.1 polish (smoke VM + signing + tufup + container CI)  | ⚙️ Gage / humano           | 3-5d       | 4.4                    | Pending Human |
 
 **Total estimado:** ~10.5 dias = **2-3 sprints** (velocidade típica do squad).
 
@@ -73,12 +116,17 @@ Sem smoke pré-existente, paralelizar via broker é prematuro.
 
 ## Gates do Epic
 
-### Gate G-Multi-Asset (após 4.1 + 4.2)
-- ✅ Broker estabilizado: 4 símbolos paralelos (`bench_multi_symbol` speedup ≥ 3.2x).
-- ✅ Zero `SQLITE_BUSY` em stress test.
-- ✅ Smoke gated humano: WINH26 + PETR4 1 dia cada → completam sem erro.
+### Gate G-Multi-Asset (após 4.2 + 4.2-followup) — REFORMULADO 2026-05-05
+- ~~Broker estabilizado: 4 símbolos paralelos (`bench_multi_symbol` speedup ≥ 3.2x).~~
+  **REMOVIDO** (4.1 Deprecated; Hipótese A refutada — Nelogica single-session).
+- ~~Zero `SQLITE_BUSY` em stress test.~~ **REMOVIDO** (sem multi-process =
+  sem race no SQLite — INV-6 trivialmente preservada por construção).
+- ✅ Smoke gated humano (serial single-process): WINH26 + PETR4 1 dia cada
+  → completam sem erro.
 - ✅ `read_continuous` valida rollover trimestral WIN.
-- ✅ Property tests Hypothesis cobrem invariantes do broker (INV-6).
+- ~~Property tests Hypothesis cobrem invariantes do broker (INV-6).~~
+  Substituído por: property tests cobrem `read_continuous` + chunker
+  multi-asset (já implementados Story 4.2).
 
 ### Gate G-Release-V1 (após 4.3 + 4.4)
 - ✅ `__api_version__ = 1.0.0` publicado.
@@ -98,9 +146,10 @@ Sem smoke pré-existente, paralelizar via broker é prematuro.
 
 ---
 
-## Definition of Done (Epic)
+## Definition of Done (Epic) — atualizado 2026-05-05
 
-- [ ] Story 4.1 Done (broker + pool persistente + bench speedup ≥ 3.2x).
+- [x] ~~Story 4.1 Done (broker + pool persistente + bench speedup ≥ 3.2x).~~
+  **Deprecated 2026-05-05** (Q17-CLOSED). Não conta para DoD.
 - [ ] Story 4.2 Done (WIN + equities cobertos, smoke humano PASS).
 - [ ] Story 4.3 Done (public_api v1.0.0 frozen, USAGE + DEPRECATION docs publicados).
 - [ ] Story 4.4 Done (release V1 publicado em GitHub Release, instalador validado em
@@ -108,7 +157,8 @@ Sem smoke pré-existente, paralelizar via broker é prematuro.
 - [ ] Backtest engine prototype (ou stub) consome public_api sem hack.
 - [ ] Auto-updater rollback testado em VM Windows.
 - [ ] CHANGELOG.md seção "Release V1.0.0" publicada com todas garantias SemVer.
-- [ ] ADR-015 + ADR-016 (se Caminho A) + ADR-017 todos em estado `accepted` final.
+- [ ] ADR-016 (se Caminho A) + ADR-017 todos em estado `accepted` final.
+  ADR-015 está **superseded** por ADR-022 (Single-Session Sequential Policy).
 
 ---
 
@@ -116,9 +166,9 @@ Sem smoke pré-existente, paralelizar via broker é prematuro.
 
 | Risco                                                                  | Mitigação                                                                                                                                                                                                  |
 |------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Multi-symbol multiprocessing introduz race em catálogo SQLite (C9)     | **Resolvido por ADR-015** (broker dedicado). Story 4.1 implementa fielmente; property tests garantem INV-6.                                                                                                |
-| Multi-symbol Windows spawn = 2.7-10s overhead/subprocess (H20)         | **Pool persistente** em Story 4.1 AC5 (workers aquecidos, reuso entre jobs). Bench documenta crossover threshold single-vs-broker.                                                                          |
-| Licença Nelogica para N processos (1 conexão DLL/proc) — múltiplas instâncias da mesma chave OK? | **Pendência operacional** — Morgan + Nelo confirmam com Nelogica antes de Story 4.1 começar. Se NOT OK: pivot para 1 processo + N threads (rejeita ADR-015) ou 1 conexão sequencial (sem ganho).            |
+| ~~Multi-symbol multiprocessing introduz race em catálogo SQLite (C9)~~ | **N/A 2026-05-05** — Story 4.1 Deprecated. Sem multi-process = sem race; INV-6 trivialmente preservada por construção em ADR-022.                                                                          |
+| ~~Multi-symbol Windows spawn = 2.7-10s overhead/subprocess (H20)~~     | **N/A 2026-05-05** — Story 4.1 Deprecated. Não há spawn de subprocess no path serial single-process.                                                                                                       |
+| Licença Nelogica para N processos (1 conexão DLL/proc) — múltiplas instâncias da mesma chave OK? | **RESOLVED 2026-05-05: NOT OK.** Pichau (dono do produto) confirmou single-session licensing. ADR-015 **REVOKED** → **ADR-022 accepted** (sequential serial). Story 4.1 cai; multi-symbol vira loop trivial. Sem "perda de ganho" — DLL é gargalo single-session de qualquer forma. |
 | WIN + equities têm quirks DLL não documentados                         | Nelo audita DLL via probe na Story 4.2 AC3 com WINH26 + PETR4 reais. Quirks descobertos = issue separada se severo.                                                                                         |
 | Tooling auto-updater (tufup) ainda imaturo                             | ADR-017 reabre no D-1 da Story 4.4 com POC obrigatória + comparação Velopack. Aria assina decisão final em COUNCIL-14.                                                                                      |
 | Code signing EV cert custo + processo (3-5 dias hábeis emissão)        | Gage inicia processo PARALELO ao Epic 4 começar (D-7). Caminho B (sem cert V1) documentado em INSTALL.md + Story 4.4-followup formaliza upgrade V1.1 com signing. Não bloqueia release V1.                  |
@@ -155,7 +205,8 @@ Sem smoke pré-existente, paralelizar via broker é prematuro.
 
 ## Referências
 
-- `docs/adr/ADR-015-multiprocess-catalog.md` (broker process — `accepted`)
+- `docs/adr/ADR-015-multiprocess-catalog.md` (broker process — **REVOKED 2026-05-05**, ver ADR-022)
+- `docs/adr/ADR-022-single-session-sequential-policy.md` (sequential multi-symbol — `accepted`, supersedes ADR-015)
 - `docs/adr/ADR-016-code-signing.md` (EV cert)
 - `docs/adr/ADR-017-auto-updater.md` (tufup preliminar — final no início Story 4.4)
 - `docs/adr/ADR-007a-public-api-redesign.md` (DownloadHandle)

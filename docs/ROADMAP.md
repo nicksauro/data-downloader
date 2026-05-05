@@ -112,7 +112,7 @@ Epic 2 close ──> Epic 3 (paralelo possível com Epic 4)
 |-------|------------|-----------|
 | ADRs 007a/008..017 atrasam ≥2d | HIGH | Aria entrega esqueletos em Wave 1; refinamento paralelo a Wave 3+ |
 | DLL Nelogica não disponível para smoke real | HIGH | Smoke gated por env; gate roda em máquina com licença |
-| Multi-symbol multiprocessing (Epic 4) revelar problemas de SQLite WAL não previstos | MEDIUM | ADR-015 define estratégia ANTES; spike opcional em Epic 2 se necessário |
+| Multi-symbol multiprocessing (Epic 4) revelar problemas de SQLite WAL não previstos | RESOLVED 2026-05-05 | ~~ADR-015~~ REVOKED (licença Nelogica single-session); multi-symbol é serial em 1 processo conforme **ADR-022** — risco de SQLite contention não existe mais |
 | Felix indisponível em Epic 3 | MEDIUM | Felix pode atuar em parte de Epic 4 (packaging) se Epic 3 atrasar |
 | Code signing EV cert tem lead time 3-5d | LOW | Gage inicia processo Epic 4 dia 1 |
 

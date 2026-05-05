@@ -35,9 +35,12 @@
 | [012](./ADR-012-configuration.md) | Configuration: env vars (12-factor) + TOML override + Pydantic Settings | `accepted` | 2026-05-03 | — |
 | [013](./ADR-013-observability.md) | Runtime observability: counters, gauges, histograms (`prometheus_client`) | `accepted` | 2026-05-03 | — |
 | [014](./ADR-014-test-strategy.md) | Test strategy: layers, mock DLL, fake clock, property-based | `accepted` | 2026-05-03 | — |
-| [015](./ADR-015-multiprocess-catalog.md) | Multiprocess catalog coordination (broker process) | `accepted` | 2026-05-03 | — |
+| [015](./ADR-015-multiprocess-catalog.md) | Multiprocess catalog coordination (broker process) | `REVOKED 2026-05-05` | 2026-05-03 | superseded by **ADR-022** |
 | [016](./ADR-016-code-signing.md) | Windows code signing & SmartScreen | `accepted (deferred to V1 release)` | 2026-05-03 | — |
 | [017](./ADR-017-auto-updater.md) | Auto-updater strategy (tufup preliminar) | `accepted (deferred to Epic 4)` | 2026-05-03 | — |
+| [019](./ADR-019-schema-as-contract.md) | Schema as Contract — Never Drop Columns | `proposed` | 2026-05-05 | — |
+| [020](./ADR-020-volume-completeness.md) | Volume Completeness Invariant | `proposed` | 2026-05-05 | — |
+| [022](./ADR-022-single-session-sequential-policy.md) | Single-Session Sequential Download Policy | `accepted` | 2026-05-05 | supersedes **ADR-015** |
 
 ---
 
@@ -50,7 +53,12 @@
 - ADR-002 (Parquet + DuckDB + SQLite)
 - ADR-004 (Particionamento mensal)
 - ADR-006 (Calendário de contratos)
-- ADR-015 (Multiprocess catalog broker)
+- ~~ADR-015 (Multiprocess catalog broker)~~ — **REVOKED 2026-05-05** (ver ADR-022)
+- ADR-019 (Schema as Contract — proposed)
+- ADR-020 (Volume Completeness — proposed)
+
+### Multi-symbol & licensing
+- ADR-022 (Single-Session Sequential Download Policy — supersedes ADR-015)
 
 ### UI & packaging
 - ADR-003 (PySide6 single-process + `--onedir`)
@@ -88,7 +96,8 @@
 | ADR-003 amendment (--onedir) | `build/BUILD_PROTOCOL.md`, `build/data_downloader.spec.template` (🏗️ Felix) | Packaging --onedir |
 | ADR-010 (R21) | `docs/perf/HOT_PATH_RULES.md` (⚡ Pyro) | Hot-path rules ratificadas |
 | ADR-014 | `docs/qa/TEST_PYRAMID.md`, `INVARIANTS_TESTS.md`, `SMOKE_PROTOCOL.md` (🧪 Quinn) | Test strategy operacionalizada |
-| ADR-015 | `docs/ARCHITECTURE.md` §2.4, §6 (🏛️ Aria) | Multi-symbol broker process |
+| ~~ADR-015~~ | `docs/ARCHITECTURE.md` §2.4, §6 (🏛️ Aria) | **REVOKED 2026-05-05** — multi-symbol broker process; ver ADR-022 |
+| ADR-022 | `docs/ARCHITECTURE.md` §2.4 (amendment 1.1.2 pendente), `docs/dll/QUIRKS.md` Q17 (🗝️ Nelo, CLOSED Hipótese B) | Single-session sequential — supersedes ADR-015 |
 
 ---
 

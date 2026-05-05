@@ -43,7 +43,7 @@
 | [Q14-E](#q14-e) | ✅ valid | metadata | `GetAgentName` requer `GetAgentNameLength` PRIMEIRO; signatures argtypes obrigatórios em `minimal_handshake` (ver [Q-DRIFT-35](#q-drift-35)) |
 | [Q15-OPEN](#q15-open) | ❓ open | threading | Comportamento ConnectorThread quando `put_nowait` bloqueia (drop ou wait?) |
 | [Q16-VALIDATED](#q16-validated) | ✅ valid | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
-| [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
+| [Q17-CLOSED](#q17-closed) | ✅ valid (Hipótese B confirmada) | licença / multi-process | Licença Nelogica é **single-session** — segundo init falha. Confirmado por usuário (Pichau) 2026-05-05; ADR-015 revogado, ADR-022 (single-session sequential policy) substitui. |
 | [Q18-OPEN](#q18-open) | ❓ open | history / contract calendar | Vigência exata WIN H/M/U/Z conforme regra B3 oficial (5º dia útil mês X-3 → quarta mais próxima 15/X)? |
 | [Q-DRIFT-01](#q-drift-01) | ✅ valid | api drift | `SetProgressCallback` e `GetDLLVersion` **NÃO exportadas** pela DLL real |
 | [Q-DRIFT-02](#q-drift-02) | ✅ valid (root cause = Q-DRIFT-11/12/33/34/35) | lifecycle | `wait_market_connected` trava em (2,1) MARKET_CONNECTING; hipótese ProfitChart REFUTADA — root cause real era cadeia de bugs Q-DRIFT-11/12/33/34/35 |
@@ -441,10 +441,13 @@
 
 ---
 
-## Q17-OPEN
+## Q17-CLOSED
 
-- **ID:** Q17-OPEN
-- **Status:** ❓ open
+- **ID:** Q17-CLOSED (era Q17-OPEN até 2026-05-05)
+- **Status:** ✅ valid — Hipótese B confirmada empiricamente pelo usuário em 2026-05-05
+- **Resolução:** Licença Nelogica é **single-session por chave**. Segundo init na mesma máquina **falha** (Hipótese B do tripé original). Não há licença multi-session disponível comercialmente.
+- **Workaround único:** Hipótese A do design original (multi-process broker) é INVIÁVEL. Padrão arquitetural correto: **`for symbol in symbols: download_chunk(...)` SERIAL em 1 processo único** — formalizado em ADR-022 (Single-Session Sequential Download Policy). O código atual de `download_chunk` per-symbol já implementa isso naturalmente.
+- **Impacto:** ADR-015 (Multi-Symbol Broker Process) **REVOGADO**. Stories 4.1 / 4.1-followup / 4.2-followup deprecated/cancelled (Pax @po). Probe automatizado `scripts/probe_multi_process_license.py` mantido como diagnóstico histórico.
 - **Categoria:** licença / multi-process
 - **Sintoma:** Pergunta: ao iniciar **N processos Python independentes** na **mesma máquina** com **mesma chave de licença Nelogica**, todos conseguem
   conectar (`MARKET_CONNECTED`) e baixar histórico simultaneamente?

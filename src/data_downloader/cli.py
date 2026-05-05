@@ -815,8 +815,23 @@ def download_cmd(
             raise typer.Exit(code=2)
 
     # ---- 1b. Routing: multi-symbol vs single-symbol ----
-    use_multi_symbol = parallel > 1 and len(symbols) > 1
-    # Mantém compatibilidade: se 1 símbolo ou parallel=1, usa path antigo.
+    # ADR-022 (2026-05-05) — licença Nelogica é single-session (Q17-CLOSED
+    # Hipótese B confirmada por usuário). Multi-process broker (ADR-015
+    # REVOKED) não funciona — segundo init falha. Path correto é serial em
+    # 1 processo. Quando o usuário tenta `--parallel N>1` com múltiplos
+    # símbolos, emitimos warning e forçamos parallel=1; routing degrada
+    # para path single-symbol (que processa apenas symbols[0]). Para baixar
+    # múltiplos símbolos hoje, invoque a CLI sequencialmente, 1 símbolo
+    # por vez (workflow recomendado em ADR-022).
+    if parallel > 1 and len(symbols) > 1:
+        console.print(
+            "[yellow]⚠ --parallel N>1 está desabilitado:[/yellow] licença "
+            "Nelogica é single-session (Q17-CLOSED 2026-05-05; ADR-022). "
+            "Forçando parallel=1. Para múltiplos símbolos, invoque a CLI "
+            "uma vez por símbolo (serial — sem ganho real em paralelizar).\n"
+        )
+        parallel = 1
+    use_multi_symbol = parallel > 1 and len(symbols) > 1  # sempre False pós-ADR-022
     single_symbol: str = symbols[0]  # path single-symbol usa apenas o primeiro
 
     if start is None or end is None:

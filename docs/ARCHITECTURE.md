@@ -136,7 +136,9 @@ Cada DLL exige processo próprio (limite Nelogica — 1 conexão por processo). 
           (catálogo SQLite via WAL)
 ```
 
-Validação por Pyro `*multi-symbol-bench` (Epic 2). Coordenação inter-process detalhada em **ADR-015 (Multiprocess catalog coordination)** — broker process serializa escritas SQLite via `multiprocessing.Queue` para evitar `SQLITE_BUSY`.
+Validação por Pyro `*multi-symbol-bench` (Epic 2). Coordenação inter-process detalhada em ~~ADR-015 (Multiprocess catalog coordination)~~ — broker process serializa escritas SQLite via `multiprocessing.Queue` para evitar `SQLITE_BUSY`.
+
+> **AMENDMENT 2026-05-05 (pendente formalização v1.1.2):** ADR-015 foi **REVOKED 2026-05-05** após confirmação do dono do produto que a licença Nelogica é single-session (não permite N conexões simultâneas com a mesma chave). Multi-symbol em V1.0.0+ é **serial em 1 processo** conforme **ADR-022 (Single-Session Sequential Download Policy)**. O diagrama acima e a referência a broker process são histórico — não usar como fonte de verdade ativa. Ver `docs/adr/ADR-022-single-session-sequential-policy.md`.
 
 ---
 
@@ -451,7 +453,7 @@ Implementações: `ParquetWriter` (V1), futuro `ArcticWriter` ou similar.
 
 #### `CatalogProtocol`
 
-Fronteira **catalog** — hides single-process SQLite vs multi-process broker (ADR-015).
+Fronteira **catalog** — hides single-process SQLite vs multi-process broker (~~ADR-015~~ REVOKED 2026-05-05; multi-process branch é dead-code — ver ADR-022).
 
 ```python
 class CatalogProtocol(Protocol):
@@ -526,9 +528,12 @@ Spec completa em ADR-007a. Aqui só re-exporta como Protocol para ser importado 
 | ADR-012 | Configuration: env vars + TOML + Pydantic Settings | accepted |
 | ADR-013 | Runtime observability: counters/gauges/histograms | accepted |
 | ADR-014 | Test strategy: layers + mock DLL + fake clock + Hypothesis | accepted |
-| ADR-015 | Multiprocess catalog coordination (broker process) | accepted |
+| ADR-015 | Multiprocess catalog coordination (broker process) | **REVOKED 2026-05-05** (superseded by ADR-022) |
 | ADR-016 | Windows code signing & SmartScreen | accepted (deferred to V1 release) |
 | ADR-017 | Auto-updater (tufup preliminar) | accepted (deferred to Epic 4) |
+| ADR-019 | Schema as Contract — Never Drop Columns | proposed (2026-05-05) |
+| ADR-020 | Volume Completeness Invariant | proposed (2026-05-05) |
+| ADR-022 | Single-Session Sequential Download Policy | accepted (2026-05-05) — supersedes ADR-015 |
 
 ---
 
@@ -571,6 +576,7 @@ Cada mudança aqui exige:
 4. Comunicação ao squad (especialmente: Dex, Sol, Felix).
 
 ### Changelog
+- **1.1.2-pending** (2026-05-05) — ADR-015 (Multiprocess catalog coordination) **REVOKED** após confirmação do dono do produto de que licença Nelogica é single-session. Multi-symbol passa a ser sequencial em 1 processo conforme **ADR-022 (Single-Session Sequential Download Policy)**. §2.4 e §6 (CatalogProtocol) ganharam nota de redirect; refator completo da §2.4 (remover diagrama broker) será finalizado em amendment formal v1.1.2. Tabela §7 reflete REVOKED + ADR-022 accepted. ADR-019/020 (schema-as-contract, volume-completeness) listados como proposed (council 2026-05-05).
 - **1.1.1** (2026-05-03) — ADR governance: ADRs 007a, 008-017 promovidos `proposed → accepted` por Aria após validação cross-ADR. ADR-007 marcado `superseded by ADR-007a`. ADR-016 e ADR-017 ficam `accepted (deferred)`. Índice canônico criado em `docs/adr/README.md`. Tabela §7 reflete status atualizado.
 - **1.1.0** (2026-05-03) — Adendos pós-PLAN_REVIEW: §6 nova (Contracts/Protocols), INV-11 e INV-12 adicionadas, §2.4 multi-symbol agora referencia ADR-015 (broker process). ADRs novos: 007a, 008, 009, 010, 011, 012, 013, 014, 015, 016, 017. Amendments: ADR-003 (--onedir + DontUseNativeDialog), ADR-005 (state machine de shutdown), ROLES (cli.py ownership).
 - **1.0.0** (2026-05-03) — Versão inicial. 6 camadas, 5 threads, 3 filas, 10 invariantes, 7 ADRs planejados.

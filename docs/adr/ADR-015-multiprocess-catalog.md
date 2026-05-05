@@ -1,11 +1,51 @@
 # ADR-015 — Multiprocess catalog coordination (broker process)
 
-**Status:** accepted
+**Status:** REVOKED 2026-05-05
 **Aceito em:** 2026-05-03 — Aria
+**Revogado em:** 2026-05-05 — Aria (mini-council pós-confirmação Pichau)
 **Data:** 2026-05-03
 **Autor:** 🏛️ Aria
 **Consultados:** 💾 Sol, ⚡ Pyro, 🗝️ Nelo
 **Related:** ADR-002 (storage), ADR-005 (thread model), ARCHITECTURE.md §2.4, PLAN_REVIEW C9 + H20
+**Superseded by:** ADR-022 (Single-Session Sequential Download Policy)
+
+---
+
+## Revogação (2026-05-05)
+
+> **Status:** REVOKED. Mantido neste repositório como histórico arquitetural — não usar como fonte de verdade ativa. **Toda decisão de multi-symbol em V1.0.0+ é regida pelo ADR-022.**
+
+### Motivo
+
+A premissa fundacional deste ADR — **Hipótese A: "1 chave de licença Nelogica permite N conexões DLL simultâneas, uma por processo"** — foi **falsificada empiricamente em 2026-05-05** pelo dono do produto (Pichau, autoridade máxima):
+
+> "A licença Nelogica é single-session — não permite 2 instâncias conectadas simultaneamente com a mesma chave."
+
+Isso mata a Opção A (broker process + N workers DLL paralelos). Não é um detalhe ajustável: o vendor enforça single-session no servidor de licenciamento. A segunda conexão recebe `NL_LICENSE_BUSY` (ou equivalente) e é derrubada.
+
+### Hipótese vencedora (Q17-OPEN → CLOSED)
+
+A Hipótese B do COUNCIL-25 prep (1 processo + DLL única, multi-symbol via subscribe múltiplo) é a única factível dentro da licença atual. Ver ADR-022 para a política definitiva: **`for symbol in symbols: download_chunk(...)` SERIAL em 1 processo**, simplicidade preferida sobre IPC complexo (DLL é o gargalo de qualquer forma single-session — paralelismo entre símbolos não traz throughput adicional).
+
+### Supersede
+
+- **ADR-022** (Single-Session Sequential Download Policy) é a fonte de verdade para multi-symbol em V1.0.0+.
+- Toda referência cruzada a "ADR-015" em docs/stories/qa/code-comments deve ser lida como "REVOKED — ver ADR-022".
+
+### Impacto downstream
+
+| Artefato | Impacto |
+|----------|---------|
+| Stories 4.1, 4.1-followup, 4.2-followup | Deprecated por @po (Pax) em paralelo a esta revogação |
+| `src/data_downloader/orchestrator/broker/` (5 módulos: pool/catalog_broker/worker_client/master/protocol) | Código órfão — agendar remoção em Story 4.X-cleanup ou manter como dead-code documentado até decisão de @po + @dev |
+| `docs/ARCHITECTURE.md` §2.4, §6, Change Log | Pede amendment 1.1.2 redirecionando broker → ADR-022 (será endereçado em handoff a Sol/Aria follow-up) |
+| `docs/epics/EPIC-4-multi-asset-api.md` | Premissa "broker dedicado" cai; @pm reabre escopo Epic 4 — multi-symbol é commodity (loop), não feature arquitetural |
+| `docs/qa/AUDIT_REPORTS/4.1-design-2026-05-04.md`, `WAIVERS/4.1-real-smoke-deferred-2026-05-04.md` | Tornam-se evidência histórica; auditoria 4.1 passa a ser N/A pelo cancelamento da story |
+| `scripts/probe_multi_process_license.py` | Probe **confirmou** Hipótese B; preservar como evidência de Q17-OPEN→CLOSED |
+
+### Observação para o histórico
+
+A análise técnica deste ADR (broker process + mp.Queue + ACK + WAL coordination) **continua arquiteturalmente correta** para o problema teórico que ela resolve. O que mudou foi a **restrição de licenciamento** (não-arquitetural) que tornou o problema irrelevante. Se em futuro distante a Nelogica oferecer licenças multi-session, este ADR pode ser ressuscitado com supersede inverso. Não é um defeito de raciocínio — é um defeito de premissa de mercado.
 
 ---
 
