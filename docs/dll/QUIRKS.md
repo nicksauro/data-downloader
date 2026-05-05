@@ -462,6 +462,16 @@
   2. Em cada um, roda `data-downloader contracts validate WDO WDOJ26 --sample-date 2026-04-15` com mesmas credenciais.
   3. Observar se ambos conectam (state callback `MARKET_CONNECTED`) ou se segundo falha NL_LICENSE_BUSY.
   4. Bonus: rodar `data-downloader download --symbol WDOJ26 --symbol WINH26 --parallel 2 --start ... --end ...` (Story 4.1 multi-symbol) com ProfitDLL real para validar end-to-end.
+- **Probe automatizado (2026-05-05, Aria):** `scripts/probe_multi_process_license.py`
+  espelha o caminho 4.1 (subprocess paralelo via `subprocess.Popen`,
+  `minimal_handshake=True`) e classifica resultado em A-ALL_CONNECTED /
+  B-PARTIAL / C-DEGRADED / FAIL-NONE_CONNECTED. Determinístico — apenas
+  precisa credenciais reais (`.env` populado). Comando:
+  ```
+  python scripts/probe_multi_process_license.py --n 2 --stagger 1.0
+  ```
+  Workflow: rodar uma vez quando user tiver DLL + credenciais. Resultado
+  destrava (ou bloqueia/re-desenha) Story 4.1-followup.
 - **Manual diz:** silencioso sobre licença multi-instance na mesma máquina.
 - **Data descoberta:** 2026-05-04 (Story 4.1 implementação — mini-council COUNCIL-25).
 - **Aplica a stories:** 4.1 (broker — hoje mock + WAIVER), 4.1-followup (smoke real — gating).
