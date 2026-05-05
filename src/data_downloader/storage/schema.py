@@ -1,7 +1,7 @@
-"""data_downloader.storage.schema — Schema canônico Parquet v1.0.0.
+"""data_downloader.storage.schema — Schema canônico Parquet v1.1.0.
 
-Owner: Sol (schema/policy) | Impl: Dex (com audit Sol).
-Ref: ``docs/storage/SCHEMA.md`` v1.0.0 (17 campos).
+Owner: Sol (schema/policy) | Impl: Dex (com audit Sol+Nelo).
+Ref: ``docs/storage/SCHEMA.md`` v1.1.0 (20 campos).
 
 Este módulo é a fonte de verdade Python do schema. Qualquer mudança AQUI
 DEVE refletir mudança em ``SCHEMA.md`` (e vice-versa) — drift = bug.
@@ -12,16 +12,29 @@ Política de mudança (R4 — SCHEMA.md §6):
 - quebradora (rename, type change, drop, NO->YES nullability) -> bump major
 
 Constantes:
-    SCHEMA_VERSION: Versão semver da v1.0.0 (string).
+    SCHEMA_VERSION: Versão semver do schema atual (string).
+    TRADE_TYPE_NAME: Mapping ``trade_type_id`` (uint8) -> nome legível
+        (``TConnectorTradeType``, ``profitdll/Exemplo Delphi/Types/
+        LegacyProfitDataTypesU.pas`` L33-L46, 14 valores 0..13).
 
 Funções:
     pyarrow_schema(): retorna ``pa.Schema`` exato do SCHEMA.md §1.2.
     validate_record(record): valida invariantes simples (price > 0,
         quantity > 0, exchange in ('F', 'B'), timestamp_ns > 0).
         Levanta ``IntegrityError`` (público — ADR-011).
+    trade_type_name(trade_type_id): resolve id -> nome legível
+        (None se id desconhecido).
 
 Tipos:
     TradeRecord: ``TypedDict`` para type-safety em consumidores.
+    SchemaIntegrityError: levantada quando o schema descartaria campos
+        de um ``TradeRecord`` — NUNCA descartar colunas silenciosamente.
+
+Nelo Council 32 (2026-05-05): release blocker P0 — versão v1.0.0
+silenciosamente descartava ``buy_agent_name``, ``sell_agent_name``,
+``trade_type_name`` no writer. Schema v1.1.0 (aditivo, R4) inclui esses
+3 campos como nullable + writer agora falha LOUDLY se algum campo do
+``TradeRecord`` cair fora do schema (ver ``parquet_writer.py``).
 """
 
 from __future__ import annotations
@@ -32,16 +45,101 @@ import pyarrow as pa
 
 from data_downloader.public_api.exceptions import IntegrityError
 
-SCHEMA_VERSION: str = "1.0.0"
-"""Versão semver do schema Parquet v1.0.0 (Sol — SCHEMA.md §1)."""
+SCHEMA_VERSION: str = "1.1.0"
+"""Versão semver do schema Parquet atual (Sol — SCHEMA.md §1).
+
+Bump v1.0.0 -> v1.1.0 (aditivo, R4 — SCHEMA.md §6) introduz 3 campos
+nullable: ``buy_agent_name``, ``sell_agent_name``, ``trade_type_name``.
+Nelo Council 32 release blocker.
+"""
 
 
 # Conjunto de exchanges válidas (SCHEMA.md §1.1 + INVARIANTE INT-5).
 _VALID_EXCHANGES: frozenset[str] = frozenset({"F", "B"})
 
 
+# =====================================================================
+# TConnectorTradeType — 14 valores enum (LegacyProfitDataTypesU.pas L33-46)
+# =====================================================================
+# Source canônica: ``profitdll/Exemplo Delphi/Types/LegacyProfitDataTypesU.pas``
+# L33-46 — ``TTradeType`` enum:
+#   ttZero            = 0  (placeholder; aparece em sentinel structs)
+#   ttCrossTrade      = 1
+#   ttAgressionBuy    = 2
+#   ttAgressionSell   = 3
+#   ttAuction         = 4
+#   ttSurveillance    = 5
+#   ttExpit           = 6
+#   ttOptionsExercise = 7
+#   ttOverTheCounter  = 8
+#   ttDerivativeTerm  = 9
+#   ttIndex           = 10
+#   ttBTC             = 11
+#   ttOnBehalf        = 12
+#   ttRLP             = 13
+# =====================================================================
+
+TRADE_TYPE_NAME: dict[int, str] = {
+    0: "Zero",
+    1: "CrossTrade",
+    2: "AgressionBuy",
+    3: "AgressionSell",
+    4: "Auction",
+    5: "Surveillance",
+    6: "Expit",
+    7: "OptionsExercise",
+    8: "OverTheCounter",
+    9: "DerivativeTerm",
+    10: "Index",
+    11: "BTC",
+    12: "OnBehalf",
+    13: "RLP",
+}
+"""Mapping ``trade_type`` (uint8) -> nome legível.
+
+Usado pelo writer (vectorized enrich) para popular a coluna nullable
+``trade_type_name`` em v1.1.0. Nelo Council 32 §3.1: SCHEMA.md L33
+documentava ``2=normal`` (errado); o valor real é ``ttAgressionBuy``.
+
+Ver ``profitdll/Exemplo Delphi/Types/LegacyProfitDataTypesU.pas`` L33-L46
+para fonte canônica.
+"""
+
+
+def trade_type_name(trade_type_id: int | None) -> str | None:
+    """Resolve ``trade_type_id`` (uint8) -> nome legível.
+
+    Args:
+        trade_type_id: Valor 0..13 do struct ``TConnectorTrade.TradeType``,
+            ou ``None``.
+
+    Returns:
+        Nome humano (ex. ``"AgressionBuy"``) se id em 0..13; ``None`` caso
+        contrário (id desconhecido / ``None``). Nunca raises — caller
+        decide como lidar com ``None`` (writer persiste como NULL).
+    """
+    if trade_type_id is None:
+        return None
+    return TRADE_TYPE_NAME.get(int(trade_type_id))
+
+
+class SchemaIntegrityError(IntegrityError):
+    """Levantada quando o schema descartaria campos de um ``TradeRecord``.
+
+    Nelo Council 32 P0 fix: writer NUNCA pode descartar colunas
+    silenciosamente. Se ``TradeRecord`` (orquestrador) tem campos que o
+    schema atual não mapeia, ``parquet_writer.py`` levanta esta exception
+    (em vez de simplesmente ignorar).
+
+    Distinção semântica de ``IntegrityError``: este é um drift de SCHEMA
+    (versão precisa bump), não um trade malformado. Ainda herda de
+    ``IntegrityError`` para preservar back-compat de callers que catam
+    esta família.
+    """
+
+
 class TradeRecord(TypedDict, total=False):
-    """Trade canônico v1.0.0 (17 campos — SCHEMA.md §1.1).
+    """Trade canônico v1.1.0 (20 campos — SCHEMA.md §1.1).
 
     Type-safe representation para consumidores Python (orchestrator,
     writer, dedup). Reflete 1:1 o ``pa.Schema`` retornado por
@@ -51,6 +149,12 @@ class TradeRecord(TypedDict, total=False):
     flexibilidade em construções incrementais (writer enriquece o
     registro com ``ingestion_ts_ns``, ``chunk_id``, ``dll_version``,
     ``sequence_within_ns`` antes do flush).
+
+    v1.1.0 (aditivo, Nelo Council 32): adiciona 3 campos nullable
+    (resolved names) — ``buy_agent_name``, ``sell_agent_name``,
+    ``trade_type_name``. Schema v1.0.0 silenciosamente descartava esses
+    campos no writer; v1.1.0 mapeia explicitamente e o writer falha
+    LOUDLY se algum outro campo do TradeRecord ficar fora do schema.
 
     Ver ``docs/storage/SCHEMA.md`` para semântica de cada campo.
     """
@@ -72,17 +176,23 @@ class TradeRecord(TypedDict, total=False):
     chunk_id: str | None
     dll_version: str
     sequence_within_ns: int
+    # v1.1.0 — agent name resolution (nullable; algumas trades sem agent name).
+    buy_agent_name: str | None
+    sell_agent_name: str | None
+    # v1.1.0 — trade type humano (nullable; id desconhecido -> None).
+    trade_type_name: str | None
 
 
 def pyarrow_schema() -> pa.Schema:
-    """Retorna o schema pyarrow canônico v1.0.0.
+    """Retorna o schema pyarrow canônico v1.1.0.
 
-    17 campos exatamente conforme ``docs/storage/SCHEMA.md`` §1.2. Esta
-    função é determinística — chamadas repetidas retornam schemas
+    20 campos exatamente conforme ``docs/storage/SCHEMA.md`` §1.2 (v1.1.0).
+    Esta função é determinística — chamadas repetidas retornam schemas
     estruturalmente idênticos (igualdade via ``pa.Schema.equals``).
 
     Returns:
-        ``pa.Schema`` com os 17 campos canônicos do schema v1.0.0.
+        ``pa.Schema`` com os 20 campos canônicos do schema v1.1.0
+        (17 v1.0.0 + 3 nullable adicionados em v1.1.0).
     """
     return pa.schema(
         [
@@ -103,6 +213,11 @@ def pyarrow_schema() -> pa.Schema:
             pa.field("chunk_id", pa.string(), nullable=True),
             pa.field("dll_version", pa.string(), nullable=False),
             pa.field("sequence_within_ns", pa.uint16(), nullable=False),
+            # v1.1.0 — agent name resolution (nullable).
+            pa.field("buy_agent_name", pa.string(), nullable=True),
+            pa.field("sell_agent_name", pa.string(), nullable=True),
+            # v1.1.0 — trade type humano (nullable).
+            pa.field("trade_type_name", pa.string(), nullable=True),
         ]
     )
 
@@ -163,7 +278,10 @@ def validate_record(record: TradeRecord) -> None:
 
 __all__ = [
     "SCHEMA_VERSION",
+    "TRADE_TYPE_NAME",
+    "SchemaIntegrityError",
     "TradeRecord",
     "pyarrow_schema",
+    "trade_type_name",
     "validate_record",
 ]

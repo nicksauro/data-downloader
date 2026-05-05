@@ -728,21 +728,24 @@ class ProfitDLL:
                     quirk="Q-DRIFT-33",
                 )
 
-            # Q-DRIFT-35 (Story 1.7d, smoke postfix-34 falhou em ~35s sem
-            # traceback Python; log mostrava 4x ``agent_resolver.unknown_id
-            # length=-2147483636`` (== 0x80000004 reinterpretado como c_int
-            # signed)). Mesmo padrão do Q-DRIFT-33: o path ``minimal_handshake``
-            # pula ``_configure_dll_signatures`` integralmente, então
-            # ``GetAgentNameLength`` e ``GetAgentName`` ficam com defaults
-            # ctypes (argtypes None, restype c_int signed). Em x64 stdcall,
-            # sem argtypes, args ``c_int`` em alguns ABIs viram corrompidos;
-            # o restype ``c_int`` signed default interpreta retornos
-            # ``c_uint32`` (length positivo) como negativo gigantesco, e
-            # quando esse "length" é passado de volta a ``GetAgentName``
-            # como tamanho de buffer pode causar access violation nativa
-            # (processo morre sem traceback Python). Registramos signatures
-            # explícitas idênticas ao path full (linhas 406-407 acima).
-            # Ver QUIRKS.md Q-DRIFT-35.
+            # Q-DRIFT-35 (Story 1.7d → COUNCIL-32 correction Story 1.7g).
+            #
+            # Histórico: smoke postfix-34 falhou em ~35s sem traceback Python;
+            # log mostrava 4x ``agent_resolver.unknown_id length=-2147483636``.
+            #
+            # CORREÇÃO (Nelo COUNCIL-32, 2026-05-05): a interpretação inicial
+            # ("0x80000004 reinterpretado por ABI") estava ERRADA.
+            # ``-2147483636`` em hex = ``0x8000000C`` = **NL_NOT_FOUND**, código
+            # de erro semântico que a DLL retorna para agent IDs
+            # genuinamente desconhecidos (>1M tipicamente: mesas, gateways,
+            # RLP B3) — NÃO é corrupção de ABI / stack overflow / garbage.
+            # O fix de signatures permanece CORRETO e necessário (boa
+            # higiene ctypes em x64 stdcall: argtypes/restype explícitos
+            # impedem drift entre versões da DLL e silenciam warnings de
+            # ``c_int`` default), MAS não vai eliminar as 4 mensagens
+            # ``unknown_id`` — elas são respostas honestas da DLL e o
+            # ``AgentResolver`` já fallback para ``Agent#{id}``.
+            # Ver QUIRKS.md Q-DRIFT-35 + COUNCIL-32-Nelo-agents-trade-types.md.
             try:
                 self._dll.GetAgentNameLength.argtypes = [_c_int_mh, _c_int_mh]
                 self._dll.GetAgentNameLength.restype = _c_int_mh

@@ -268,6 +268,15 @@ class _IngestorThread(threading.Thread):
         self.last_packet_seen: bool = False
         self.translate_failures: int = 0
         self.trade_edits: int = 0
+        # Nelo Council 32 telemetry split (Story 1.7g): contadores
+        # separados por causa raiz. ``translate_failures`` acima continua
+        # somando os 3 (back-compat) para diagnose use estes 3:
+        # sentinel_skips: Q-DRIFT-34 (struct zerado, timestamp_ns < 0).
+        # nl_errors: ``translate_trade`` retornou None (DLL rc < 0).
+        # exceptions: exception Python inesperada em _process_trade.
+        self.translate_sentinel_skips: int = 0
+        self.translate_nl_errors: int = 0
+        self.translate_exceptions: int = 0
 
         # Sequência por (timestamp_ns) para preencher
         # ``sequence_within_ns`` (Sol — SCHEMA.md §2.1).
@@ -295,7 +304,20 @@ class _IngestorThread(threading.Thread):
                 handle, flags = self._trade_queue.get(timeout=_INGESTOR_GET_TIMEOUT)
             except Empty:
                 continue
-            self._process_trade(handle, flags)
+            # Q-DRIFT-34 (Story 1.7d, Quinn @qa 2026-05-05): defense-in-depth
+            # — qualquer exception em ``_process_trade`` é contada como
+            # ``translate_failures`` e a thread continua drenando. Sem isso
+            # uma única invocação sentinela do callback V2 (struct zerado)
+            # mata o IngestorThread, callback segue empilhando handles, e
+            # o chunk termina com ``trades_count=0`` apesar do TranslateTrade
+            # ter sucesso.
+            try:
+                self._process_trade(handle, flags)
+            except Exception:
+                # Nelo Council 32 telemetry split: subcounter específico
+                # + manter ``translate_failures`` como soma (back-compat).
+                self.translate_exceptions += 1
+                self.translate_failures += 1
 
         # Drenagem final — qualquer trade na queue depois do stop_event.
         # Garante que TC_LAST_PACKET no último trade não é perdido.
@@ -304,7 +326,12 @@ class _IngestorThread(threading.Thread):
                 handle, flags = self._trade_queue.get_nowait()
             except Empty:
                 break
-            self._process_trade(handle, flags)
+            try:
+                self._process_trade(handle, flags)
+            except Exception:
+                # Nelo Council 32 telemetry split (drain final).
+                self.translate_exceptions += 1
+                self.translate_failures += 1
 
         # R21.2 — logs agregados pós-drain (cool path, 1 evento por chunk).
         if self.last_packet_seen:
@@ -337,10 +364,26 @@ class _IngestorThread(threading.Thread):
             # R21.4 — counter atomic; agregado é exposto em
             # ``ChunkResult`` via ``ingestor.translate_failures`` e logado
             # 1x no ``download.complete`` (cool path).
+            # Nelo Council 32 telemetry split: ``None`` significa rc<0 da
+            # DLL (NL_NOT_FOUND, NL_INVALID_ARGS, etc.) — incrementa
+            # ``translate_nl_errors`` em adição ao agregado.
+            self.translate_nl_errors += 1
             self.translate_failures += 1
             return
 
         timestamp_ns = fields.timestamp_ns
+        # Q-DRIFT-34 (Story 1.7d, Quinn @qa 2026-05-05): guard explícito —
+        # ``translate_trade`` agora filtra structs sentinela (TradeDate
+        # zerado), mas mantemos defense-in-depth: ``format_brt_timestamp``
+        # levanta ValueError em ``ns < 0`` e mataria a thread. Caso o
+        # wrapper deixe escapar (ex.: drift entre versões), descartamos
+        # silenciosamente como falha de tradução.
+        if timestamp_ns < 0:
+            # Nelo Council 32 telemetry split: este caminho é a sentinela
+            # Q-DRIFT-34 (struct zerado, FILETIME 1601-01-01 → ts < 0).
+            self.translate_sentinel_skips += 1
+            self.translate_failures += 1
+            return
         timestamp_str = format_brt_timestamp(timestamp_ns)
         trade_number = fields.trade_number
         # trade_id=0 da DLL → tratar como ausente (cai em chave longa de
@@ -740,6 +783,11 @@ def download_chunk(
         trades_count=len(trades),
         duration_seconds=round(duration, 3),
         translate_failures=ingestor.translate_failures,
+        # Nelo Council 32 telemetry split (Story 1.7g): subcontadores
+        # específicos em adição ao agregado para diagnose root-cause.
+        translate_sentinel_skips=ingestor.translate_sentinel_skips,
+        translate_nl_errors=ingestor.translate_nl_errors,
+        translate_exceptions=ingestor.translate_exceptions,
         trade_edits=ingestor.trade_edits,
         progress_99_reconnect=monitor.reconnect_99_detected,
         last_packet_seen=ingestor.last_packet_seen,

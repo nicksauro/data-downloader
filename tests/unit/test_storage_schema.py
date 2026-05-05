@@ -23,20 +23,22 @@ from data_downloader.storage.schema import (
 
 @pytest.mark.unit
 def test_schema_version_constant() -> None:
-    """``SCHEMA_VERSION`` é a v1.0.0 documentada (SCHEMA.md §1)."""
-    assert SCHEMA_VERSION == "1.0.0"
+    """``SCHEMA_VERSION`` é a v1.1.0 documentada (SCHEMA.md §1; Story 1.7g
+    Nelo Council 32 release blocker P0).
+    """
+    assert SCHEMA_VERSION == "1.1.0"
 
 
 @pytest.mark.unit
-def test_pyarrow_schema_has_17_fields() -> None:
-    """SCHEMA.md §1.1 declara exatamente 17 campos."""
+def test_pyarrow_schema_has_20_fields() -> None:
+    """SCHEMA.md §1.1 v1.1.0 declara 20 campos (17 v1.0.0 + 3 aditivos)."""
     schema = pyarrow_schema()
-    assert len(schema) == 17
+    assert len(schema) == 20
 
 
 @pytest.mark.unit
 def test_pyarrow_schema_field_names() -> None:
-    """Nomes batem 1:1 com SCHEMA.md §1.2 (ordem importa para reprodutibilidade)."""
+    """Nomes batem 1:1 com SCHEMA.md §1.2 v1.1.0 (ordem importa)."""
     expected = [
         "symbol",
         "exchange",
@@ -55,6 +57,10 @@ def test_pyarrow_schema_field_names() -> None:
         "chunk_id",
         "dll_version",
         "sequence_within_ns",
+        # v1.1.0 — Nelo Council 32 release blocker P0:
+        "buy_agent_name",
+        "sell_agent_name",
+        "trade_type_name",
     ]
     assert pyarrow_schema().names == expected
 
@@ -80,7 +86,17 @@ def test_pyarrow_schema_nullability() -> None:
     for name in not_null_fields:
         assert not schema.field(name).nullable, f"{name} should be NOT NULL"
 
-    nullable_fields = {"trade_id", "buy_agent_id", "sell_agent_id", "side", "chunk_id"}
+    nullable_fields = {
+        "trade_id",
+        "buy_agent_id",
+        "sell_agent_id",
+        "side",
+        "chunk_id",
+        # v1.1.0 — Nelo Council 32 release blocker P0:
+        "buy_agent_name",
+        "sell_agent_name",
+        "trade_type_name",
+    }
     for name in nullable_fields:
         assert schema.field(name).nullable, f"{name} should be nullable"
 

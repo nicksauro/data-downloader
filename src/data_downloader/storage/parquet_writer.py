@@ -65,6 +65,7 @@ from data_downloader.storage.partition import (
 )
 from data_downloader.storage.schema import (
     SCHEMA_VERSION,
+    SchemaIntegrityError,
     TradeRecord,
     pyarrow_schema,
 )
@@ -79,6 +80,40 @@ _WRITE_STATISTICS: bool = True
 
 # Threshold deferred (finding H6 — sub-particionamento Story 2.X).
 _PARTITION_ROW_LIMIT: int = 5_000_000
+
+
+def _check_no_field_drop(sample: TradeRecord) -> None:
+    """Guard fail-loudly: NUNCA descartar campos do TradeRecord.
+
+    Nelo Council 32 (release blocker P0). Compara as chaves do
+    ``TradeRecord`` recebido (em runtime, TypedDict é ``dict``) contra os
+    nomes do ``pa.Schema`` canônico. Qualquer chave extra (no record mas
+    não no schema) levanta :class:`SchemaIntegrityError` — força bump
+    explícito de ``SCHEMA_VERSION`` em vez de drop silencioso.
+
+    Args:
+        sample: 1º trade do batch (representativo — todos os trades de um
+            batch vêm do mesmo orchestrator path).
+
+    Raises:
+        SchemaIntegrityError: ``record_fields - schema_fields != ∅``.
+    """
+    record_fields = set(sample.keys())
+    schema_fields = set(pyarrow_schema().names)
+    missing_in_schema = record_fields - schema_fields
+    if missing_in_schema:
+        raise SchemaIntegrityError(
+            f"Schema v{SCHEMA_VERSION} would drop fields: "
+            f"{sorted(missing_in_schema)}. "
+            f"Bump schema version and add columns explicitly — "
+            f"NEVER drop columns silently (Nelo Council 32).",
+            details={
+                "schema_version": SCHEMA_VERSION,
+                "missing_in_schema": sorted(missing_in_schema),
+                "record_fields": sorted(record_fields),
+                "schema_fields": sorted(schema_fields),
+            },
+        )
 
 
 @dataclass(frozen=True)
@@ -140,12 +175,27 @@ def _read_existing_table(path: Path) -> pa.Table:
     Retorna table com schema canônico forçado — re-impõe campos na ordem
     correta caso Parquet tenha sido escrito por versão anterior com
     ordem diferente.
+
+    Forward-compat (Nelo Council 32 / v1.1.0): arquivos legacy sem os
+    campos aditivos v1.1.0 (``buy_agent_name``, ``sell_agent_name``,
+    ``trade_type_name``) recebem coluna NULL preenchida — SCHEMA.md §6
+    "bump minor: leitor entrega NULL para campos ausentes".
     """
     table = pq.read_table(path)
     schema = pyarrow_schema()
-    # Re-impõe schema canônico (mesma ordem de fields). Garante que
-    # concat_tables com nova batch funcione sem mismatch.
-    arrays = [table.column(f.name).cast(f.type) for f in schema]
+    existing_names = set(table.schema.names)
+    arrays: list[pa.Array | pa.ChunkedArray] = []
+    for f in schema:
+        if f.name in existing_names:
+            arrays.append(table.column(f.name).cast(f.type))
+        else:
+            if not f.nullable:
+                raise IntegrityError(
+                    f"Existing parquet missing NOT NULL field {f.name!r}; "
+                    f"requires major migration (Story 2.X).",
+                    details={"path": str(path), "missing_field": f.name},
+                )
+            arrays.append(pa.nulls(table.num_rows, type=f.type))
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
@@ -234,6 +284,20 @@ class ParquetWriter:
                 "write called with empty trade list",
                 details={"partition": str(partition)},
             )
+
+        # Nelo Council 32 (release blocker P0): NUNCA descartar colunas
+        # silenciosamente. Schema v1.0.0 silenciosamente droppava
+        # ``buy_agent_name`` / ``sell_agent_name`` / ``trade_type_name``
+        # populados pelo ingestor. Schema v1.1.0 mapeia explicitamente os 3
+        # campos; este guard garante que QUALQUER campo futuro que apareça
+        # em ``TradeRecord`` mas não no schema cause uma falha alta e
+        # imediata (forçando bump schema_version) em vez de drop silencioso.
+        # Inspeciona o primeiro trade — TradeRecord é TypedDict (dict
+        # built-in em runtime); fields adicionais aparecem como chaves
+        # extras. Iterar sobre TODOS os trades seria O(N) hot path; o
+        # primeiro é representativo (tipo é uniforme dentro do batch
+        # gerado pelo orchestrator/ingestor).
+        _check_no_field_drop(trades[0])
 
         # 1. Converte para pa.Table imediatamente (vectorizado).
         ingestion_ts_ns = time.time_ns()

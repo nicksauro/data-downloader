@@ -1,8 +1,8 @@
 # SCHEMA.md — Schema Parquet Canônico (Trades)
 
 **Owner:** 💾 Sol (Storage Engineer)
-**Versão atual:** v1.0.0
-**Status:** ACCEPTED (Story 0.0 — 2026-05-03)
+**Versão atual:** v1.1.0
+**Status:** ACCEPTED (Story 1.7g — 2026-05-05, Nelo Council 32 release blocker)
 **Aplicável a:** `data/history/{exchange}/{symbol}/{year}/{month}.parquet`
 
 ---
@@ -17,7 +17,7 @@
 
 ---
 
-## 1. Schema Trades v1.0.0 — definição
+## 1. Schema Trades v1.1.0 — definição
 
 ### 1.1 Tabela canônica
 
@@ -30,7 +30,7 @@
 | 5 | `price`               | `float64`            | NO   | DLL `dPrice`                             | Preço do trade.                                                           |
 | 6 | `quantity`            | `int64`              | NO   | DLL `nQtd`                               | Quantidade negociada.                                                     |
 | 7 | `trade_id`            | `int64`              | YES  | DLL `nTradeID` (V2)                      | ID único do trade. NULL para histórico antigo (callback V1).              |
-| 8 | `trade_type`          | `uint8`              | NO   | DLL `nTradeType` (TConnectorTradeType)   | `1=auction`, `2=normal`, `3=cross`, ... (ver Nelo specs).                 |
+| 8 | `trade_type`          | `uint8`              | NO   | DLL `nTradeType` (TConnectorTradeType)   | Enum 0..13 — ver §1.5 (TTradeType, fonte canônica `LegacyProfitDataTypesU.pas` L33-46). |
 | 9 | `buy_agent_id`        | `int32`              | YES  | DLL `nBuyAgent`                          | ID do agente comprador. NULL se não disponível.                           |
 | 10| `sell_agent_id`       | `int32`              | YES  | DLL `nSellAgent`                         | ID do agente vendedor. NULL se não disponível.                            |
 | 11| `flags`               | `uint32`             | NO   | DLL `nFlags`                             | Bitmask: `TC_IS_EDIT`, `TC_LAST_PACKET`, etc.                             |
@@ -40,15 +40,18 @@
 | 15| `chunk_id`            | `string`             | YES  | UUID gerado pelo DLL ingestor            | Identifica o chunk DLL que produziu este trade. Usado para auditoria, retry idempotente, e correlação com logs. **NEW v1.0.0 (finding H1).** |
 | 16| `dll_version`         | `string`             | NO   | `GetDLLVersion()` no boot do processo    | Ex.: `"4.0.0.34"`. Capturado uma vez por processo, propagado em todos os trades dessa execução. **NEW v1.0.0 (finding H19).** |
 | 17| `sequence_within_ns`  | `uint16`             | NO   | contador local do writer                 | 0, 1, 2, ... N — trades distintos com o mesmo `(symbol, timestamp_ns)`. Resolve colisão quando a granularidade do timestamp da DLL não chega a nanos reais. **NEW v1.0.0 (finding H2).** |
+| 18| `buy_agent_name`      | `string`             | YES  | DLL `GetAgentName(nBuyAgent)`            | Nome humano da corretora compradora (resolvido pelo `AgentResolver`). NULL se ID==0 (desconhecido) ou DLL retornou `NL_NOT_FOUND`. **NEW v1.1.0 (Nelo Council 32 P0).** |
+| 19| `sell_agent_name`     | `string`             | YES  | DLL `GetAgentName(nSellAgent)`           | Idem `buy_agent_name`. **NEW v1.1.0 (Nelo Council 32 P0).** |
+| 20| `trade_type_name`     | `string`             | YES  | mapping enum `TConnectorTradeType`       | Nome humano de `trade_type` (ex. `"AgressionBuy"`). NULL se id desconhecido (fora 0..13). **NEW v1.1.0 (Nelo Council 32 P0).** |
 
-**Total campos v1.0.0:** 17 (12 original + 5 novos).
+**Total campos v1.1.0:** 20 (17 v1.0.0 + 3 nullable aditivos).
 
 ### 1.2 Definição pyarrow exata
 
 ```python
 import pyarrow as pa
 
-SCHEMA_TRADES_V1_0_0 = pa.schema([
+SCHEMA_TRADES_V1_1_0 = pa.schema([
     pa.field("symbol",             pa.string(),  nullable=False),
     pa.field("exchange",           pa.string(),  nullable=False),  # length=1 enforçado em validação
     pa.field("timestamp_ns",       pa.int64(),   nullable=False),
@@ -66,8 +69,36 @@ SCHEMA_TRADES_V1_0_0 = pa.schema([
     pa.field("chunk_id",           pa.string(),  nullable=True),
     pa.field("dll_version",        pa.string(),  nullable=False),
     pa.field("sequence_within_ns", pa.uint16(),  nullable=False),
+    # v1.1.0 — Nelo Council 32 release blocker P0:
+    pa.field("buy_agent_name",     pa.string(),  nullable=True),
+    pa.field("sell_agent_name",    pa.string(),  nullable=True),
+    pa.field("trade_type_name",    pa.string(),  nullable=True),
 ])
 ```
+
+### 1.5 TConnectorTradeType — mapping canônico (v1.1.0)
+
+Fonte canônica: **`profitdll/Exemplo Delphi/Types/LegacyProfitDataTypesU.pas` L33-46**
+(`TTradeType` enum). Total de 14 valores (0..13). Bug histórico: SCHEMA.md
+v1.0.0 documentava `2=normal` — errado; o valor real é `ttAgressionBuy`
+(Nelo Council 32 §3.1).
+
+| `trade_type` (uint8) | `trade_type_name` (string) | Semântica |
+|----------------------|----------------------------|-----------|
+| 0  | `Zero`            | placeholder; aparece em sentinel structs (Q-DRIFT-34) |
+| 1  | `CrossTrade`      | trade casado (cross) |
+| 2  | `AgressionBuy`    | agressão do lado comprador (NÃO "normal") |
+| 3  | `AgressionSell`   | agressão do lado vendedor |
+| 4  | `Auction`         | leilão |
+| 5  | `Surveillance`    | sob vigilância da B3 |
+| 6  | `Expit`           | EXPIT (operação fora da bolsa) |
+| 7  | `OptionsExercise` | exercício de opção |
+| 8  | `OverTheCounter`  | OTC |
+| 9  | `DerivativeTerm`  | termo |
+| 10 | `Index`           | trade de índice |
+| 11 | `BTC`             | empréstimo de ações (BTC) |
+| 12 | `OnBehalf`        | on behalf |
+| 13 | `RLP`             | Retail Liquidity Provider (mesa B3) |
 
 ### 1.3 Justificativas de tipo
 
@@ -182,7 +213,7 @@ Toda escrita popula essas chaves no metadata custom do Parquet (acessível via `
 
 | Chave                  | Tipo (string)        | Obrigatório | Descrição                                                       |
 |------------------------|----------------------|-------------|-----------------------------------------------------------------|
-| `schema_version`       | `"1.0.0"`            | YES         | Versão semver do schema usado para escrever.                    |
+| `schema_version`       | `"1.1.0"`            | YES         | Versão semver do schema usado para escrever (v1.1.0 atual).     |
 | `row_count`            | `"123456"`           | YES         | Nº de linhas na partição. Redundante com Parquet footer mas barato. |
 | `first_ts_ns`          | `"1709251200000000000"` | YES      | `min(timestamp_ns)` do arquivo.                                 |
 | `last_ts_ns`           | `"1711929599999999999"` | YES      | `max(timestamp_ns)` do arquivo.                                 |
@@ -409,6 +440,26 @@ Se crash entre 2 e 3 → boot detecta `_pending_commits` órfão, valida hash do
 ---
 
 ## 7. Changelog
+
+### v1.1.0 — 2026-05-05 — Nelo Council 32 release blocker P0 (aditivo)
+
+- **3 novos campos nullable** (não exige rewrite — leitor v1.0.0 lê v1.1.0
+  como NULL):
+  - `buy_agent_name` (string nullable) — resolvido via `AgentResolver`
+    (DLL `GetAgentName`).
+  - `sell_agent_name` (string nullable) — idem.
+  - `trade_type_name` (string nullable) — humano do enum `TConnectorTradeType`
+    (ver §1.5).
+- **Bug fix:** SCHEMA.md v1.0.0 documentava `trade_type=2 → "normal"` (errado).
+  Valor real é `ttAgressionBuy` (Nelo Council 32 §3.1; fonte
+  `LegacyProfitDataTypesU.pas` L33-46).
+- **Writer fail-loudly (`SchemaIntegrityError`):** `parquet_writer.write`
+  agora levanta se algum campo do `TradeRecord` cair fora do schema
+  canônico — força bump explícito em vez de drop silencioso. Causa raiz
+  histórica: o pipeline em memória populava `buy_agent_name` etc. mas o
+  writer (v1.0.0) iterava só sobre os 17 nomes do schema → drop silencioso.
+- **Forward-compat:** `_read_existing_table` preenche colunas v1.1.0
+  ausentes em parquet legacy com NULL (R4 — bump minor não exige migração).
 
 ### v1.0.0 — 2026-05-03 — INITIAL
 

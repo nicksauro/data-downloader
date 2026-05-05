@@ -1057,10 +1057,18 @@ class Orchestrator:
 def _to_schema_trade(t: PrimitiveTradeRecord) -> SchemaTradeRecord:
     """Converte ``download_primitive.TradeRecord`` (dataclass) → schema.TradeRecord (TypedDict).
 
-    Mapeia 17 campos canônicos. ``ingestion_ts_ns`` e ``dll_version`` são
-    re-enriquecidos pelo writer (Story 1.4) — preservamos os valores que
-    o ingestor já preencheu.
+    Mapeia 20 campos canônicos (schema v1.1.0). ``ingestion_ts_ns`` e
+    ``dll_version`` são re-enriquecidos pelo writer (Story 1.4) —
+    preservamos os valores que o ingestor já preencheu.
+
+    Nelo Council 32 (release blocker P0): v1.1.0 inclui ``buy_agent_name``,
+    ``sell_agent_name`` e ``trade_type_name``. ``trade_type_name`` é
+    resolvido aqui via :func:`schema.trade_type_name` (mapping
+    ``TConnectorTradeType`` 0..13). v1.0.0 silenciosamente descartava
+    esses 3 campos no writer.
     """
+    from data_downloader.storage.schema import trade_type_name as _trade_type_name
+
     return SchemaTradeRecord(
         symbol=t.symbol,
         exchange=t.exchange,
@@ -1079,6 +1087,13 @@ def _to_schema_trade(t: PrimitiveTradeRecord) -> SchemaTradeRecord:
         chunk_id=t.chunk_id,
         dll_version=t.dll_version,
         sequence_within_ns=t.sequence_within_ns,
+        # v1.1.0 — agent name resolution (preservado do ingestor;
+        # ``AgentResolver`` já populou via ``GetAgentName``).
+        buy_agent_name=t.buy_agent_name,
+        sell_agent_name=t.sell_agent_name,
+        # v1.1.0 — trade type humano (resolvido via mapping enum
+        # ``TConnectorTradeType`` — id desconhecido vira None).
+        trade_type_name=_trade_type_name(t.trade_type),
     )
 
 
