@@ -18,7 +18,10 @@ Cobertura de ``data_downloader.dll.wrapper.ProfitDLL``:
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -40,11 +43,30 @@ from data_downloader.dll.wrapper import DEFAULT_DLL_PATH, ProfitDLL
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cb_refs() -> object:
+def _isolate_cb_refs() -> Iterator[None]:
     """Isola ``_cb_refs`` entre testes."""
     cb_module.cleanup_cb_refs()
     yield
     cb_module.cleanup_cb_refs()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd() -> Iterator[None]:
+    """Isola ``cwd`` entre testes (Q-DRIFT-10).
+
+    ``initialize_market_only`` agora chama ``os.chdir`` antes de ``WinDLL``.
+    Mesmo com ``WinDLL`` mockado, o ``os.chdir`` é real (chamado direto). Sem
+    isolamento, um teste que mocka init mas não restaura cwd vaza o estado
+    para os próximos testes.
+    """
+    original = Path.cwd()
+    try:
+        yield
+    finally:
+        # Restauração best-effort: se algum teste apagou o cwd original,
+        # não temos como restaurar (raro/impossível em fluxo normal).
+        with contextlib.suppress(OSError):
+            os.chdir(str(original))
 
 
 # =====================================================================
@@ -571,3 +593,181 @@ def test_resolve_state_alias_unknown_conn_type() -> None:
     """conn_type desconhecido → 'UNKNOWN_<type>/<result>'."""
     alias = ProfitDLL._resolve_state_alias(99, 5)
     assert alias == "UNKNOWN_99/5"
+
+
+# =====================================================================
+# Q-DRIFT-10 — chdir antes de WinDLL + restauração em finalize/__exit__
+# =====================================================================
+#
+# Probe ``scripts/probe_init.py`` (commit 3ef7699) provou que ProfitDLL
+# precisa que cwd seja a pasta da DLL para achar companions (libssl,
+# libcrypto), arquivos .dat e escrever Logs/. Sem chdir, MARKET_DATA
+# trava em result=1 (CONNECTING) e nunca chega a result=4. Tests abaixo
+# garantem que ``initialize_market_only`` chama ``os.chdir(dll_path.parent)``
+# ANTES de ``WinDLL(...)`` e restaura o cwd em finalize / __exit__ /
+# path de erro.
+
+
+@pytest.mark.unit
+def test_init_changes_cwd_to_dll_dir_before_windll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-DRIFT-10 — ``os.chdir(dll_dir)`` é chamado ANTES de ``WinDLL(...)``.
+
+    Espelha receita do probe ``scripts/probe_init.py`` (commit 3ef7699)
+    que conectou em ~1.82s usando exatamente esse padrão. Nosso wrapper
+    sem chdir trava em MARKET_CONNECTING — fix root cause Q-DRIFT-10.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # Mock ``os.chdir`` para gravar a sequência de chamadas SEM mudar
+    # cwd real. Captura também a relação temporal com ``WinDLL`` via
+    # ``call_order`` compartilhada.
+    call_order: list[str] = []
+
+    def _record_chdir(path: str) -> None:
+        call_order.append(f"chdir:{path}")
+
+    def _record_windll(_path: str) -> Any:
+        call_order.append("WinDLL")
+        instance = MagicMock(name="DLLInstance")
+        instance.SetEnabledLogToDebug = MagicMock(return_value=0)
+        instance.DLLInitializeMarketLogin = MagicMock(return_value=0)
+        instance.DLLFinalize = MagicMock(return_value=0)
+        return instance
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+    expected_dir = fake_dll_path.parent.resolve()
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch("data_downloader.dll.wrapper.os.chdir", side_effect=_record_chdir),
+        patch("ctypes.WinDLL", _record_windll, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS")
+
+    # Pelo menos um chdir disparado, e DEVE preceder a chamada WinDLL.
+    chdir_events = [c for c in call_order if c.startswith("chdir:")]
+    assert chdir_events, f"os.chdir não foi chamado; call_order={call_order}"
+    first_chdir_idx = call_order.index(chdir_events[0])
+    windll_idx = call_order.index("WinDLL")
+    assert (
+        first_chdir_idx < windll_idx
+    ), f"os.chdir DEVE preceder WinDLL (Q-DRIFT-10); call_order={call_order}"
+    # E o destino do chdir é a pasta da DLL.
+    assert (
+        chdir_events[0] == f"chdir:{expected_dir}"
+    ), f"chdir destino esperado {expected_dir}; got {chdir_events[0]}"
+    # Estado interno: ``_original_cwd`` permanece setado APÓS init bem-sucedido
+    # (só é limpo em finalize / __exit__ / path de erro).
+    assert dll._original_cwd is not None, (
+        "_original_cwd deve permanecer setado após init OK para permitir " "restauração em finalize"
+    )
+
+
+@pytest.mark.unit
+def test_finalize_restores_cwd(tmp_path: Path) -> None:
+    """Q-DRIFT-10 — ``finalize`` restaura cwd salvo em ``_original_cwd``.
+
+    Após init bem-sucedido o cwd do processo aponta para a pasta da DLL.
+    ``finalize`` (e ``__exit__``) DEVE devolver o cwd original que existia
+    antes do init para não vazar efeito colateral processo-wide.
+    """
+    dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
+
+    # Simula estado pós-init: DLL atribuída + cwd original salvo.
+    mock_dll = MagicMock()
+    mock_dll.DLLFinalize = MagicMock(return_value=0)
+    dll._dll = mock_dll
+    saved_cwd = tmp_path / "saved_cwd"
+    saved_cwd.mkdir()
+    dll._original_cwd = saved_cwd
+
+    chdir_calls: list[str] = []
+    with patch(
+        "data_downloader.dll.wrapper.os.chdir",
+        side_effect=lambda p: chdir_calls.append(str(p)),
+    ):
+        dll.finalize()
+
+    # ``_restore_cwd_if_changed`` chamou os.chdir com saved_cwd.
+    assert (
+        str(saved_cwd) in chdir_calls
+    ), f"finalize deve chamar os.chdir(saved_cwd); calls={chdir_calls}"
+    # ``_original_cwd`` zerado após restaurar (idempotência de futuras chamadas).
+    assert dll._original_cwd is None
+    # DLL real foi finalizada também.
+    mock_dll.DLLFinalize.assert_called_once()
+    assert dll._dll is None
+
+
+@pytest.mark.unit
+def test_init_restores_cwd_on_negative_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-DRIFT-10 — erro NL_* no init restaura cwd antes de levantar.
+
+    Se ``DLLInitializeMarketLogin`` retorna < 0, o caller fica com
+    ``DLLInitError`` e ``self._dll = None`` (cleanup parcial). O cwd DEVE
+    ser restaurado também — caller não recebe ``self`` em estado
+    finalizável (``self._dll is None`` faz ``finalize`` virar no-op).
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+    dll_instance.DLLInitializeMarketLogin.return_value = -2147483393  # NL_INVALID_ARGS
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    chdir_calls: list[str] = []
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch(
+            "data_downloader.dll.wrapper.os.chdir",
+            side_effect=lambda p: chdir_calls.append(str(p)),
+        ),
+        patch("ctypes.WinDLL", windll_mock, create=True),
+        pytest.raises(DLLInitError),
+    ):
+        dll.initialize_market_only("KEY", "BAD", "BAD")
+
+    # Pelo menos 2 chdir: 1 inicial (para dll_dir) + 1 restauração.
+    assert len(chdir_calls) >= 2, f"Esperado pelo menos 2 chdir (init + restore); got {chdir_calls}"
+    # Último chdir é a restauração para o cwd original.
+    # ``_original_cwd`` zerado após restaurar.
+    assert dll._original_cwd is None
+
+
+@pytest.mark.unit
+def test_restore_cwd_if_changed_is_idempotent(tmp_path: Path) -> None:
+    """Helper ``_restore_cwd_if_changed`` é seguro de chamar repetidamente."""
+    dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
+
+    # Sem _original_cwd setado: no-op (não chama os.chdir).
+    chdir_calls: list[str] = []
+    with patch(
+        "data_downloader.dll.wrapper.os.chdir",
+        side_effect=lambda p: chdir_calls.append(str(p)),
+    ):
+        dll._restore_cwd_if_changed()
+        dll._restore_cwd_if_changed()
+    assert chdir_calls == [], "Sem _original_cwd, _restore_cwd_if_changed não deve chamar os.chdir"
+
+    # Com _original_cwd setado: 1 chdir, depois zerado → próximas chamadas no-op.
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    dll._original_cwd = saved
+    with patch(
+        "data_downloader.dll.wrapper.os.chdir",
+        side_effect=lambda p: chdir_calls.append(str(p)),
+    ):
+        dll._restore_cwd_if_changed()
+        dll._restore_cwd_if_changed()  # 2ª chamada deve ser no-op
+        dll._restore_cwd_if_changed()  # 3ª chamada deve ser no-op
+    assert chdir_calls == [str(saved)], f"Esperado exatamente 1 chdir(saved); got {chdir_calls}"
+    assert dll._original_cwd is None

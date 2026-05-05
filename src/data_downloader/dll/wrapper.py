@@ -177,6 +177,21 @@ class ProfitDLL:
         # lista é cinto-e-suspensório (custo zero, append-only).
         self._cb_refs: list[Any] = []
 
+        # Q-DRIFT-10 (probe diagnose commit 3ef7699 — 2026-05-05): ProfitDLL
+        # precisa que cwd seja a pasta da DLL (``profitdll/DLLs/Win64/``)
+        # para localizar companions (libssl, libcrypto), arquivos ``.dat``
+        # (ServerAddr, exchangeinfo2, holidays, timezone2) e escrever em
+        # subpastas relativas (``Logs/``, ``database/``, ``MarketHours2/``).
+        # Sem ``os.chdir`` antes de ``WinDLL(...)`` o handshake do MARKET_DATA
+        # trava em ``result=1`` (CONNECTING) e nunca progride. O probe
+        # ``scripts/probe_init.py`` (commit 3ef7699) reproduziu conexão em
+        # ~1.82s usando exatamente essa receita.
+        #
+        # ``_original_cwd`` guarda o cwd ANTES do chdir para que possamos
+        # restaurar em ``finalize`` / ``__exit__`` / path de erro.
+        # ``None`` = ainda não mudamos cwd (ou já restauramos).
+        self._original_cwd: Path | None = None
+
     # =================================================================
     # Context manager protocol
     # =================================================================
@@ -192,9 +207,21 @@ class ProfitDLL:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Exit do context manager — finaliza DLL se foi inicializada."""
+        """Exit do context manager — finaliza DLL se foi inicializada.
+
+        Q-DRIFT-10: também restaura ``cwd`` mesmo quando a DLL não chegou
+        a ser inicializada — ``initialize_market_only`` pode ter mudado o
+        cwd e levantado antes de setar ``self._dll``. Path de erro do init
+        já restaura, mas defensivamente cobrimos o caso onde o caller
+        manipula ``self._dll`` direto (testes) ou exceptiona durante a
+        inicialização sem passar pelo nosso try/except.
+        """
         if self._dll is not None:
             self.finalize()
+        else:
+            # Sem DLL inicializada — apenas garante que cwd seja restaurado
+            # caso tenha sido alterado por path parcial.
+            self._restore_cwd_if_changed()
 
     # =================================================================
     # Companions validation (AC12)
@@ -479,20 +506,34 @@ class ProfitDLL:
     ) -> None:
         """Inicializa a DLL em modo market-only (sem trading).
 
-        Sequência (ordem importa — AC11/AC12):
+        EFEITO COLATERAL PROCESSO-WIDE (Q-DRIFT-10): este método chama
+        ``os.chdir(self._dll_path.parent)`` ANTES de carregar a DLL e NÃO
+        restaura o cwd antes de retornar — a ProfitDLL precisa que o cwd
+        permaneça a pasta da DLL durante toda a vida útil da instância
+        para localizar companions (libssl/libcrypto), arquivos ``.dat``
+        e escrever em ``Logs/``, ``database/``, ``MarketHours2/``. O cwd
+        original é salvo em ``self._original_cwd`` e restaurado em
+        :meth:`finalize` / ``__exit__`` / path de erro do init. Probe
+        ``scripts/probe_init.py`` (commit ``3ef7699``) provou que sem
+        chdir o handshake MARKET_DATA trava em ``result=1`` (CONNECTING).
+
+        Sequência (ordem importa — Q-DRIFT-10/AC11/AC12):
             1. ``_verify_companions`` (AC12) — falha cedo se companions
                ausentes.
             2. Verifica plataforma — Windows obrigatório.
-            3. ``WinDLL(path)`` — carrega DLL (AC9 path já resolvido em
+            3. ``os.chdir(dll_path.parent)`` (Q-DRIFT-10) — cwd = pasta
+               da DLL para que ela ache companions/.dat e escreva logs.
+            4. ``WinDLL(path)`` — carrega DLL (AC9 path já resolvido em
                ``__init__``).
-            4. ``SetEnabledLogToDebug(0)`` (AC11) — silencia log nativo
+            5. ``SetEnabledLogToDebug(0)`` (AC11) — silencia log nativo
                ANTES do init.
-            5. Constrói 8 callbacks (1 state ativo + 7 NoopCallback) — AC2,
+            6. Constrói 8 callbacks (1 state ativo + 7 NoopCallback) — AC2,
                todos via factories que appendam em ``_cb_refs`` (Q07-V/AC4).
-            6. ``DLLInitializeMarketLogin(key, user, password, state, ...7
+            7. ``DLLInitializeMarketLogin(key, user, password, state, ...7
                noop)`` — 11 args totais (manual §3.1).
-            7. Verifica retorno; se < 0, raises ``DLLInitError`` (AC7).
-            8. Opcional (``register_extra_callbacks=True``): registra os 14
+            8. Verifica retorno; se < 0, raises ``DLLInitError`` (AC7) e
+               restaura cwd original.
+            9. Opcional (``register_extra_callbacks=True``): registra os 14
                ``Set*Callback`` extras alinhados ao exemplo Nelogica
                (main.py L745-761). DESABILITADO por default — ver nota abaixo.
 
@@ -543,9 +584,30 @@ class ProfitDLL:
                 details={"platform": sys.platform},
             )
 
+        # Q-DRIFT-10 (probe diagnose 2026-05-05, commit 3ef7699): mudar cwd
+        # para a pasta da DLL ANTES de ``WinDLL(...)``. Sem isso a ProfitDLL
+        # não acha companions (libssl, libcrypto), .dat files (ServerAddr,
+        # exchangeinfo2, holidays, timezone2) nem escreve em ``Logs/``,
+        # ``database/``, ``MarketHours2/`` — handshake MARKET_DATA trava em
+        # ``result=1`` (CONNECTING) sem nunca chegar a ``result=4``. O probe
+        # canônico (``scripts/probe_init.py``) reproduziu conexão em ~1.82s
+        # com ESTA receita exata. Salvamos cwd em ``self._original_cwd`` para
+        # restaurar em :meth:`finalize` / ``__exit__`` / qualquer path de erro
+        # daqui pra frente — atenção: NÃO restauramos antes do download (a
+        # DLL pode precisar do cwd durante operações de runtime também).
+        dll_dir = self._dll_path.parent
+        self._original_cwd = Path.cwd()
+        os.chdir(str(dll_dir))
+        log.info(
+            "dll.cwd_changed",
+            from_=str(self._original_cwd),
+            to=str(dll_dir),
+            quirk="Q-DRIFT-10",
+        )
+
         # Carrega DLL principal. Erros aqui (DLL ausente, dependência
         # quebrada não capturada por verify_dll_companions) viram OSError
-        # do Windows loader; deixamos propagar com contexto via log.
+        # do Windows loader; restauramos cwd antes de levantar.
         log.info("dll.loading", path=str(self._dll_path))
         # Lazy import: ctypes.WinDLL só existe em Windows. Importar inline
         # após checagem de plataforma evita ImportError no module load
@@ -556,6 +618,12 @@ class ProfitDLL:
             self._dll = WinDLL(str(self._dll_path))
         except OSError as exc:
             log.error("dll.load_failed", path=str(self._dll_path), error=str(exc))
+            # Q-DRIFT-10 — restaurar cwd antes de propagar o erro: o caller
+            # não deve herdar um cwd alterado se o init não chegou nem a
+            # carregar a DLL. ``finalize`` não vai ser chamado neste caso
+            # (``self._dll`` continua None), portanto a restauração tem que
+            # acontecer aqui mesmo.
+            self._restore_cwd_if_changed()
             raise DLLInitError(
                 -1,
                 "WINDLL_LOAD_FAILED",
@@ -636,6 +704,10 @@ class ProfitDLL:
             # Cleanup parcial: anular self._dll (próxima chamada vê não-init)
             # mas NÃO clear _cb_refs (AC4 — ConnectorThread pode ter started).
             self._dll = None
+            # Q-DRIFT-10 — restaurar cwd: ``finalize`` confere ``self._dll``
+            # e seria no-op aqui, então restauração explícita garante que o
+            # processo não fique com cwd alterado após init falho.
+            self._restore_cwd_if_changed()
             raise DLLInitError(err.code, err.name, err.message)
 
         log.info("dll.initialized", code=ret)
@@ -976,12 +1048,25 @@ class ProfitDLL:
         """Encerra a DLL — preferindo ``DLLFinalize`` (manual) sobre ``Finalize``
         (whale-detector observou) — Q-AMB-02 / AC6.
 
+        Também restaura o ``cwd`` original (Q-DRIFT-10): ``initialize_market_only``
+        muda o cwd do processo para a pasta da DLL para que a ProfitDLL ache
+        seus companions. Aqui revertemos para o cwd que existia antes do init,
+        para que o caller não fique com efeito colateral residual após
+        terminar o lifecycle. Restauração é best-effort: se o cwd original
+        não existir mais (raríssimo — ex: caller deletou o diretório), apenas
+        loga warning e segue.
+
         IMPORTANTE (AC4): NÃO chamar ``_cb_refs.clear()`` aqui. ConnectorThread
         interna da DLL pode ainda referenciar callbacks pendentes; remover
         a referência Python-side liberaria o trampoline ctypes e crashar
         o processo (Q07-V). Apenas anular ``self._dll = None``.
         """
         if self._dll is None:
+            # Mesmo sem DLL inicializada, garante que cwd seja restaurado
+            # caso ``__exit__`` chame ``finalize`` após init que falhou
+            # parcialmente sem restaurar (defensivo — paths normais já
+            # restauram, mas idempotência é barata).
+            self._restore_cwd_if_changed()
             return
 
         # Q-AMB-02: tenta DLLFinalize (manual canônico) → fallback Finalize
@@ -1001,6 +1086,40 @@ class ProfitDLL:
         # AC4 — NÃO `_cb_refs.clear()`. ConnectorThread pode ainda
         # referenciar; limpar = crash. Apenas anular self._dll.
         self._dll = None
+
+        # Q-DRIFT-10 — restaurar cwd original APÓS finalizar a DLL. Ordem
+        # importa: a DLL pode estar escrevendo em ``Logs/`` durante o
+        # ``DLLFinalize`` (flush de buffers), então só mudamos o cwd
+        # depois que ela terminou.
+        self._restore_cwd_if_changed()
+
+    def _restore_cwd_if_changed(self) -> None:
+        """Restaura ``cwd`` salvo em :attr:`_original_cwd` (Q-DRIFT-10).
+
+        Idempotente: se ``_original_cwd`` é ``None`` (nunca mudamos OU já
+        restauramos), é no-op silencioso. Após restaurar, zera o atributo
+        para que próximas chamadas saibam que não há mais nada a desfazer.
+
+        Best-effort: se ``os.chdir`` falhar (ex.: cwd original foi deletado
+        por outro processo), loga warning e segue — não levanta. A
+        finalização da DLL é mais importante que perfeição na restauração.
+        """
+        if self._original_cwd is None:
+            return
+        target = self._original_cwd
+        # Zera ANTES de tentar para evitar loops em caso de exceção.
+        self._original_cwd = None
+        try:
+            os.chdir(str(target))
+        except OSError as exc:
+            log.warning(
+                "dll.cwd_restore_failed",
+                target=str(target),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+        log.info("dll.cwd_restored", to=str(target), quirk="Q-DRIFT-10")
 
     # =================================================================
     # Properties (AC13)
