@@ -45,6 +45,7 @@ import faulthandler
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -184,6 +185,59 @@ def main() -> int:
                 print("[FAIL] alguns trades sem dll_version", flush=True)
                 verdict = "FAIL-missing-dll-version"
                 return 5
+
+            # Q-DRIFT-36 (Story 1.7d, Quinn @qa 2026-05-05): persiste trades em
+            # parquet para análise DuckDB (gaps, completude, integridade). Sem
+            # isso, validação ficou em memória apenas — INCONCLUSIVE para a
+            # pergunta de release blocker. Schema mínimo ad-hoc compatível com
+            # download_primitive.TradeRecord (dataclass frozen). Falha aqui
+            # NÃO falha o smoke — é diagnóstico, não produção.
+            try:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+
+                run_id = uuid.uuid4().hex[:8]
+                out_dir = ROOT / "data" / "scratch" / f"smoke-{run_id}"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = out_dir / "wdofut.parquet"
+
+                # Converte dataclass TradeRecord → list[dict] para Arrow.
+                rows = [
+                    {
+                        "symbol": t.symbol,
+                        "exchange": t.exchange,
+                        "timestamp_ns": t.timestamp_ns,
+                        "timestamp_str": t.timestamp_str,
+                        "price": t.price,
+                        "quantity": t.quantity,
+                        "trade_id": t.trade_id,
+                        "trade_type": t.trade_type,
+                        "buy_agent_id": t.buy_agent_id,
+                        "sell_agent_id": t.sell_agent_id,
+                        "buy_agent_name": t.buy_agent_name,
+                        "sell_agent_name": t.sell_agent_name,
+                        "flags": t.flags,
+                        "source_callback": t.source_callback,
+                        "side": t.side,
+                        "ingestion_ts_ns": t.ingestion_ts_ns,
+                        "chunk_id": t.chunk_id,
+                        "dll_version": t.dll_version,
+                        "sequence_within_ns": t.sequence_within_ns,
+                    }
+                    for t in result.trades
+                ]
+                table = pa.Table.from_pylist(rows)
+                pq.write_table(table, out_path, compression="snappy")
+                print(
+                    f"[PERSIST] {len(rows)} trades -> {out_path}",
+                    flush=True,
+                )
+            except Exception as persist_exc:
+                print(
+                    f"[WARN] persistencia falhou (nao bloqueia smoke): "
+                    f"{type(persist_exc).__name__}: {persist_exc}",
+                    flush=True,
+                )
 
             print(
                 f"[VERDICT] PASS — bug eh exclusivamente do harness pytest. "
