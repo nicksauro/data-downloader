@@ -20,7 +20,7 @@ pre-commit hook ``check_no_dotenv`` — vide COUNCIL-01.)
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -34,17 +34,26 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# Data fixa: dia útil recente conhecido com volume.
-# 2026-04-15 (quarta-feira) — pregão regular, contrato WDOJ26 (vigência abril 2026).
-_SMOKE_SYMBOL = "WDOJ26"
+# Story 1.7d — alinhado ao standalone (run_smoke_real_standalone.py):
+#   * WDOFUT (continuous future) — Q-DRIFT-31 valida com volume real
+#   * Janela <= 5 dias (limite empírico GetHistoryTrades, Q-DRIFT-31)
+#   * Datas DINÂMICAS (now-10min back 4d) para evitar "stale data"
+# Anteriormente: WDOJ26 + 1 dia fixo (2026-04-15) que passou a falhar
+# após contrato vencer + DLL passar a rejeitar dia fixo distante.
+_SMOKE_SYMBOL = "WDOFUT"
 _SMOKE_EXCHANGE = "F"
-_SMOKE_DT_START = datetime(2026, 4, 15, 9, 0, 0)
-_SMOKE_DT_END = datetime(2026, 4, 15, 17, 30, 0)
+
+
+def _smoke_window() -> tuple[datetime, datetime]:
+    """Janela dinâmica: now-10min até now-10min - 4 dias."""
+    end = datetime.now() - timedelta(minutes=10)
+    start = end - timedelta(days=4)
+    return start, end
 
 
 @pytest.mark.smoke
 def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
-    """AC10 — baixa 1 dia WDOJ26 real → len(trades) > 0.
+    """AC10 — baixa janela recente WDOFUT (<=5d) → len(trades) > 0.
 
     Este teste valida o caminho REAL ponta-a-ponta:
       1. Init ProfitDLL com credenciais reais.
@@ -86,12 +95,13 @@ def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
             "de pregão B3 (09:00-18:30 BRT), credenciais e rede."
         )
 
+        dt_start, dt_end = _smoke_window()
         result = download_chunk(
             dll,
             _SMOKE_SYMBOL,
             _SMOKE_EXCHANGE,
-            _SMOKE_DT_START,
-            _SMOKE_DT_END,
+            dt_start,
+            dt_end,
             timeout=600,  # 10 min — generoso para Q02-E quirk
         )
 
@@ -99,7 +109,7 @@ def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
         # AC10: trades > 0.
         assert len(result.trades) > 0, (
             f"Esperado >0 trades para {_SMOKE_SYMBOL} em "
-            f"{_SMOKE_DT_START.date()}; recebido 0. "
+            f"{dt_start.date()}-{dt_end.date()}; recebido 0. "
             f"status={result.status}, progress={result.progress_history[-5:]}"
         )
         # Validação adicional: timestamps em ordem cronológica BRT naive.
