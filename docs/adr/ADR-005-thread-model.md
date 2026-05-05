@@ -588,3 +588,201 @@ pré-conexão + smoke real após mudança. Quinn validar via test
 property: `wait_market_connected` retorna True SOMENTE em
 `result=4`; smoke real demonstra MARKET_DATA progredindo de
 `result=1` para `result=4`.
+
+---
+
+## Amendment 2026-05-04 (c) — Init/Wait separation + subscribe-handshake
+
+**Autor:** 🏛️ Aria (review-design autônomo, mini-council Aria)
+**Origem:** Smoke real persistente: MARKET_DATA fica em `result=1`
+(CONNECTING/MARKET_WAITING_TICKETS) e nunca alcança `result=4`
+(MARKET_CONNECTED) mesmo após o amendment (b) recomendar
+`SetXxxCallback` extras. Usuário (autoridade ProfitDLL real)
+reafirmou: **"MARKET_DATA não conecta = bug na nossa função de
+inicialização, não é DLL nem horário"**. Diagnóstico arquitetural
+da fronteira `init / wait / subscribe`.
+**Related:** Amendment 2026-05-04 (b) (callback pre-registration),
+ADR-005 thread model, Story 1.2 AC2, Story 1.7b-followup.
+
+### Problema endereçado
+
+Apesar dos esforços anteriores (callbacks Noop nos 7 slots,
+critério estrito `result=4`, retry policy 2.12), o handshake de
+MARKET_DATA permanece travado em `result=1`. O wrapper atual
+acopla **em uma única chamada** três responsabilidades distintas:
+
+```
+initialize_market_only()  →  internamente chama:
+  1. WinDLL load
+  2. SetEnabledLogToDebug(0)
+  3. DLLInitializeMarketLogin(...)
+  4. (NÃO chama wait — está separado)
+```
+
+E o caller faz, em sequência:
+
+```
+dll.initialize_market_only(...)   # passos 1-3
+dll.wait_market_connected(300)    # bloqueia 300s, devolve False
+download_chunk(...)               # subscribe_ticker DENTRO do chunk
+```
+
+**Hipótese arquitetural reforçada pelo usuário:** a DLL pode
+condicionar o handshake `MARKET_DATA → result=4` à presença de
+**uma intenção de consumo declarada** (subscribe de ticker) ANTES
+do wait. Sem subscribe, a DLL "não sabe" qual feed o cliente
+quer, fica em `MARKET_WAITING_TICKETS` (literal: "aguardando
+inscrição em ticker"), e nunca progride.
+
+Hoje a sequência é:
+```
+init → wait (timeout 300s) → subscribe → get_history → unsubscribe
+        ↑ stuck aqui em result=1
+```
+
+A sequência hipotética correta seria:
+```
+init → subscribe → wait → get_history → unsubscribe
+                  ↑ subscribe DESBLOQUEIA o handshake
+```
+
+### Hipóteses arquiteturais avaliadas
+
+| ID  | Hipótese                                                                 | Suporte                                                                 | Avaliação |
+|-----|--------------------------------------------------------------------------|-------------------------------------------------------------------------|-----------|
+| H-1 | `wait_market_connected` está acoplado dentro do `initialize_market_only` (impede injeção de subscribe entre os dois) | Falso na implementação atual: já estão SEPARADOS (`wrapper.py:472-667` é só init; `wrapper.py:754-857` é só wait). Mas no **fluxo do caller**, init é imediatamente seguido de wait, sem janela para subscribe. | **PARCIAL** — fronteira está separada no wrapper, mas o caller (`download_chunk`) chama subscribe DEPOIS do wait |
+| H-2 | `SubscribeTicker` faltando ENTRE init e wait bloqueia o handshake porque a DLL não tem ticket para popular | Coerente com state literal `MARKET_WAITING_TICKETS` (result=1) — nome semântico aponta para "aguardando ticker". Coerente com regra documentada (Story 1.7b-followup): "ProfitDLL não popula trades sem subscribe explícito". | **FORTE** — recomendar mudança |
+| H-3 | NoopCallback nos 7 slots faz a DLL recusar handshake porque "callback não responde" | Refutada por amendment (b): exemplo Nelogica passa `None` (mais agressivo) e funciona; Noop é estritamente mais defensivo. | **FRACA** — não-causa |
+| H-4 | `SetEnabledLogToDebug(0)` silencia warnings críticos da DLL que indicariam o motivo do não-handshake | Plausível mas não-causa — se warnings da DLL fossem visíveis, daríamos pista; mas habilitar logging é **diagnóstico**, não correção. | **DIAGNÓSTICA** — útil para investigação, não causa-raiz |
+
+**Conclusão arquitetural:** **H-2 é a hipótese mais forte.** O nome
+literal do estado (`MARKET_WAITING_TICKETS`) e o requisito documentado
+de subscribe-antes-de-history convergem. O subscribe atual em
+`download_chunk` chega TARDE — depois do wait que já fracassou.
+
+### Decisão arquitetural
+
+Refatoração em **3 partes** propostas a Dex (implementador, paralelo):
+
+#### 1. Manter separação init/wait (já existente)
+
+`initialize_market_only(key, user, password)` continua fazendo
+APENAS: WinDLL + SetEnabledLogToDebug + DLLInitializeMarketLogin.
+**NÃO** chamar `wait_market_connected` interno (já é assim — manter).
+
+#### 2. Adicionar método `subscribe_for_handshake(ticker, exchange)`
+
+Novo método público no wrapper, semanticamente distinto de
+`subscribe_ticker` (que é chamado dentro de `download_chunk`):
+
+```python
+def subscribe_for_handshake(self, ticker: str, exchange: str) -> int:
+    """Inscreve ticker ANTES de wait_market_connected.
+
+    Hipótese arquitetural (Amendment 2026-05-04 c): DLL pode
+    condicionar handshake MARKET_DATA → result=4 à presença de
+    intenção de consumo declarada. Sem subscribe pré-wait, MARKET_DATA
+    fica em result=1 (MARKET_WAITING_TICKETS — literal: "aguardando
+    ticker"). Este método deve ser chamado entre initialize_market_only
+    e wait_market_connected.
+
+    Internamente é a mesma chamada SubscribeTicker; o nome distinto
+    documenta a intenção arquitetural. Caller deve fazer
+    unsubscribe correspondente quando finalizar (ou reutilizar para
+    download_chunk).
+    """
+```
+
+Implementação trivial: idêntica a `subscribe_ticker`, apenas com
+docstring documentando o papel arquitetural.
+
+#### 3. Reordenar fluxo no caller (download_chunk OU camada superior)
+
+**Opção 3a (preferida — caller faz subscribe-handshake):**
+
+Caller (CLI ou Story 1.4 orchestrator) faz:
+
+```python
+dll.initialize_market_only(key, user, password)
+dll.subscribe_for_handshake(symbol, exchange)   # NOVO
+connected = dll.wait_market_connected(timeout=300)
+if not connected:
+    raise DLLConnectError(...)
+
+# download_chunk pode então pular subscribe interno (já feito) ou
+# chamar idempotente (DLL aceita subscribe duplo retornando código
+# não-fatal — testar)
+result = download_chunk(dll, symbol, exchange, ...)
+```
+
+**Opção 3b (fallback — wrapper faz tudo):**
+
+Adicionar parâmetro opcional a `initialize_market_only`:
+
+```python
+dll.initialize_market_only(
+    key, user, password,
+    handshake_ticker=("WDOJ26", "F"),  # NOVO
+)
+# Internamente: init → subscribe(handshake_ticker) → (caller chama wait)
+```
+
+**Recomendação Aria:** **Opção 3a** — preserva separação de
+responsabilidades (wrapper expõe primitivas; caller orquestra
+sequência). Opção 3b acopla wrapper a "saber o ticker" antes do
+download — viola coesão da fronteira `dll/`.
+
+### Conexão com download_chunk
+
+`download_chunk` mantém o `subscribe_ticker → get_history →
+unsubscribe` interno **inalterado** — é correto para o caso de
+chunks subsequentes (mesmo símbolo, intervalos diferentes; ou
+símbolo distinto). A mudança é APENAS adicionar o
+**subscribe-handshake inicial** entre init e wait.
+
+Em re-uso (segundo chunk do mesmo símbolo na mesma sessão):
+- subscribe-handshake ainda válido na DLL.
+- `download_chunk` chama subscribe novamente — DLL retorna código
+  não-fatal (já-subscrito) e segue. Comportamento atual já tolera
+  isso (`download_chunk` linhas 619-638 trata como WARNING).
+
+### Risco arquitetural
+
+| Risco | Severidade | Mitigação |
+|-------|-----------|-----------|
+| Subscribe pré-wait pode também travar se DLL ainda não está em estado para aceitar subscribe | MÉDIA | DLL deveria aceitar SubscribeTicker imediatamente após DLLInitializeMarketLogin (não requer MARKET_CONNECTED para enfileirar). Validar no smoke. |
+| Caller precisa "saber o ticker" antes do init — quebra fluxo "1 sessão DLL, N símbolos" | BAIXA | OK para MVP (1 símbolo por sessão); para multi-symbol futuro, fazer subscribe de TODOS os símbolos ANTES do wait. |
+| Hipótese H-2 errada: subscribe não desbloqueia, apenas adia o problema | MÉDIA | Smoke real é o teste decisivo. Se falhar, próxima hipótese é H-4 (habilitar SetEnabledLogToDebug(1) para ver warnings DLL). |
+
+### Validação requerida (smoke real)
+
+1. Aplicar refatoração (Opção 3a).
+2. Smoke 1: `init → subscribe_for_handshake("WDOJ26", "F") → wait_market_connected(timeout=120)`.
+   - **Sucesso esperado:** MARKET_DATA progride de `result=1` → `result=4` em <60s.
+   - **Falha:** próxima hipótese é H-4 (habilitar log nativo).
+3. Smoke 2 (se 1 OK): `download_chunk` completo retorna trades.
+
+### Fallback se hipótese refutada
+
+Se o smoke da Opção 3a falhar, próximos passos arquiteturais:
+
+1. **H-4 ativo:** `SetEnabledLogToDebug(1)` ou remover a chamada —
+   capturar warnings nativos da DLL no console.
+2. **Audit signature:** verificar que `SubscribeTicker` argtypes/restype
+   estão configurados em `_configure_dll_signatures` (CRIT-2).
+3. **Consultar Nelo:** signature ou semântica de `result=1` na versão
+   da DLL embarcada (`profitdll/`).
+
+### Sign-off
+
+- **Aria (architect):** APPROVED — refatoração proposta para Dex.
+  H-2 é a hipótese arquitetural mais forte; teste empírico via
+  smoke real é decisivo. Mudança é minor (1 método novo, 1 linha
+  no caller), reversível, sem regressão de invariantes.
+
+### Auditor
+
+Dex (próximo agente, paralelo) implementa Opção 3a +
+`subscribe_for_handshake` no wrapper. Smoke real é o gate. Quinn
+adiciona property test: `subscribe_for_handshake` retorna >=0 antes
+de `wait_market_connected` ser chamado em testes de integração.
