@@ -163,3 +163,65 @@ linha-a-linha para isolar wrapper vs semântica DLL.
 - Caminho A (continuar bisection) **agora é Q-DRIFT-27/28/29/30** — não mais Q-DRIFT-26.
 - Caminho B (WAIVER) **prioridade aumentada** — Sintoma B é mais fundo do que
   apenas "data inválida"; pode levar dias para discriminar wrapper vs DLL.
+
+---
+
+## Adendo 2026-05-05 ~10:55 BRT — probe ctypes puro (EXPERIMENTO DECISIVO)
+
+**Verdict:** **CENARIO_B** — zero trades em probe ctypes puro **sem** wrapper, **sem** orchestrator, **sem** pytest.
+
+**Setup:** `scripts/probe_history_minimal.py` — reproduz fluxo de download histórico
+do exemplo oficial Nelogica linha-a-linha:
+- `WinDLL` direto, sem `data_downloader.dll.wrapper.ProfitDLL`.
+- `WINFUNCTYPE` callbacks com signatures EXATAS dos exemplos C++ (`main.cpp`) e
+  Python (`main.py`) Nelogica + `profitTypes.py` structs.
+- 11 slots do `DLLInitializeMarketLogin` todos preenchidos com Noop signatures
+  CORRETAS (sem `None`).
+- `SetHistoryTradeCallbackV2` registrado após `MARKET_CONNECTED`.
+- `SubscribeTicker(WDOJ26, F)` + `GetHistoryTrades(WDOJ26, F, ...)`.
+
+**Resultado:**
+- `MARKET_CONNECTED` em **1.61s** (handshake perfeito, sequência ATIVO → LOGIN_OK
+  → MARKET_CONNECTING → csConnectedWaiting → MARKET_CONNECTED).
+- `SubscribeTicker` ret=0 (NL_OK).
+- `SetHistoryTradeCallbackV2` ret=0 (NL_OK).
+- `GetHistoryTrades` ret=0 (NL_OK) — janela `now-2h → now-10min` durante pregão B3 ABERTO.
+- **Zero trades em 120s. Zero progress callbacks. Zero LAST_PACKET.**
+
+**Implicação CRÍTICA — REFUTAÇÃO PARCIAL DA DIRETIVA "é bug, NÃO É DLL":**
+Como o probe puro tem comportamento IDÊNTICO ao smoke via wrapper, o bug
+**NÃO está no nosso código**. Está em uma das três áreas externas:
+1. **H1 (mais provável):** conta `nicolascarasaibaptista@gmail.com` sem permissão de
+   histórico de trades (apenas real-time).
+2. **H4:** contrato `WDOJ26` (abril/2026) vencido — vigente seria `WDOK26` ou `WDON26`.
+3. **H5 (refuta a diretiva):** bug ou regressão na DLL para essa conta/contrato.
+
+**Refs:**
+- `scripts/probe_history_minimal.py` (criado nesta sessão)
+- `docs/qa/SMOKE_EVIDENCE/probe-history-minimal-20260505T105518Z-CENARIO_B.md`
+- `docs/qa/SMOKE_EVIDENCE/logs/probe-history-minimal-20260505T105518Z.log`
+
+---
+
+## Próxima ação recomendada (ATUALIZADA — pós CENARIO_B)
+
+**Caminho A.1 (sanity check rápido — 5min, recomendado PRIMEIRO):**
+Rodar `scripts/probe_history_minimal.py` modificando símbolo para
+`PETR4` + exchange `B`. Esse contrato é 100% disponível e usado no exemplo Nelogica.
+- Se PETR4 traz trades → problema é específico WDO/F (provável H4 contrato vencido
+  ou licença BMF distinta).
+- Se PETR4 também zero → confirma H1 (conta sem permissão histórica em geral).
+
+**Caminho A.2 (se A.1 mostrar problema com WDO):**
+Rodar mesmo probe com `WDOK26` (maio/2026 — vigente) ou `WDON26` (julho/2026).
+
+**Caminho A.3 (definitivo — escalar Nelogica):**
+Após A.1 e A.2, contatar suporte Nelogica com TODOS os logs deste sub-run
++ probe history minimal. Pedir confirmação se a conta tem permissão de
+**histórico de trades** (não só real-time) e qual contrato WDO/WIN é vigente
+para chamada `GetHistoryTrades`.
+
+**Caminho B (WAIVER) — prioridade ainda alta:**
+Se A.3 demorar dias, formalizar WAIVER de AC10 conforme já planejado
+(Pax + Quinn + River + Aria mini-council). Argumento adicional:
+**diagnóstico interno está completo e o bloqueio é externo ao projeto**.
