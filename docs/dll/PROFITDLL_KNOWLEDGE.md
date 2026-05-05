@@ -4,7 +4,7 @@
 **Fonte primária:** `Manual - ProfitDLL pt_br.pdf` (extraído em `manual_profitdll.txt`, 4452 linhas)
 **Fontes secundárias:** `profitdll/Exemplo Python/main.py` (1274L) · `profit_dll.py` (signatures) · `profitTypes.py` (structs/enums)
 **Validação empírica:** whale-detector v2 (live mode 2026-03-09) · Sentinel §12
-**Última atualização:** 2026-05-04 (auditoria Nelo — adicionados §2.7 SubscribeTicker pré-requisito + §2.8 argtypes/restype canônicos)
+**Última atualização:** 2026-05-04 (auditoria Nelo — adicionados §2.7 SubscribeTicker pré-requisito + §2.8 argtypes/restype canônicos + §3.3 SetXxxCallback signatures canônicas pós-smoke-5 access violations)
 
 > **Regra de uso:** Este documento é a referência canônica do squad data-downloader. Toda afirmação aqui referencia seção/linha do manual OU está marcada como `[empírico]` / `[ambíguo]` com link ao quirk em `QUIRKS.md`. Quando manual e prática divergem, divergência é registrada — nunca escondida.
 
@@ -14,7 +14,7 @@
 
 1. [Visão geral da DLL (manual §2)](#1-visão-geral)
 2. [Funções expostas (manual §3.1)](#2-funções-expostas)
-3. [Callbacks (manual §3.2)](#3-callbacks)
+3. [Callbacks (manual §3.2)](#3-callbacks) — inclui §3.3 SetXxxCallback signatures canônicas (Q-DRIFT-09)
 4. [Uso, threading, linkagem (manual §4)](#4-uso--threading)
 5. [Códigos de erro NL_* (manual §5)](#5-códigos-de-erro)
 6. [Sequência canônica de inicialização](#6-sequência-canônica-de-inicialização)
@@ -270,6 +270,67 @@ Todos com convenção **stdcall** (`WINFUNCTYPE` em Python ctypes). Todos dispar
 - **Todos** os callbacks chegam na **mesma** thread (`ConnectorThread`), serializados em uma **fila única interna** (manual §4 L4382).
 - Processamento demorado em qualquer callback **bloqueia toda a fila** (logs, livros, trades, states param de chegar).
 - **Padrão obrigatório:** callback faz APENAS `queue.put_nowait(...)` e retorna em <100µs.
+
+---
+
+### 3.3 SetXxxCallback signatures canônicas (14 callbacks registrados via `Set*`)
+
+**Contexto (Q-DRIFT-09, 2026-05-04):** após Q-DRIFT-05 corrigir os Noop slots de `DLLInitializeMarketLogin`, smoke 5 ainda falhou com **múltiplas Access Violations + 1 Stack Overflow** durante `wait_market_connected`. Estado chega `LOGIN_OK` + `MARKET_LOGIN`, mas **DLL crasha** ao invocar algum dos 14 NoopCallback registrados via `SetXxx`. Hipótese forte: **signatures dos 14 NoopCallbacks divergem da forma esperada pela DLL** (mesmo bug-class de Q-DRIFT-05, agora nos Set callbacks).
+
+Esta seção é a **referência canônica auditada** das signatures que `profitdll/Exemplo Python/main.py` registra nas linhas L745–L761. **Toda signature foi extraída literalmente do exemplo oficial Nelogica.**
+
+#### Tabela canônica — 14 callbacks `SetXxx`
+
+| # | Função `Set*` registrada | Signature `WINFUNCTYPE` (literal do exemplo) | Args (nomes) | Origem `main.py` | Manual ref |
+|---|--------------------------|-----------------------------------------------|--------------|------------------|------------|
+| 1 | `SetAssetListCallback` | `WINFUNCTYPE(None, TAssetID, c_wchar_p)` | `(assetId, strName)` | L440-443 | §3.2 L3032, L3871 |
+| 2 | `SetAdjustHistoryCallbackV2` | `WINFUNCTYPE(None, TAssetID, c_double, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_uint, c_double)` | `(assetId, value, strType, strObserv, dtAjuste, dtDelib, dtPagamento, nFlags, dMult)` | L445-448 | §3.2 L3121 |
+| 3 | `SetAssetListInfoCallback` | `WINFUNCTYPE(None, TAssetID, c_wchar_p, c_wchar_p, c_int, c_int, c_int, c_int, c_int, c_double, c_double, c_wchar_p, c_wchar_p)` | `(assetId, strName, strDescription, iMinOrdQtd, iMaxOrdQtd, iLote, iSecurityType, iSecuritySubType, dMinPriceInc, dContractMult, strValidDate, strISIN)` | L450-455 | §3.2 L3035 |
+| 4 | `SetAssetListInfoCallbackV2` | `WINFUNCTYPE(None, TAssetID, c_wchar_p, c_wchar_p, c_int, c_int, c_int, c_int, c_int, c_double, c_double, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p)` | `(assetId, strName, strDescription, iMinOrdQtd, iMaxOrdQtd, iLote, iSecurityType, iSecuritySubType, dMinPriceInc, dContractMult, strValidDate, strISIN, strSetor, strSubSetor, strSegmento)` | L457-463 | §3.2 L3061 |
+| 5 | `SetOfferBookCallbackV2` | `WINFUNCTYPE(None, TAssetID, c_int, c_int, c_int, c_int, c_int, c_longlong, c_double, c_int, c_int, c_int, c_int, c_int, c_wchar_p, POINTER(c_ubyte), POINTER(c_ubyte))` | `(assetId, nAction, nPosition, Side, nQtd, nAgent, nOfferID, sPrice, bHasPrice, bHasQtd, bHasDate, bHasOfferID, bHasAgent, date, pArraySell, pArrayBuy)` — **16 args** | L391-432 | §3.2 L2875 |
+| 6 | `SetOrderCallback` | `WINFUNCTYPE(None, TConnectorOrderIdentifier)` | `(orderId)` | L465-467 | §3.2 L3233 |
+| 7 | `SetOrderHistoryCallback` | `WINFUNCTYPE(None, TConnectorAccountIdentifier)` | `(accountId)` | L487-489 | §3.2 L3194 (V2 history) |
+| 8 | `SetInvalidTickerCallback` | `WINFUNCTYPE(None, TConnectorAssetIdentifier)` | `(assetID)` | L491-493 | §3.2 L3098, L4095 |
+| 9 | `SetTradeCallbackV2` | `WINFUNCTYPE(None, TConnectorAssetIdentifier, c_size_t, c_uint)` | `(assetId, pTrade, flags)` — `pTrade` é handle p/ `TranslateTrade` | L324-333 | §3.2 L3243 |
+| 10 | `SetAssetPositionListCallback` | `WINFUNCTYPE(None, TConnectorAccountIdentifier, TConnectorAssetIdentifier, c_long)` | `(accountId, asset, LastEvent)` | L507-521 | §3.2 L2909 |
+| 11 | `SetBrokerAccountListChangedCallback` | `WINFUNCTYPE(None, c_int, c_int)` | `(BrokerID, HasChange)` | L523-536 | §3.2 L2924, L4352 |
+| 12 | `SetBrokerSubAccountListChangedCallback` | `WINFUNCTYPE(None, TConnectorAccountIdentifier)` | `(accountId)` | L538-553 | §3.2 L2928, L4361 |
+| 13 | `SetPriceDepthCallback` | `WINFUNCTYPE(None, TConnectorAssetIdentifier, c_ubyte, c_int, c_ubyte)` | `(assetId, side, position, updateType)` | L253-314 | §3.2 L3250 |
+| 14 | `SetTradingMessageResultCallback` | `WINFUNCTYPE(None, POINTER(TConnectorTradingMessageResult))` | `(a_Result)` — pointer, NÃO struct por valor | L316-321 | §3.2 L3262 |
+
+> **Confiança:** todas as 14 signatures são **EXATAS** (extraídas literalmente do exemplo oficial). **Zero `OPEN`** nesta tabela.
+
+#### Estatística de tipos no primeiro arg
+
+| Família do primeiro arg | Callbacks | Implicação ctypes |
+|--------------------------|-----------|-------------------|
+| `TAssetID` por valor (struct legado, `profitTypes.py` L293-296) | 1, 2, 3, 4, 5 | 5 callbacks. **NUNCA** expandir em `(c_wchar_p, c_wchar_p, c_int)` (mesmo bug Q-DRIFT-05). |
+| `TConnectorAssetIdentifier` por valor (struct V2, `profitTypes.py` L88-94) | 8, 9, 13 | 3 callbacks. Idem regra struct-by-value. |
+| `TConnectorAccountIdentifier` por valor (`profitTypes.py` L68-75) | 7, 10, 12 | 3 callbacks (10 também tem TConnectorAssetIdentifier no 2º arg). |
+| `TConnectorOrderIdentifier` por valor | 6 | 1 callback. |
+| `POINTER(TConnectorTradingMessageResult)` | 14 | 1 callback. **Pointer**, não struct por valor. |
+| Primitivos (`c_int, c_int`) | 11 | 1 callback. Sem struct. |
+
+#### Pegadinhas observadas (auditoria 2026-05-04)
+
+1. **Callback #5 `OfferBookCallbackV2` tem 16 args.** Erro mais provável: declarar com 13 ou 14 args (esquecer pArraySell/pArrayBuy). Ambos são `POINTER(c_ubyte)` — não `POINTER(c_int)` apesar do nome do campo na struct `TOfferBookCallback` ser `pArraySell: POINTER(c_int)`. **A signature do callback usa `POINTER(c_ubyte)`** (`main.py` L392).
+2. **Callback #2 `AdjustHistoryCallbackV2` tem 9 args** com 5 `c_wchar_p` consecutivos no meio (strType, strObserv, dtAjuste, dtDelib, dtPagamento). Confundir um por `c_int` desalinha o stack.
+3. **Callback #9 `TradeCallbackV2`:** o pointer `pTrade` é declarado como `c_size_t` no exemplo (não `POINTER(TConnectorTrade)` direto). Isso permite passar para `TranslateTrade(handle, byref(struct))` — handle é opaco até traduzir. **NÃO confundir com `TConnectorTrade` por valor.**
+4. **Callback #14 `TradingMessageResultCallback`:** único caso de **POINTER(struct)** entre os 14 (versus struct por valor). Já registrado corretamente via `TConnectorTradingMessageResultCallback = WINFUNCTYPE(None, POINTER(TConnectorTradingMessageResult))` em `profitTypes.py` L453-456.
+5. **Callback #11 `BrokerAccountListChangedCallback`:** dois `c_int` puros, sem struct. Mais simples de todos.
+6. **Tipos `c_long` vs `c_int`:** em Win64 ambos são 32-bit, mas o exemplo distingue: callbacks #7, #10 e o enumerator usam `c_long`; outros usam `c_int`. **Manter literal o exemplo.**
+
+#### Argtypes/restype das funções `SetXxx`
+
+O exemplo oficial **NÃO configura argtypes/restype** para as funções `SetXxx` em `profit_dll.py` — elas usam o default do ctypes (que aceita o callback `WINFUNCTYPE` como argumento). Isso funciona porque ctypes detecta a signature do callback no momento da chamada `dll.SetXxxCallback(my_cb)`. **Não é necessário** configurar `dll.SetTradeCallbackV2.argtypes = [...]`.
+
+> ⚠️ **Q-DRIFT-08 ainda se aplica** às funções de query (`TranslateTrade`, `GetHistoryTrades`, etc.) — apenas `SetXxx` é exceção segura.
+
+#### Refs cruzadas
+
+- Q-DRIFT-05 — bug class "TAssetID expandido em primitivos" nos Noop slots de `DLLInitializeMarketLogin`. Mesma classe agora suspeita nos `SetXxx` (Q-DRIFT-09).
+- Q-DRIFT-06 — refuta Q11-E ("JAMAIS passar None"). Implica que **passar `None` em `SetXxx` não-críticos pode ser MAIS SEGURO que NoopCallback errado**. Validar empiricamente.
+- Q-DRIFT-09 (NEW) — registra hipótese atual sobre access violations no smoke 5.
 
 ---
 

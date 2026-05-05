@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 (Q-DRIFT-07 + Q-DRIFT-08 NOVOS — auditoria manual-first confirmou pelo usuário: SubscribeTicker é PRÉ-REQUISITO de GetHistoryTrades, e argtypes/restype JAMAIS configurados no nosso wrapper)
+**Última atualização:** 2026-05-04 (Q-DRIFT-09 NOVO — smoke 5 falhou com múltiplas Access Violations + 1 Stack Overflow durante `wait_market_connected`; hipótese: signatures dos 14 NoopCallbacks registrados via `SetXxx` divergem do esperado pela DLL — mesma classe de Q-DRIFT-05; refuta parcialmente Q11-E ao sugerir que `None` pode ser mais seguro que NoopCallback errado)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -43,6 +43,7 @@
 | [Q-DRIFT-06](#q-drift-06) | ⚠️ corrected | init | Q11-E "JAMAIS passar None" REFUTADO pelo exemplo oficial — Nelogica passa `None` em 4 dos 8 slots em `DLLInitializeMarketLogin` |
 | [Q-DRIFT-07](#q-drift-07) | ✅ validated | history / subscription | `SubscribeTicker(ticker, exchange)` é PRÉ-REQUISITO de `GetHistoryTrades` — sem subscribe, callback V2 nunca dispara |
 | [Q-DRIFT-08](#q-drift-08) | 🔬 empirical | ctypes / argtypes | argtypes/restype JAMAIS configurados no wrapper; exemplo oficial configura ~30 funções em `profit_dll.py` — sem isso, x64 stdcall pode truncar handles e desalinhar stack |
+| [Q-DRIFT-09](#q-drift-09) | 🔬 empirical → hipótese | callback / signatures | Smoke 5: 14 SetXxxCallback NoopCallback signatures suspeitas → access violations + stack overflow após MARKET_LOGIN_OK; Q11-E refutado parcialmente (passar `None` pode ser MAIS SEGURO que NoopCallback errado) |
 
 ---
 
@@ -797,6 +798,95 @@
 - **Refs:**
   - `profitdll/Exemplo Python/profit_dll.py` L7-101.
   - `docs/qa/AUDIT_REPORTS/dll-full-audit-2026-05-04.md` CRIT-2 + MED-4.
+
+---
+
+## Q-DRIFT-09
+
+- **ID:** Q-DRIFT-09
+- **Status:** 🔬 **empirical → hipótese forte aguardando fix-and-rerun**
+- **Categoria:** callback / signatures (mesma classe de Q-DRIFT-05, agora nos 14 `SetXxx`)
+- **Sintoma:** Smoke 5 (`tests/smoke/test_smoke5_*`) progride normalmente:
+  - DLL carrega OK
+  - `DLLInitializeMarketLogin` retorna `NL_OK`
+  - State callback recebe `(0,0) LOGIN_OK`, `(3,0) MARKET_LOGIN_OK`, `LOGIN_CONNECTED`
+  - Em seguida, durante `wait_market_connected`, processo crasha com **múltiplas Access Violations + 1 Stack Overflow**.
+  - **Importante:** crash NÃO ocorre em `result=4` (`MARKET_CONNECTED`) — ocorre antes, durante o handshake interno onde a DLL começa a invocar callbacks de market data (asset list, daily, etc.).
+- **Causa raiz hipotética:** o squad registra 14 callbacks via `SetXxx` (ver `dllStart()` em `main.py` L745-761) usando `NoopCallback` placeholders. Se a signature de QUALQUER um desses 14 NoopCallbacks divergir da signature canônica esperada pela DLL (extraída do exemplo Nelogica e tabulada em `PROFITDLL_KNOWLEDGE.md` §3.3), quando a DLL invocar o callback ela passa argumentos no stack que ctypes interpreta errado → leitura de memória inválida → Access Violation. Stack Overflow específico sugere recursão acidental por callback que devolve controle errado (talvez `restype` errado faz a DLL re-invocar). **Mesma classe do Q-DRIFT-05 (que afetou os Noop slots de `DLLInitializeMarketLogin`); agora suspeito-se em todos os 14 `SetXxx`.**
+- **Evidência:**
+  - Smoke 5 logs (sessão 2026-05-04): 14 access violations seguidas de 1 stack overflow durante boot.
+  - LOGIN/MARKET_LOGIN succeeded — DLL conseguiu autenticar e estabelecer canal. Crash veio na fase pós-login, exatamente quando DLL começa a empurrar dados para callbacks (asset list é tipicamente o primeiro `SetAssetListCallback`).
+  - Tabela §3.3 de `PROFITDLL_KNOWLEDGE.md` confirma que 5 callbacks usam `TAssetID` por valor (struct legado, mesmo bug class de Q-DRIFT-05), 3 usam `TConnectorAssetIdentifier` por valor, 3 usam `TConnectorAccountIdentifier` por valor — **9 dos 14 são structs por valor**, alta superfície de erro.
+  - Exemplo oficial Nelogica passa `None` em 4 dos 8 slots de `DLLInitializeMarketLogin` sem crash (Q-DRIFT-06), o que sugere que `None` é aceitável como "no-op" pela DLL nos casos onde o exemplo o usa. **Não é confirmado** que `SetXxx(None)` é válido — o exemplo SEMPRE passa um callback real nos 14 `SetXxx`. Validar empiricamente.
+- **Refuta parcialmente Q11-E:** Q11-E (Sentinel §12) dizia "JAMAIS passar None — corrompe SetHistoryTradeCallback". Q-DRIFT-06 já refutou para `DLLInitializeMarketLogin`. Q-DRIFT-09 sugere agora que **passar `None` em `SetXxx` não-críticos pode ser MAIS SEGURO que NoopCallback errado** (porque NoopCallback errado garantidamente crasha quando DLL invoca, enquanto `None` no pior caso é rejeitado com erro retornável OU silenciosamente ignorado). **Validar empiricamente** — não promover ainda a "validated".
+- **Workaround proposto (3 opções, ver §"Recomendação para Dex"):** A) implementar 14 signatures corretas; B) passar `None` em vez de NoopCallback; C) **não registrar `SetXxx` que não usamos** (preferida — exemplo registra todos porque a UI exemplifica todos; data-downloader V1 só precisa de download histórico, então só `SetTradeCallbackV2` + `SetHistoryTradeCallbackV2` + `SetStateCallback` são necessários).
+- **Manual diz:** §3.2 documenta cada `SetXxx` como função pública. Manual NÃO obriga registrar todos — registrar só os que se usa é prática válida (deduzido do silêncio do manual + Q-DRIFT-06 que provou ser permissivo com slots não-usados em `DLLInitializeMarketLogin`).
+- **Data descoberta:** 2026-05-04 (smoke 5 pós Q-DRIFT-05 fix; investigação Nelo).
+- **Aplica a stories:** 1.2 (init / Sentinel §12 violations), 1.7b (smoke), todas que tocam `SetXxxCallback`.
+
+### Recomendação para Dex (paralelo agent)
+
+Três opções para resolver Q-DRIFT-09 — Nelo recomenda **C** com fallback **B**.
+
+#### Opção A — Implementar todas 14 signatures corretas
+
+- **O que fazer:** copiar literalmente as 14 entradas de `PROFITDLL_KNOWLEDGE.md §3.3` para `src/data_downloader/dll/types.py` e registrar cada NoopCallback com a signature exata.
+- **Prós:**
+  - Determinístico — se signatures estão certas, DLL nunca crasha por isso.
+  - Espelha 100% o exemplo oficial.
+  - Permite reaproveitar callbacks reais no futuro (live mode, Sol, etc.) sem mudar lifecycle.
+- **Contras:**
+  - Escala alta — 14 signatures, várias com 9-16 args. Cada erro pequeno (`c_int` vs `c_long`, `c_ubyte` vs `c_int`) pode reintroduzir Q-DRIFT-09.
+  - 5 callbacks com `TAssetID` por valor — alta probabilidade de erro de iniciante (Q-DRIFT-05 já mostrou).
+  - Demora para validar (cada commit = smoke run completo).
+  - **YAGNI** — V1 só precisa de download histórico; 12 dos 14 callbacks são para features (book, ordens, broker accounts) que V1 não usa.
+
+#### Opção B — Passar `None` em vez de NoopCallback
+
+- **O que fazer:** `dll.SetAssetListCallback(None)` para cada um dos 14. Não criar Noop nenhum.
+- **Prós:**
+  - Zero superfície de bug por signature errada.
+  - Simples — uma linha por callback.
+  - Refuta empiricamente Q11-E para `SetXxx` (alavanca Q-DRIFT-06 que já refutou para `DLLInitializeMarketLogin`).
+- **Contras:**
+  - **Não confirmado** que `SetXxx(None)` é aceitável — o exemplo Nelogica SEMPRE passa callback real. Pode ser que `SetXxx` valide `LPVOID != NULL` antes de aceitar, ou pior, aceite `None`, salve `NULL` internamente e crashe quando for invocar.
+  - Mistura de tipo — ctypes pode reclamar (`SetXxx` espera `WINFUNCTYPE(...)`, não `None`); mitigação: `argtypes = [WINFUNCTYPE(...)]` aceita `None` como `NULL` em ctypes (verificado).
+  - Risco médio — vale tentar SE C não for viável.
+
+#### Opção C — Não registrar SetXxxCallback que não usamos (RECOMENDADA pela Nelo)
+
+- **O que fazer:** dos 14 `SetXxx`, **chamar APENAS os necessários para download histórico**:
+  - `SetStateCallback` (já registrado via `DLLInitializeMarketLogin` — não conta como "SetXxx").
+  - `SetHistoryTradeCallbackV2` (CORE — recebe os trades históricos).
+  - `SetTradeCallbackV2` (necessário se a DLL exigir registrar live trade callback antes de `SubscribeTicker`; **Nelo: validar com probe** — exemplo oficial registra; segurança extra).
+  - **Os outros 12 não chamar** — não chamar `SetAssetListCallback`, `SetOfferBookCallbackV2`, `SetOrderCallback`, etc.
+- **Prós:**
+  - **Mínimo de superfície** — só 1-2 NoopCallbacks para revisar (ou nenhum, se `SetTradeCallbackV2` for o callback real).
+  - Alinha com **YAGNI**: V1 = download histórico apenas. Book, ordens, broker accounts, position list = V2+.
+  - Exemplo oficial registra todos porque o REPL `main.py` expõe TODAS as features ao usuário interativo. Nosso CLI download não precisa.
+  - Eliminação completa de Q-DRIFT-09 com mudança mínima de código.
+- **Contras:**
+  - Suposição implícita: DLL não exige `SetXxx` para callbacks não-usados (nunca convida o callback porque a feature não foi acionada). **Manual silencioso aqui** — confirma com smoke run.
+  - Quando V2 (live mode, Sol broadcasting) chegar, adicionar `SetXxx` reais um a um, com signature exata copiada de §3.3.
+
+### Recomendação Nelo (síntese)
+
+> **Implementar Opção C imediatamente** (remover 12 dos 14 `SetXxx`; manter só `SetHistoryTradeCallbackV2` + `SetTradeCallbackV2` se este último for necessário). Smoke 6 deve passar `wait_market_connected` sem access violations.
+>
+> Se Smoke 6 ainda crashar nos 1-2 callbacks restantes, Opção A para esses 1-2 (signature exata de §3.3 — `SetTradeCallbackV2`: `WINFUNCTYPE(None, TConnectorAssetIdentifier, c_size_t, c_uint)`).
+>
+> Opção B (passar `None`) só como **probe diagnóstico** caso A+C não resolvam — comparar comportamento `None` vs Noop-com-signature-correta para esclarecer Q11-E definitivamente.
+>
+> **NÃO** começar pela Opção A para os 14 — desperdício de esforço (12 callbacks são YAGNI) e alta superfície de re-bug.
+
+- **Refs:**
+  - `PROFITDLL_KNOWLEDGE.md` §3.3 — tabela canônica das 14 signatures.
+  - `profitdll/Exemplo Python/main.py` L745-L761 — bloco que registra os 14 (modelo).
+  - Q-DRIFT-05 — bug class "TAssetID expandido em primitivos" (precedente nos Noop slots).
+  - Q-DRIFT-06 — refuta Q11-E para `DLLInitializeMarketLogin`; alavanca para Opção B.
+  - Q11-E — agora **duplamente questionado** (refutado para init em Q-DRIFT-06; refuta parcial para `SetXxx` aqui).
+  - `tests/smoke/` — pasta dos smokes.
+  - `src/data_downloader/dll/wrapper.py` (escopo Dex — bloco `SetXxx` a auditar/reduzir).
 
 ---
 
