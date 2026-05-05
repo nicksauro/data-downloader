@@ -71,14 +71,26 @@ from data_downloader.orchestrator.download_primitive import download_chunk  # no
 # em vez de WDOJ26; janela <= 5 dias (limite empírico do GetHistoryTrades).
 _SMOKE_SYMBOL = "WDOFUT"
 _SMOKE_EXCHANGE = "F"
+
+
 # COUNCIL-37 (Quinn @qa 2026-05-05): experimento 1-DIA para isolar volume gap.
 # Hipótese H-E (queue overflow silencioso) prevê que com janela menor (1 dia
 # → 1 burst de 600-700k trades em vez de 4-day flood), a perda deve diminuir
-# proporcionalmente OU desaparecer. Janela: ontem (04/05/2026 Mon trading
-# day completo) 09:00 → 18:30 BRT (mesmo dia que já temos 307k no parquet
-# de 4-day, esperamos 600-700k aqui).
-_SMOKE_DT_START = datetime(2026, 5, 4, 9, 0, 0)
-_SMOKE_DT_END = datetime(2026, 5, 4, 18, 30, 0)
+# proporcionalmente OU desaparecer.
+#
+# Story 1.7g AC7+T9 (2026-05-05): janela override via env vars
+# ``SMOKE_DT_START`` e ``SMOKE_DT_END`` (formato ISO ``YYYY-MM-DDTHH:MM:SS``)
+# permite re-executar com 5-dia para validar ``queue_dropped == 0`` pós-fix
+# sem editar o script. Default mantido em 1-dia para preservar baseline 1.7d.
+def _parse_dt_env(name: str, default: datetime) -> datetime:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    return datetime.fromisoformat(raw)
+
+
+_SMOKE_DT_START = _parse_dt_env("SMOKE_DT_START", datetime(2026, 5, 4, 9, 0, 0))
+_SMOKE_DT_END = _parse_dt_env("SMOKE_DT_END", datetime(2026, 5, 4, 18, 30, 0))
 
 
 def main() -> int:

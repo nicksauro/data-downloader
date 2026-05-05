@@ -100,6 +100,11 @@ v1.0.0 documentava `2=normal` — errado; o valor real é `ttAgressionBuy`
 | 12 | `OnBehalf`        | on behalf |
 | 13 | `RLP`             | Retail Liquidity Provider (mesa B3) |
 
+**Cross-ref canônico:** `src/data_downloader/storage/schema.py::TRADE_TYPE_NAME`
+(mapping autoritativo). Resolver helper: `resolve_trade_type_name(trade_type_id)`
+retorna `None` para IDs fora de 0..13 — orchestrator aplica fallback
+`f"TradeType#{n}"` antes de gravar (Story 1.7g AC1, schema v1.1.0).
+
 ### 1.3 Justificativas de tipo
 
 | Campo                | Por que esse tipo                                                                 |

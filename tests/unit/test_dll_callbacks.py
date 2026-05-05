@@ -260,6 +260,46 @@ def test_history_trade_callback_v2_swallows_full_silently() -> None:
     assert q.qsize() == 1
 
 
+@pytest.mark.unit
+def test_history_trade_callback_v2_queue_dropped_counter_on_full() -> None:
+    """Story 1.7g (Q-DRIFT-37 / COUNCIL-37): stats["queue_dropped"] incrementa em Full.
+
+    R3 invariant preservada: callback ainda não bloqueia / não lança / não chama DLL.
+    Mas ganhamos visibilidade de drops silenciosos via dict mutável GIL-atômico.
+    """
+    from data_downloader.dll.types import TConnectorAssetIdentifier
+
+    q: Queue[tuple[int, int]] = Queue(maxsize=2)
+    stats: dict[str, int] = {"queue_dropped": 0}
+    cb = make_history_trade_callback_v2(q, stats=stats)
+    asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
+
+    cb(asset, 1, 0)  # OK (qsize=1)
+    cb(asset, 2, 0)  # OK (qsize=2 = maxsize)
+    cb(asset, 3, 0)  # Full — engolido + counter +=1
+    cb(asset, 4, 0)  # Full — engolido + counter +=1
+
+    assert q.qsize() == 2
+    assert stats["queue_dropped"] == 2
+
+
+@pytest.mark.unit
+def test_history_trade_callback_v2_stats_none_backward_compat() -> None:
+    """Sem stats (default), comportamento Story 1.3 mantido — Full engolido sem rastro."""
+    from data_downloader.dll.types import TConnectorAssetIdentifier
+
+    q: Queue[tuple[int, int]] = Queue(maxsize=1)
+    cb = make_history_trade_callback_v2(q)  # stats=None default
+    asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
+
+    # Não levanta — invariante R3 e backward-compat.
+    cb(asset, 1, 0)
+    cb(asset, 2, 0)
+    cb(asset, 3, 0)
+
+    assert q.qsize() == 1
+
+
 # =====================================================================
 # Story 1.3 — Progress callback
 # =====================================================================

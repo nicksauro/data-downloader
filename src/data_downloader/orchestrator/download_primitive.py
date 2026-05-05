@@ -85,9 +85,25 @@ log: structlog.stdlib.BoundLogger = structlog.get_logger(
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 1800
 """Timeout default — 1800s (30 min). Manual §3.1 + Q02-E (99% reconnect)."""
 
-TRADE_QUEUE_MAXSIZE: Final[int] = 100_000
-"""Maxsize da fila de trade handles. Finding Pyro 1.4.5: 10k não basta em
-picos de download (~100k trades/s sustentado). 100k dá ~1s de buffer."""
+TRADE_QUEUE_MAXSIZE: Final[int] = 2_000_000
+"""Maxsize da fila de trade handles.
+
+Histórico:
+- Story 1.3: 10_000 (insuficiente — Pyro 1.4.5)
+- Story 1.3 final: 100_000 (~1s de buffer @ 100k trades/s)
+- Story 1.7g (COUNCIL-37 Quinn / H-E): 2_000_000.
+
+Razão do bump: smoke 4-day mostrou perda silenciosa de ~71% (218k trades)
+porque DLL despeja burst histórico em ~10 min antes do ``IngestorThread``
+drenar. Com 100k items, ``put_nowait`` saturava em ~10s e ``Full`` era
+engolido em ``callbacks.py::_history_cb`` (R3 — callback NÃO BLOQUEIA).
+2M items ≈ 32 MB RAM (par de int64) — folga confortável para 5 dias úteis
+de WDOFUT a 7-10k trades/s sustentado em burst.
+
+ADR-020 (Volume Completeness): bump é Nível 1 (capacity); contador
+``queue_dropped`` em ``callback_stats`` é Nível 4 (detecção). Se
+``queue_dropped > 0`` em smoke 5-day pós-fix, escalar para 1.7h
+(chunking automático — Nível 3 replay)."""
 
 PROGRESS_QUEUE_MAXSIZE: Final[int] = 1000
 """Maxsize da fila de progresso. Progresso é raro (1 evento por % aprox)."""
@@ -208,6 +224,14 @@ class ChunkResult:
     pulado (DLL pode tolerar tickers já subscritos retornando código não-zero
     mas trades ainda chegam — caller usa este flag para forensics).
     Story 1.7b-followup: subscribe é pré-requisito (autoridade ProfitDLL)."""
+
+    queue_dropped: int = 0
+    """# de eventos descartados por ``queue.Full`` no ``_history_cb`` da
+    ``trade_queue``. Story 1.7g / COUNCIL-37 (Quinn / H-E): callback engole
+    drops para respeitar R3 (não bloquear ConnectorThread); este contador é
+    incrementado in-callback (GIL-atômico). ``0`` = nenhum drop = volume
+    completo entregue do callback ao IngestorThread. ``> 0`` viola ADR-020
+    invariant (volume completeness) — escala para 1.7h (chunking)."""
 
     progress_history_summary: str = field(default="")
 
@@ -639,7 +663,12 @@ def download_chunk(
 
     # Factories já appendam em callbacks._cb_refs (anti-GC global). Wrapper
     # também guarda em self._cb_refs como cinto-e-suspensório.
-    history_cb: Any = make_history_trade_callback_v2(trade_queue)
+    # Story 1.7g (Q-DRIFT-37 / COUNCIL-37): contador de overflow silencioso
+    # da trade_queue. O callback incrementa em ``queue.Full``; lemos após
+    # join() das threads (sem race — stop_event sinalizado). ADR-020 Nível 4
+    # detection: se ``queue_dropped > 0``, escala para 1.7h (chunking).
+    callback_stats: dict[str, int] = {"queue_dropped": 0}
+    history_cb: Any = make_history_trade_callback_v2(trade_queue, stats=callback_stats)
     progress_cb: Any = make_progress_callback(progress_queue)
 
     # Formato exato manual §3.1 L1750 — strftime determinístico.
@@ -773,6 +802,7 @@ def download_chunk(
         last_packet_seen=ingestor.last_packet_seen,
         nl_error_code=nl_code,
         subscribed=subscribed,
+        queue_dropped=callback_stats["queue_dropped"],
     )
 
     log.info(
@@ -789,6 +819,10 @@ def download_chunk(
         translate_nl_errors=ingestor.translate_nl_errors,
         translate_exceptions=ingestor.translate_exceptions,
         trade_edits=ingestor.trade_edits,
+        # Story 1.7g (Q-DRIFT-37 / ADR-020 Nível 4): drops silenciosos da
+        # ``trade_queue`` no callback ConnectorThread. > 0 = volume incompleto
+        # entregue ao IngestorThread => escalar 1.7h (chunking automático).
+        queue_dropped=callback_stats["queue_dropped"],
         progress_99_reconnect=monitor.reconnect_99_detected,
         last_packet_seen=ingestor.last_packet_seen,
         subscribed=subscribed,

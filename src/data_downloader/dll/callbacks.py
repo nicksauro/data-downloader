@@ -175,7 +175,10 @@ def make_noop_callback(funtype: type) -> Any:
 # =====================================================================
 
 
-def make_history_trade_callback_v2(trade_queue: Queue[tuple[int, int]]) -> Any:
+def make_history_trade_callback_v2(
+    trade_queue: Queue[tuple[int, int]],
+    stats: dict[str, int] | None = None,
+) -> Any:
     """Cria o callback V2 de trades históricos (Story 1.3 / COUNCIL-03).
 
     O callback faz EXCLUSIVAMENTE ``trade_queue.put_nowait((handle, flags))``.
@@ -184,15 +187,18 @@ def make_history_trade_callback_v2(trade_queue: Queue[tuple[int, int]]) -> Any:
     NUNCA dentro do callback (lei R3 / manual §4 L4382 / Q06-V).
 
     Política de overflow: ``put_nowait`` raises ``queue.Full`` em saturação.
-    Callback engole silenciosamente (não pode logar/lançar — bloquearia a
-    ConnectorThread). Detecção via metric externa em IngestorThread.
-    O design real para back-pressure (resposta H4 Nelo em
-    ``OPEN_QUESTIONS_RESPONSES.md`` Q1) é "fila grande + drain rápido em
-    IngestorThread" — Story 1.3 usa ``maxsize=100_000`` (finding Pyro 1.4.5).
+    Callback engole o evento (não pode logar/lançar — bloquearia a
+    ConnectorThread, lei R3). Story 1.7g (COUNCIL-37 Quinn / H-E) introduz
+    detecção via ``stats["queue_dropped"]``: incremento de int em dict é
+    GIL-atômico (single bytecode), respeitando R3, e dá visibilidade do
+    drop silencioso (Q-DRIFT-37 / ADR-020 Nível 4 detection).
 
     Args:
         trade_queue: ``Queue[tuple[int, int]]`` consumida por
             ``download_chunk`` IngestorThread. Tuple = ``(handle, flags)``.
+        stats: dict mutável opcional. Se fornecido, ``stats["queue_dropped"]``
+            é incrementado a cada ``queue.Full``. Caller deve inicializar
+            a chave com 0. ``None`` = backward-compat (sem métrica).
 
     Returns:
         Objeto ``WINFUNCTYPE``-wrapped pronto para passar a
@@ -201,19 +207,25 @@ def make_history_trade_callback_v2(trade_queue: Queue[tuple[int, int]]) -> Any:
 
     Examples:
         >>> from queue import Queue
-        >>> q: Queue[tuple[int, int]] = Queue(maxsize=100_000)
-        >>> cb = make_history_trade_callback_v2(q)
+        >>> q: Queue[tuple[int, int]] = Queue(maxsize=2_000_000)
+        >>> stats = {"queue_dropped": 0}
+        >>> cb = make_history_trade_callback_v2(q, stats=stats)
         >>> # Pass cb to dll.set_history_trade_callback_v2(cb).
+        >>> # Após download: stats["queue_dropped"] tem o # de overflows.
     """
 
     def _history_cb(_asset: object, p_trade: int, flags: int) -> None:
-        # CRITICAL — apenas put_nowait. Não adicionar NADA aqui (R3/INV-1).
-        # ``_asset`` é descartado — IngestorThread já conhece symbol via
-        # contexto do download_chunk (ticker/exchange validados upfront).
-        # ``p_trade`` é handle opaco (``c_size_t``); int(...) força python int
-        # estável para uso na fila.
-        with contextlib.suppress(Full):
+        # CRITICAL — caminho R3/INV-1. ``_asset`` é descartado — IngestorThread
+        # já conhece symbol via contexto do download_chunk. ``p_trade`` é handle
+        # opaco (``c_size_t``); int(...) força python int estável para a fila.
+        try:
             trade_queue.put_nowait((int(p_trade), int(flags)))
+        except Full:
+            # Story 1.7g (Q-DRIFT-37): contar drops silenciosos. Increment de
+            # int em dict é single-bytecode GIL-atômico — não bloqueia
+            # ConnectorThread. Sem stats, comportamento original (suppress).
+            if stats is not None:
+                stats["queue_dropped"] += 1
 
     wrapped: Any = THistoryTradeCallbackV2(_history_cb)
     _cb_refs.append(wrapped)
