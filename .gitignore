@@ -120,6 +120,14 @@ logs/
 *.swp
 *~
 
+# Helpers transitórios de smoke/qa runs (path-of-day txt holders)
+.smoke-*-log-path.txt
+.qa-*-log-path.txt
+
+# Bench results gerados com working tree dirty (não-reprodutíveis — não auditáveis)
+benchmarks/results/*-dirty.json
+benchmarks/results/baselines_v1_mock/*-dirty.json
+
 # -----------------------------------------------------------------------------
 # IDE / editor
 # -----------------------------------------------------------------------------
