@@ -427,10 +427,15 @@ dll.SetEnabledLogToDebug(0)
 
 # 5. Construir SOMENTE callbacks reais necessários — exemplo oficial Nelogica
 #    `profitdll/Exemplo Python/main.py` L742-743 passa `None` em 4 dos 8 slots
-#    de DLLInitializeMarketLogin tranquilamente. (Q-DRIFT-06 refuta Q11-E.)
+#    de DLLInitializeMarketLogin tranquilamente. (Q-DRIFT-06 refuta Q11-E por
+#    leitura do exemplo; Q-DRIFT-11 confirma empiricamente via probe — wrapper
+#    com NoopCallback nestes mesmos slots trava em result=1 por 600s+, probe
+#    com None conecta em 1.82–2.43s.)
 state_cb = register_state_callback(state_queue)  # appended to _cb_refs
 
 # 6. Init seguindo EXEMPLO OFICIAL — None nos slots não-usados
+#    Verified by probe 2026-05-04 (`scripts/probe_init.py` L222-256 — conecta
+#    em 1.82s + 2.43s passando None nos slots 4/6/7/8 abaixo).
 ret = dll.DLLInitializeMarketLogin(
     c_wchar_p(key), c_wchar_p(user), c_wchar_p(pwd),
     state_cb,
@@ -442,9 +447,11 @@ ret = dll.DLLInitializeMarketLogin(
     None,  # slot 10 — progress
     None,  # slot 11 — tinyBook
 )
-# IMPORTANTE: se quiser usar Noop em vez de None, signatures DEVEM espelhar EXATAMENTE
+# IMPORTANTE: NÃO usar Noop nestes slots (Q-DRIFT-11 — bloqueia ConnectorThread
+# durante o handshake do MARKET_DATA, impede transição (2,1) → (2,4)).
+# Se mesmo assim quiser Noop em algum slot, signatures DEVEM espelhar EXATAMENTE
 # `Exemplo Python/main.py` (TAssetID por valor, NÃO expandir em c_wchar_p × 2 + c_int).
-# Ver Q-DRIFT-05 para detalhes.
+# Ver Q-DRIFT-05 + Q-DRIFT-11 para detalhes.
 if ret < 0:
     raise DLLInitError(ret, *decode_nl_error(ret))
 

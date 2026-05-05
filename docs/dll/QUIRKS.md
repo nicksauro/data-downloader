@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 (Q-DRIFT-10 NOVO — smoke 6 commit `7badeea` confirma `MARKET_DATA` trava em `(2,1)` MARKET_CONNECTING após Q-DRIFT-05 fix; audit linha-por-linha vs `dllStart()` (main.py L729-764) revela 3 divergências do exemplo oficial; hipótese primária: substituir Noop por `None` nos slots 5/7/8/9 onde exemplo passa `None` literal — alavanca Q-DRIFT-06 já validado em fonte primária)
+**Última atualização:** 2026-05-04 noite (Q-DRIFT-11 NOVO + Q11-E REFUTADA empiricamente — pós-mortem attempt 7 dispatch Quinn+Nelo+Aria. Probe `scripts/probe_init.py` conecta em 1.82s + 2.43s passando `None` nos slots 4/6/7/8 → refuta o folclore Sentinel §12 ("JAMAIS None") com evidência direta, não apenas por leitura do exemplo oficial. Wrapper com NoopCallback nos mesmos slots trava em `result=1` por 600s+ → Q-DRIFT-11 hipotetiza bloqueio da ConnectorThread interna pelos trampolines ctypes pesados. Validação A/B pendente Story 1.7c.)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -27,7 +27,7 @@
 | [Q08-E](#q08-e) | 🔬 empirical | lifecycle | DLL não-idempotente em init→finalize→init na mesma sessão Python |
 | [Q09-AMB](#q09-amb) | ⚠️ ambiguous | lifecycle | `DLLFinalize` (manual) vs `Finalize` (whale-detector) |
 | [Q10-AMB](#q10-amb) | ⚠️ ambiguous | state | `MARKET_CONNECTED=4` (manual) vs `MARKET_WAITING=2` (prática) |
-| [Q11-E](#q11-e) | 🔬 empirical | init | Slots `None` no DLLInitialize corrompem `SetHistoryTradeCallback` posterior |
+| [Q11-E](#q11-e) | ⚠️ REFUTADA (2026-05-04) | init | "JAMAIS None nos slots" — folclore Sentinel §12 refutado por probe empírico (1.82s + 2.43s) |
 | [Q12-E](#q12-e) | 🔬 empirical | history | Chunk size adaptativo: WDO=5d, WIN=1d funciona |
 | [Q13-V](#q13-v) | ✅ validated | api | Funções V1 obsoletas — usar V2 sempre que existir |
 | [Q14-E](#q14-e) | 🔬 empirical | metadata | `GetAgentName` requer `GetAgentNameLength` PRIMEIRO |
@@ -45,6 +45,7 @@
 | [Q-DRIFT-08](#q-drift-08) | 🔬 empirical | ctypes / argtypes | argtypes/restype JAMAIS configurados no wrapper; exemplo oficial configura ~30 funções em `profit_dll.py` — sem isso, x64 stdcall pode truncar handles e desalinhar stack |
 | [Q-DRIFT-09](#q-drift-09) | 🔬 empirical → hipótese | callback / signatures | Smoke 5: 14 SetXxxCallback NoopCallback signatures suspeitas → access violations + stack overflow após MARKET_LOGIN_OK; Q11-E refutado parcialmente (passar `None` pode ser MAIS SEGURO que NoopCallback errado) |
 | [Q-DRIFT-10](#q-drift-10) | 🔬 empirical → hipótese forte | init / divergência exemplo | Smoke 6 (commit `7badeea`): `MARKET_DATA` trava em `(2,1)` MARKET_CONNECTING. Audit linha-por-linha vs `dllStart()` (main.py L729-764) revela 3 divergências do exemplo oficial: (a) wrapper passa **7 NoopCallbacks** onde exemplo passa **`None` em 4 slots**; (b) wrapper chama `SetEnabledLogToDebug(0)` ANTES do init (exemplo NÃO chama); (c) wrapper SKIPA os 14 `SetXxxCallback` que exemplo chama ANTES de `wait_login`. Hipótese primária: NoopCallback nos slots 5/7/8/9 onde exemplo usa `None` — DLL pode validar callback no handshake (não só no fire) e signatures Noop divergentes corrompem state machine antes do `result=4`. |
+| [Q-DRIFT-11](#q-drift-11) | 🧪 HIPÓTESE — pendente Story 1.7c | init / threading | NoopCallback nos slots não usados de `DLLInitializeMarketLogin` pode bloquear ConnectorThread interna durante handshake. Probe (None nos slots) conecta em 1.82–2.43s; wrapper (NoopCallback) trava em `result=1` por 600s+. Mecanismo proposto: trampoline ctypes pesado (TAssetID-by-value, TDailyCallback 19 args) atrasa/impede despacho de `(MARKET_DATA, 4)`. Recomendação canônica: `None` literal nos slots 4/6/7/8 (espelha exemplo Nelogica). |
 
 ---
 
@@ -240,23 +241,56 @@
 
 ## Q11-E
 
-- **ID:** Q11-E (Sentinel §12) ⚠️ **SUPERSEDED por [Q-DRIFT-06](#q-drift-06) (2026-05-04)**
-- **Status:** 🔬 empirical → ⚠️ REFUTADO em 2026-05-04. Mantido aqui pelo histórico, mas o exemplo oficial Nelogica (`main.py` L742) passa `None` em 4 dos 8 slots tranquilamente. Provável causa do bug Sentinel §12 era signatures incorretas (Q-DRIFT-05), não `None`.
+- **ID:** Q11-E (Sentinel §12) ⚠️ **REFUTADA em 2026-05-04** — superseded por [Q-DRIFT-06](#q-drift-06) (leitura do exemplo) e confirmada por evidência empírica direta em [Q-DRIFT-11](#q-drift-11) (probe).
+- **Status:** 🔬 empirical → ⚠️ **REFUTADA empiricamente em 2026-05-04 noite**. Mantida nesta entrada pelo histórico — NÃO seguir esta regra. Exemplo oficial Nelogica (`main.py` L742-743) passa `None` em 4 dos 8 slots; probe `scripts/probe_init.py` confirma conexão em 1.82s + 2.43s.
 - **Categoria:** init
-- **Sintoma:** `DLLInitializeMarketLogin` é chamado com `None` em alguns dos 11 callback slots opcionais (ex: passar `None` em `histTrade` porque a story atual não usa histórico). Init **retorna sucesso**. Story posterior chama `SetHistoryTradeCallback(real_callback)` — **callback nunca dispara**, sem erro reportado.
-- **Causa raiz:** DLL provavelmente armazena os ponteiros do init internamente em uma estrutura/array; passar `None` (NULL ptr) corrompe um índice e o `Set*Callback` posterior escreve no slot errado OU é silenciosamente ignorado.
-- **Evidência:** Sentinel §12 — documentado após semanas debugando "histórico não chega". Solução foi sempre passar callback (mesmo no-op) em todos os 11 slots.
-- **Workaround:** definir `NoopCallback` por signature em `dll/callbacks.py`:
+- **Sintoma original (2025):** `DLLInitializeMarketLogin` é chamado com `None` em alguns dos 11 callback slots opcionais (ex: passar `None` em `histTrade` porque a story atual não usa histórico). Init **retorna sucesso**. Story posterior chama `SetHistoryTradeCallback(real_callback)` — **callback nunca dispara**, sem erro reportado.
+- **Causa raiz hipotetizada (2025, refutada):** DLL provavelmente armazena os ponteiros do init internamente em uma estrutura/array; passar `None` (NULL ptr) corrompe um índice e o `Set*Callback` posterior escreve no slot errado OU é silenciosamente ignorado.
+- **Evidência original:** Sentinel §12 — documentado após semanas debugando "histórico não chega". Solução adotada à época: sempre passar callback (mesmo no-op) em todos os 11 slots.
+- **Workaround original (NÃO seguir):** definir `NoopCallback` por signature em `dll/callbacks.py`:
   ```python
   def make_noop_callback(funtype):
       cb = funtype(lambda *args: None)  # signature compatível, no-op
       _cb_refs.append(cb)
       return cb
   ```
-  Sempre passar `NoopCallback` em slots não usados. **JAMAIS** `None`. Story 1.2 AC2.
+  ~~Sempre passar `NoopCallback` em slots não usados. **JAMAIS** `None`. Story 1.2 AC2.~~ **REVOGADO** — ver "Status final" abaixo.
 - **Manual diz:** silencioso (lista os args como obrigatórios mas não diz que `None` corrompe).
 - **Data descoberta:** ~2025 (Sentinel).
-- **Aplica a stories:** 1.2 (AC2 + Task 4 NoopCallback factory), 1.3 (precisa que 1.2 não tenha passado None).
+- **Data REFUTADA:** 2026-05-04 noite (probe pós-mortem attempt 7).
+- **Aplica a stories:** 1.2 (AC2 — precisa relaxar regra), 1.3, 1.7b, 1.7c (bisseção A/B confirmatória).
+
+### Status final (2026-05-04 — refutação empírica direta)
+
+**Veredito:** REFUTADA com evidência empírica de primeira ordem (probe ad-hoc), não apenas por leitura do exemplo oficial.
+
+**Evidência decisiva:**
+
+| Cenário | Slots 4/6/7/8 | Resultado | Tempo |
+|---------|---------------|-----------|-------|
+| Probe (Quinn ~18:50 BRT) | `None` literal | MARKET_CONNECTED ✅ | 1.82s |
+| Probe pós-mortem (22:10 BRT) | `None` literal | MARKET_CONNECTED ✅ | 2.43s |
+| Wrapper attempt 7 (21:52 BRT) | `NoopCallback` | trava em `result=1` ❌ | 600s+ (timeout 2× + abort) |
+| Exemplo oficial Nelogica `main.py:742-743` | `None` literal | (referência canônica) | — |
+
+**Evidência completa:** [`docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md`](../qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md) seção "Análise Pós-Mortem".
+
+**Probe canônico:** [`scripts/probe_init.py`](../../scripts/probe_init.py) L222-251 (passa `None` em slots 4/6/7/8 espelhando `main.py` L742-743 e conecta determinísticamente).
+
+**Diagnóstico retrospectivo:** o bug Sentinel §12 ("histórico não chega") provavelmente combinava (a) signatures Noop incorretas — Q-DRIFT-05; e/ou (b) ausência de `SubscribeTicker` antes de `GetHistoryTrades` — Q-DRIFT-07; e/ou (c) registro V1 sendo silenciosamente ignorado em favor de V2 — Q13-V. A culpa foi atribuída erroneamente ao `None` no slot.
+
+**Lição aprendida (canônica):**
+
+> **NÃO inventar quirks sem evidência empírica direta.** Q11-E veio de folclore (Sentinel §12, ~2025) sem reprodutor isolado. A regra "JAMAIS None" foi propagada por 12+ meses, custou Story 1.2 implementando `make_noop_callback` factory, e provavelmente é a causa-raiz do timeout de Q-DRIFT-02/Q-DRIFT-10 (ver Q-DRIFT-11). **Toda nova quirk DEVE ter probe minimalista reprodutor antes de virar regra de wrapper.**
+
+**Ação canônica para Dex:** seguir Q-DRIFT-06 + Q-DRIFT-10 + Q-DRIFT-11 — passar `None` literal nos slots 4/6/7/8 do `DLLInitializeMarketLogin` (espelha `main.py` L742-743). NÃO invocar `make_noop_callback` para esses slots.
+
+**Refs:**
+- `scripts/probe_init.py` L222-256 (probe minimalista — fonte canônica de uso correto).
+- `profitdll/Exemplo Python/main.py` L742-743 (exemplo oficial Nelogica).
+- `docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md` "Análise Pós-Mortem" (refutação empírica direta).
+- [Q-DRIFT-06](#q-drift-06) (refutação por leitura do exemplo).
+- [Q-DRIFT-11](#q-drift-11) (nova hipótese — NoopCallback bloqueia ConnectorThread).
 
 ---
 
@@ -1018,6 +1052,64 @@ ret: int = self._dll.DLLInitializeMarketLogin(
   - `src/data_downloader/dll/wrapper.py:472-667` (`initialize_market_only`).
   - `src/data_downloader/dll/callbacks.py:make_noop_callback` (factory a manter — uso reduzido a 3 slots).
   - Q-DRIFT-02 (sintoma original `(2,1)`), Q-DRIFT-05 (signatures Noop fixadas), Q-DRIFT-06 (refuta Q11-E — alavanca para `None`), Q-DRIFT-08 (argtypes), Q-DRIFT-09 (não registrar 14 SetXxx).
+
+---
+
+## Q-DRIFT-11
+
+- **ID:** Q-DRIFT-11
+- **Status:** 🧪 **HIPÓTESE — pendente confirmação Story 1.7c (bisseção A/B)**
+- **Categoria:** init / threading / callback dispatch
+- **Título:** NoopCallback em slots não usados de `DLLInitializeMarketLogin` pode bloquear a ConnectorThread interna durante o handshake do MARKET_DATA, impedindo a transição `(2,1) → (2,4)`.
+- **Sintoma:** Wrapper de produção (`src/data_downloader/dll/wrapper.py:initialize_market_only`, commit `0f76a0f`) registra `NoopCallback` nos 7 slots não-state de `DLLInitializeMarketLogin`. State callback recebe `LOGIN_OK (0,0)` + `MARKET_LOGIN_OK (3,0)` mas o canal `MARKET_DATA` fica em `(2,1)` MARKET_CONNECTING por **600s+** sem evoluir para `(2,4)`. Já confirmado em attempts 4-C, 7 (multiple runs, log `docs/qa/SMOKE_EVIDENCE/logs/smoke1-attempt7-20260504T215148Z.log`).
+- **Evidência indireta (forte):** Probe minimalista [`scripts/probe_init.py`](../../scripts/probe_init.py) — mesmo `.env`, mesma DLL, mesmo horário noturno (22:10 BRT, 28min após attempt 7 falhar) — passa `None` em slots 4/6/7/8 (espelhando `main.py` L742-743) e **conecta em 2.43s**. Run anterior do probe (~18:50 BRT, Quinn) conectou em **1.82s**. Única variável entre wrapper (falha) e probe (sucesso) é o caminho de código:
+
+  | Variante | Slots 4/6/7/8 | Resultado | Tempo |
+  |----------|---------------|-----------|-------|
+  | Wrapper attempt 7 | NoopCallback (signatures Q-DRIFT-05-corretas) | trava `(2,1)` | 600s+ |
+  | Probe (Quinn) | `None` literal | `(2,4)` ✅ | 1.82s |
+  | Probe pós-mortem | `None` literal | `(2,4)` ✅ | 2.43s |
+  | Exemplo Nelogica `main.py` L742-743 | `None` literal (4 slots) | (referência canônica) | — |
+
+- **Mecanismo proposto (Aria, 2026-05-04):** A `ConnectorThread` interna da DLL invoca um ou mais NoopCallback **cedo no handshake do market data** (provavelmente progress / tinyBook / daily snapshot disparam ANTES de `MARKET_CONNECTED`). O trampoline ctypes pesado dos slots não usados — em particular:
+  - **Slot 4 (newTradeCallback / `TTradeCallback`):** TAssetID-by-value (struct legado, 3 fields) + 9 args = ~10 args.
+  - **Slot 6 (newDailyCallback / `TDailyCallback`):** **19 args** com TAssetID-by-value + 18 doubles/ints.
+  - **Slot 7 (priceBookCallback / `TPriceBookCallback`):** TAssetID-by-value + 8 args.
+  - **Slot 8 (offerBookCallback / `TOfferBookCallback`):** TAssetID-by-value + 11 args.
+
+  ...consome cycles do dispatch por struct-by-value unmarshalling (mesmo o handler Python sendo no-op), atrasa ou serializa os despachos posteriores e **impede a `ConnectorThread` de sinalizar `(2,4)` dentro da janela de tolerância interna do servidor Nelogica**. Quando a DLL recebe `None` (NULL ptr), o dispatcher provavelmente faz early-return (`if (cb == NULL) return;`) — zero overhead — e a transição `(2,1) → (2,4)` flui em <2s.
+
+  Hipótese alternativa (menos provável mas registrada): o validador de signatures interno da Nelogica detecta divergência por algum heurístico (tamanho de stack frame, hash de signature) mesmo com signatures Q-DRIFT-05-corretas, e bloqueia silenciosamente. Improvável porque Q-DRIFT-05 fixou as signatures espelhando `main.py` L195/L243/L324/L336/L346 (TAssetID por valor) — mas plausível como segunda ordem.
+
+- **Slots envolvidos:** 4 (newTradeCallback), 6 (newHistoryCallback), 7 (priceBookCallback), 8 (offerBookCallback). Slots 5 (daily), 9 (progress), 10 (tinyBook) — exemplo passa REAL nestes; wrapper passa Noop com signature correta — Q-DRIFT-11 NÃO acusa estes (ainda).
+
+- **Recomendação canônica (alavanca Q-DRIFT-06 + evidência direta deste quirk):** passar `None` literal nos slots 4/6/7/8 de `DLLInitializeMarketLogin`, espelhando exatamente `profitdll/Exemplo Python/main.py` L742-743 e o probe `scripts/probe_init.py` L239-251. NÃO usar `make_noop_callback` nestes slots. Mantém Noop apenas em 5/9/10 (daily/progress/tinyBook) — onde exemplo passa callback real e Q-DRIFT-05 já fixou as signatures.
+
+- **Validação pendente (Story 1.7c — Dex):** bisseção A/B controlada para confirmar Q-DRIFT-11 vs hipóteses alternativas:
+  1. **Variante A (`minimal_handshake=True`):** espelho exato do probe — `None` nos slots 4/6/7/8, sem `SetEnabledLogToDebug(0)` pré-init, sem 14 `SetXxxCallback`. Esperado: conectar `<5s`.
+  2. **Variante B (Noop+`SetEnabledLogToDebug` removido):** isolar se `SetEnabledLogToDebug(0)` (causa-raiz #2 candidata, ver attempt 7 pós-mortem) é parte do problema.
+  3. **Variante C (None+`SetEnabledLogToDebug` mantido):** confirmar se o offending isolado é `None`-vs-Noop (Q-DRIFT-11) ou `SetEnabledLogToDebug` pré-init.
+  4. Critério de confirmação Q-DRIFT-11: A+C conectam <5s, B trava — confirma Noop como bloqueante. Caso contrário, refinar hipótese.
+
+- **Causas-raiz alternativas (rastreadas — NÃO descartadas até bisseção):**
+  - **#2 (Nelo):** `SetEnabledLogToDebug(0)` chamado entre `WinDLL` e `DLLInitializeMarketLogin` (`wrapper.py:579`). Probe NÃO chama; exemplo oficial NÃO chama. Custo de validar: trivial (comentar 1 linha).
+  - **#3 (Nelo, fraca):** `_configure_dll_signatures()` itera 30+ funções via `getattr(self._dll, name)` antes do init — pode forçar resolução lazy de símbolos de modo que interage com inicialização interna. Probe não toca em nenhum símbolo até `DLLInitializeMarketLogin`.
+
+- **Manual diz:** silencioso. Manual pp.22-23 lista os 11 args de `DLLInitializeMarketLogin` SEM marcar quais são opcionais. Manual p.74 diz "callbacks obrigatórios" — mas exemplo oficial L742-743 passa `None` em 4 slots e funciona. **Exemplo prevalece como fonte canônica de uso Python** (já catalogado em Q-DRIFT-06).
+
+- **Data descoberta:** 2026-05-04 noite (pós-mortem attempt 7 — Quinn dispatch + Nelo + Aria mini-council, 22:10–22:13 BRT).
+- **Data validation:** PENDENTE Story 1.7c.
+- **Aplica a stories:** 1.2 (init wrapper — refatorar para `None` nos slots 4/6/7/8), 1.7b (smoke MVP gate — destravar após confirmação 1.7c), **1.7c (bisseção A/B confirmatória — NOVA)**, 1.3 (download depende de MARKET_CONNECTED).
+
+- **Refs:**
+  - `scripts/probe_init.py` L222-256 (probe minimalista — fonte canônica de uso correto, conecta 1.82–2.43s).
+  - `profitdll/Exemplo Python/main.py` L742-743 (chamada oficial Nelogica — referência primária).
+  - `docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md` (evidência completa pós-mortem).
+  - `docs/qa/SMOKE_EVIDENCE/logs/smoke1-attempt7-20260504T215148Z.log` (wrapper falha — 383 linhas).
+  - `docs/qa/SMOKE_EVIDENCE/logs/probe-discriminante-20260504T221002Z.log` (probe sucesso — discriminante).
+  - `src/data_downloader/dll/wrapper.py:472-667` (`initialize_market_only` — escopo de mudança).
+  - `src/data_downloader/dll/callbacks.py:make_noop_callback` (factory que deve deixar de ser invocada para slots 4/6/7/8).
+  - Q11-E (folclore refutado — origem do erro), Q-DRIFT-02 (sintoma original `(2,1)`), Q-DRIFT-05 (signatures Noop fixadas — não suficiente), Q-DRIFT-06 (refuta Q11-E por leitura do exemplo), Q-DRIFT-10 (audit linha-por-linha que apontou divergência).
 
 ---
 
