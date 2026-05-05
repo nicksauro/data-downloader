@@ -4,15 +4,15 @@
 **Fonte primária:** `Manual - ProfitDLL pt_br.pdf` (extraído em `manual_profitdll.txt`, 4452 linhas)
 **Fontes secundárias:** `profitdll/Exemplo Python/main.py` (1274L) · `profit_dll.py` (signatures) · `profitTypes.py` (structs/enums)
 **Validação empírica:** whale-detector v2 (live mode 2026-03-09) · Sentinel §12
-**Última atualização:** 2026-05-04 (auditoria Nelo — adicionados §2.7 SubscribeTicker pré-requisito + §2.8 argtypes/restype canônicos + §3.3 SetXxxCallback signatures canônicas pós-smoke-5 access violations)
+**Última atualização:** 2026-05-05 (council Sol Story 1.7g — Quick Reference expandida 5→8 regras: #6 (janela vs volume real), #7 (NUNCA confiar em LAST_PACKET cego), #8 (NL_NOT_FOUND em GetAgentName é semântico). Cross-ref a `docs/INVARIANTS.md` I1-I6. Trigger: Q-DRIFT-36 (writer descarta colunas) + Q-DRIFT-37 (volume gap 70-80%) — ambos P0 release blockers.)
 
 > **Regra de uso:** Este documento é a referência canônica do squad data-downloader. Toda afirmação aqui referencia seção/linha do manual OU está marcada como `[empírico]` / `[ambíguo]` com link ao quirk em `QUIRKS.md`. Quando manual e prática divergem, divergência é registrada — nunca escondida.
 
 ---
 
-## ⚡ Quick Reference Canonical (top 5 do-and-don't)
+## ⚡ Quick Reference Canonical (top 8 do-and-don't)
 
-Auditoria 2026-05-05 (council Sol — `docs/decisions/COUNCIL-35-Sol-documentacao-2026-05-05.md`) consolidou as seguintes regras de ouro a partir da cadeia Q-DRIFT-31..35:
+Auditoria 2026-05-05 (council Sol — `docs/decisions/COUNCIL-35-Sol-documentacao-2026-05-05.md` + `docs/decisions/COUNCIL-40-Sol-invariantes-2026-05-05.md`) consolidou as seguintes regras de ouro a partir da cadeia Q-DRIFT-31..37:
 
 | # | DO ✅ | DON'T ❌ | Ref |
 |---|-------|----------|-----|
@@ -21,10 +21,15 @@ Auditoria 2026-05-05 (council Sol — `docs/decisions/COUNCIL-35-Sol-documentaca
 | 3 | **Subscribe sempre antes de GetHistory:** `SubscribeTicker(symbol, exchange)` → `SetHistoryTradeCallbackV2` → `GetHistoryTrades` → `UnsubscribeTicker` | NÃO chamar `GetHistoryTrades` sem `SubscribeTicker` prévio (autoridade Nelogica direta) — callback V2 nunca dispara mesmo com `NL_OK` | [Q-DRIFT-07](./QUIRKS.md#q-drift-07), §2.7 |
 | 4 | **Init slots:** passar `None` literal nos 4 slots não usados de `DLLInitializeMarketLogin` (4=trade, 6=histTrade, 7=priceBook, 8=offerBook); `None` nos 4 + REAL nos 3 (5=daily, 9=progress, 10=tinyBook). Espelha `main.py` L742-743 | NÃO usar `NoopCallback` em slots não usados — bloqueia ConnectorThread durante handshake. NÃO passar `None` em slots 5/9/10 — DLL espera ack do snapshot inicial e trava em `(2,1)` | [Q11-E REFUTED](./QUIRKS.md#q11-e), [Q-DRIFT-06](./QUIRKS.md#q-drift-06), [Q-DRIFT-11](./QUIRKS.md#q-drift-11), [Q-DRIFT-12](./QUIRKS.md#q-drift-12) |
 | 5 | **Argtypes/restype canônicos:** mesmo em `minimal_handshake=True`, registrar argtypes para `TranslateTrade`, `GetAgentNameLength`, `GetAgentName`, `SubscribeTicker`, `UnsubscribeTicker`, `GetHistoryTrades` ANTES de qualquer download | NÃO confiar em defaults ctypes (`c_int 32-bit signed`) em x64 stdcall — handles `c_size_t` truncam, length retorna `0x80000004 = -2147483636` | [Q-DRIFT-08](./QUIRKS.md#q-drift-08), [Q-DRIFT-33](./QUIRKS.md#q-drift-33), [Q-DRIFT-35](./QUIRKS.md#q-drift-35), §2.8 |
+| 6 | **Janela GetHistoryTrades:** confirmar limite empírico real **por dia** vs **5d agregado** — investigação em curso (Nelo Council-38). Até validar, **considere split forçado por dia útil** quando volume esperado > 600k trades | NÃO assumir que 5d "que cabem" no manual entregam 5d completos — smoke real WDOFUT entregou 603k trades em 4d quando baseline de 1d ≈ 600-700k (perda silenciosa de 70-80%) | [Q-DRIFT-37](./QUIRKS.md#q-drift-37), [Q-DRIFT-31](./QUIRKS.md#q-drift-31) |
+| 7 | **NUNCA confiar em `TC_LAST_PACKET` cego:** cross-checar `last_trade_timestamp` vs `dt_end_str` solicitado; se gap > threshold, agendar replay automático da janela faltante | NÃO declarar download "completo" só porque a flag `TC_LAST_PACKET` (ou retorno 0) foi recebida — server pode truncar volume sem sinalizar erro | [Q-DRIFT-37](./QUIRKS.md#q-drift-37), `INVARIANTS.md` I2 |
+| 8 | **NL_NOT_FOUND em `GetAgentName` é semântico, não bug:** agent IDs >1M (mesas/gateways/RLP B3) frequentemente retornam `0x8000000C` (`-2147483636`) — preencher com fallback string (ex.: `"UNKNOWN_<id>"`); JAMAIS NULL silencioso no parquet | NÃO logar como erro / NÃO bloquear pipeline / NÃO deixar campo NULL silencioso (consumidor downstream perde rastreabilidade) | [Q-DRIFT-34](./QUIRKS.md#q-drift-34), [Q-DRIFT-36](./QUIRKS.md#q-drift-36), `INVARIANTS.md` I3 |
 
 > **Regra absoluta de callback (R3 / [Q06-V](./QUIRKS.md#q06-v)):** todo callback registrado faz APENAS `queue.put_nowait(...)` e retorna em <100µs. NUNCA chamar funções da DLL de dentro do callback. NUNCA fazer log/print/I/O/sleep dentro do callback.
 
 > **Regra absoluta de ctypes ([Q07-V](./QUIRKS.md#q07-v)):** lista global `_cb_refs: list = []` retém todos `WINFUNCTYPE`-wrapped objects. Append todo callback criado, never clear durante a vida do processo.
+
+> **Invariantes do projeto:** ver [`docs/INVARIANTS.md`](../INVARIANTS.md) — princípios I1-I6 são **inegociáveis** e devem ser checados em CI/CD. Schema-as-Contract (I1), Volume Completeness (I2), Agent Name Resolution Graceful (I3), Trade Type Resolution (I4), Translate Failures Telemetria (I5), Window Split (I6).
 
 ---
 

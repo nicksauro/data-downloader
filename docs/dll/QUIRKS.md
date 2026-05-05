@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-04 noite (Q-DRIFT-11 NOVO + Q11-E REFUTADA empiricamente — pós-mortem attempt 7 dispatch Quinn+Nelo+Aria. Probe `scripts/probe_init.py` conecta em 1.82s + 2.43s passando `None` nos slots 4/6/7/8 → refuta o folclore Sentinel §12 ("JAMAIS None") com evidência direta, não apenas por leitura do exemplo oficial. Wrapper com NoopCallback nos mesmos slots trava em `result=1` por 600s+ → Q-DRIFT-11 hipotetiza bloqueio da ConnectorThread interna pelos trampolines ctypes pesados. Validação A/B pendente Story 1.7c.)
+**Última atualização:** 2026-05-05 (Q-DRIFT-36 NOVO + Q-DRIFT-37 NOVO — council Sol Story 1.7g. Q-DRIFT-36: writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` por não estarem no schema, embora pipeline DLL+IngestorThread populasse corretamente — P0 release blocker, hotfix em curso por Dex (schema v1.1.0 + writer fail-loudly). Q-DRIFT-37: GetHistoryTrades entregou ~603k trades em 4d WDOFUT mas baseline 1d ≈ 600-700k → perda silenciosa de 70-80% — P0 release blocker, investigação em curso por Quinn+Nelo. Invariantes I1-I6 documentadas em `docs/INVARIANTS.md`.)
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -74,6 +74,8 @@
 | [Q-DRIFT-33](#q-drift-33) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `TranslateTrade.argtypes` → OverflowError; hotfix cirúrgico aplicado |
 | [Q-DRIFT-34](#q-drift-34) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | orchestrator / ingestor | `_process_trade` morre em `format_brt_timestamp(ns<0)`; guard + try/except aplicados |
 | [Q-DRIFT-35](#q-drift-35) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `GetAgentName{,Length}.argtypes` → length lido como `0x80000004` negativo; hotfix cirúrgico aplicado |
+| [Q-DRIFT-36](#q-drift-36) | 🐛 bug-código (HOTFIX-IN-PROGRESS Story 1.7g) | storage / schema | Writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` por não mapear no schema; pipeline DLL+IngestorThread populava corretamente. **P0 release blocker.** |
+| [Q-DRIFT-37](#q-drift-37) | 🧪 hypothesis (INVESTIGATING Story 1.7g) | history / volume completeness | Smoke real entregou 603k trades em ~4d úteis WDOFUT, mas baseline 1d ≈ 600-700k → perda silenciosa de **70-80%** do volume esperado (LAST_PACKET prematuro? window cap? subscribe race?). **P0 release blocker.** |
 
 ---
 
@@ -1400,6 +1402,64 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 - [Q-DRIFT-32](#q-drift-32) (validation canônica).
 - `docs/qa/SMOKE_EVIDENCE/sanity-petr4-wdok26-20260505T110756Z.md`.
 - `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T114247Z-wdofut-CONSOLIDADO-PARTIAL.md`.
+
+---
+
+## Q-DRIFT-36
+
+- **ID:** Q-DRIFT-36
+- **Status:** 🐛 **BUG-CÓDIGO — HOTFIX-IN-PROGRESS (Story 1.7g, Dex schema v1.1.0 + writer fail-loudly)**
+- **Categoria:** storage / schema / silent-data-loss
+- **Severidade:** **P0 — RELEASE BLOCKER**
+- **Título:** Writer parquet v1.0.0 silenciosamente descartava colunas `buy_agent_name`, `sell_agent_name`, `trade_type_name` por não mapearem no schema declarado, embora pipeline DLL + IngestorThread populasse os campos corretamente.
+- **Sintoma:** auditoria de download (Nelo Council 32, 2026-05-05) revelou que parquets de produção continham IDs (`buy_agent_id`, `sell_agent_id`, `trade_type`) mas **NÃO** os nomes resolvidos, apesar de logs do IngestorThread mostrarem `GetAgentName` retornando strings válidas e `TConnectorTradeType` enum mapeado. Resultado: consumidores downstream incapazes de ler nomes — perda silenciosa de informação semântica.
+- **Causa raiz:** writer pyarrow recebia `dict` com 17+ chaves do IngestorThread, mas `pa.Table.from_pylist(rows, schema=SCHEMA_TRADES_V1_0_0)` **descarta silenciosamente** chaves não declaradas no schema sem warning, sem error, sem log. Schema v1.0.0 declara `buy_agent_id`/`sell_agent_id`/`trade_type` mas omite `buy_agent_name`/`sell_agent_name`/`trade_type_name`. Pipeline corretamente populava esses campos no dict, writer corretamente seguia o contrato schema → as colunas evaporavam entre dict e disk.
+- **Detecção:** Nelo Council-32 (`docs/decisions/COUNCIL-32-Nelo-agents-trade-types-2026-05-05.md`, 2026-05-05) — auditoria cruzada IngestorThread × parquet de saída.
+- **Workaround / fix em andamento (Dex Story 1.7g):**
+  1. **Schema v1.1.0** — bump aditivo (minor): adicionar `buy_agent_name string nullable`, `sell_agent_name string nullable`, `trade_type_name string nullable`. Não migra arquivos antigos (Política §6.2).
+  2. **Writer fail-loudly** — `pa.Table.from_pylist(rows, schema=schema)` envolvido em validação prévia: para cada row, verificar `set(row.keys()) <= set(schema.names)` e levantar `SchemaContractViolation` se sobrar chave não mapeada. **Quebra a invariante "schema NUNCA descarta colunas silenciosamente".**
+  3. **Test obrigatório** — `tests/unit/test_storage_schema.py::test_writer_raises_on_missing_schema_field` (red→green).
+- **Manual diz:** silencioso — pyarrow design choice (descarta chaves não-mapeadas para tolerar dicts heterogêneos).
+- **Prevenção sistêmica:** `docs/adr/ADR-019-schema-as-contract.md` (Aria) — invariante I1 do `docs/INVARIANTS.md`.
+- **Data descoberta:** 2026-05-05 (Nelo Council-32).
+- **Aplica a stories:** 1.7g (hotfix em curso), 1.7d (smoke real evidence afetada).
+- **Refs:**
+  - `docs/decisions/COUNCIL-32-Nelo-agents-trade-types-2026-05-05.md` (auditoria do bug).
+  - `docs/storage/SCHEMA.md` §1.1 (schema v1.0.0 — campos omitidos).
+  - `docs/INVARIANTS.md` I1 (Schema-as-Contract).
+  - `src/data_downloader/storage/writer.py` (writer atual — sem validação fail-loudly).
+  - `src/data_downloader/orchestrator/ingestor.py` (popula nomes corretamente).
+  - `docs/adr/ADR-019-schema-as-contract.md` (Aria) — formalização da invariante.
+
+---
+
+## Q-DRIFT-37
+
+- **ID:** Q-DRIFT-37
+- **Status:** 🧪 **HYPOTHESIS — INVESTIGATING (Story 1.7g, Quinn volume gap + Nelo download flow audit)**
+- **Categoria:** history / volume completeness / silent-data-loss
+- **Severidade:** **P0 — RELEASE BLOCKER**
+- **Título:** `GetHistoryTrades` em produção entrega volume **bem abaixo** do baseline esperado para o período solicitado, sem qualquer sinal de erro — possível LAST_PACKET prematuro, window cap server-side, ou subscribe race.
+- **Sintoma (smoke postfix-35, 2026-05-05):** janela WDOFUT/F de ~4 dias úteis entregou **603 074 trades + LAST_PACKET + return code 0**. Mas baseline empírico WDOFUT 1 dia útil ≈ **600 000–700 000 trades** (líquido normal). Logo: 4d deveriam render ~2.4M–2.8M; recebemos ~25-30% disso. **Perda silenciosa de 70-80% do volume esperado.**
+- **Causa raiz hipotetizada (não validada):** três hipóteses ativas mantidas em paralelo:
+  - **H37-A (LAST_PACKET prematuro):** servidor envia flag `TC_LAST_PACKET` antes de drenar todo o volume da janela — bug server-side ou interpretação cliente errada do flag.
+  - **H37-B (window cap server-side):** servidor de histórico Nelogica aplica cap implícito (~600k trades/chamada) e fecha a sessão silenciosamente quando atinge — independente da janela solicitada. Se confirmado, exige **split obrigatório por dia** mesmo dentro do limite oficial Q-DRIFT-31 (5d para WDO).
+  - **H37-C (subscribe race / chunk inicial):** janela aberta antes do servidor estar pronto para entregar trades antigos — primeiros segundos do download perdem buffer interno. Improvável dado que LAST_PACKET dispara, mas não descartado.
+- **Trabalho em andamento:**
+  - **Quinn Council-37** (volume gap analysis): mensurar baseline real WDOFUT por dia útil (probe direcionado) e comparar com saídas do download em janelas variadas (1d/2d/3d/4d/5d) → identificar onde a curva quebra.
+  - **Nelo Council-38** (download flow audit): instrumentar `GetHistoryTrades` callbacks com timestamps + counters por chunk → detectar LAST_PACKET prematuro vs cap real.
+- **Workaround tentativo (preventivo até diagnóstico):** **NUNCA confiar em LAST_PACKET cego** — cross-checar timestamp do último trade vs `dt_end_str` solicitado. Se gap detectado (`last_trade_ts < dt_end_str - threshold`), agendar replay automático da janela faltante.
+- **Manual diz:** §3.1 documenta `TC_LAST_PACKET` como sinalização de fim, mas **não** documenta limite de volume por chamada nem comportamento se servidor truncar antes da janela completa.
+- **Prevenção sistêmica:** `docs/adr/ADR-020-volume-completeness.md` (Aria) — invariante I2 do `docs/INVARIANTS.md`.
+- **Data descoberta:** 2026-05-05 (smoke postfix-35 + comparação com baseline informado pelo usuário).
+- **Aplica a stories:** 1.7g (em curso), 1.7d (smoke real evidence afetada), futura Story 2.x (replay automático).
+- **Refs:**
+  - `docs/qa/SMOKE_EVIDENCE/standalone-wdofut-postfix35-20260505T123005Z.log` (603k trades em 4d).
+  - `docs/decisions/COUNCIL-37-Quinn-volume-gap-2026-05-05.md` (em redação).
+  - `docs/decisions/COUNCIL-38-Nelo-download-flow-audit-2026-05-05.md` (em redação).
+  - `docs/INVARIANTS.md` I2 (Volume Completeness).
+  - [Q-DRIFT-31](#q-drift-31) (janela máx ~5 dias úteis WDO) — relação direta.
+  - `docs/adr/ADR-020-volume-completeness.md` (Aria) — formalização da invariante.
 
 ---
 
