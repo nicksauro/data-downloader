@@ -58,14 +58,17 @@ def test_download_chunk_real_wdoj26_one_day_returns_trades() -> None:
     user = os.environ["PROFITDLL_USER"]
     password = os.environ["PROFITDLL_PASS"]
 
-    # Story 1.7c — bisseção A/B Q-DRIFT-02. Quando
+    # Story 1.7d — espelho ESTRITO do probe (testa Q-DRIFT-12). Quando
     # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` está definida como
     # ``1``/``true``/``yes`` (case-insensitive), o init usa o caminho
-    # mínimo que espelha o probe canônico ``scripts/probe_init.py`` —
-    # pula ``_configure_dll_signatures`` em larga escala, pula
-    # ``SetEnabledLogToDebug(0)`` e passa ``None`` literal nos slots
-    # 4/6/7/8 do ``DLLInitializeMarketLogin``. Default (var ausente)
-    # preserva o caminho atual usado em attempts 4-7.
+    # que espelha EXATAMENTE o probe canônico ``scripts/probe_init.py``
+    # L239-251 — pula ``_configure_dll_signatures`` em larga escala,
+    # pula ``SetEnabledLogToDebug(0)``, passa ``None`` literal nos slots
+    # 4/6/7/8 e callbacks REAIS (TDailyCallback, TProgressCallback,
+    # TTinyBookCallback) nos slots 5/9/10 do ``DLLInitializeMarketLogin``.
+    # Story 1.7c (commit 2d17923) tinha bug: passava ``None`` em todos
+    # os 7 slots não-state — attempt 8 (FAIL-still-stuck) levantou Q-DRIFT-12.
+    # Default (var ausente) preserva o caminho atual usado em attempts 4-7.
     minimal_handshake = os.getenv("DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE", "").strip().lower() in {
         "1",
         "true",

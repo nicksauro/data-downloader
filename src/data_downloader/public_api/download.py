@@ -488,13 +488,17 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     documenta que o handshake pode levar minutos quando o ProfitChart
     não está aberto concorrentemente.
 
-    **Story 1.7c (bisseção Q-DRIFT-02):** quando
+    **Story 1.7d (espelho ESTRITO do probe — Q-DRIFT-12):** quando
     ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` ∈ ``{"1","true","yes"}``
     (case-insensitive), o init usa o caminho ``minimal_handshake=True``
-    que espelha o probe canônico — pula ``_configure_dll_signatures`` em
-    larga escala, pula ``SetEnabledLogToDebug(0)`` e passa ``None``
-    literal nos slots 4/6/7/8 do ``DLLInitializeMarketLogin``. Default
-    (var ausente / vazia) preserva o caminho atual.
+    que espelha o probe canônico EXATAMENTE — pula
+    ``_configure_dll_signatures`` em larga escala, pula
+    ``SetEnabledLogToDebug(0)``, passa ``None`` literal nos slots 4/6/7/8
+    e callbacks REAIS (``TDailyCallback``, ``TProgressCallback``,
+    ``TTinyBookCallback``) nos slots 5/9/10 do ``DLLInitializeMarketLogin``.
+    Corrige o bug da Story 1.7c (que passava ``None`` em todos os 7 slots
+    não-state, divergindo do probe). Default (var ausente / vazia)
+    preserva o caminho atual.
 
     Args:
         events_queue: usado para emitir progresso "starting DLL" antes do
@@ -526,14 +530,15 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
         ),
     )
     dll = ProfitDLL()
-    # Story 1.7c — bisseção A/B Q-DRIFT-02. Quando
+    # Story 1.7d — espelho ESTRITO do probe (testa Q-DRIFT-12). Quando
     # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` está definida como ``1``,
-    # ``true`` ou ``yes`` (case-insensitive), o init usa o caminho mínimo
-    # que espelha o probe canônico (``scripts/probe_init.py``) — pula
-    # ``_configure_dll_signatures`` em larga escala, pula
-    # ``SetEnabledLogToDebug(0)`` e passa ``None`` literal nos slots
-    # 4/6/7/8 do ``DLLInitializeMarketLogin``. Default ``False`` preserva
-    # o comportamento atual (zero risco de regressão).
+    # ``true`` ou ``yes`` (case-insensitive), o init usa o caminho que
+    # espelha EXATAMENTE o probe canônico (``scripts/probe_init.py``
+    # L239-251) — pula ``_configure_dll_signatures`` em larga escala,
+    # pula ``SetEnabledLogToDebug(0)``, passa ``None`` literal nos slots
+    # 4/6/7/8 e callbacks REAIS (TDailyCallback, TProgressCallback,
+    # TTinyBookCallback) nos slots 5/9/10 do ``DLLInitializeMarketLogin``.
+    # Default ``False`` preserva o comportamento atual.
     minimal_handshake = os.getenv("DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE", "").strip().lower() in {
         "1",
         "true",

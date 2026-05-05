@@ -335,20 +335,23 @@ def test_initialize_market_only_skips_extra_callbacks_on_negative_return(
 
 
 # =====================================================================
-# Story 1.7c — minimal_handshake bisseção A/B Q-DRIFT-02
+# Story 1.7d — minimal_handshake espelho ESTRITO do probe (Q-DRIFT-12)
 # =====================================================================
 
 
 @pytest.mark.unit
-def test_initialize_minimal_handshake_passes_none_in_unused_slots(
+def test_initialize_minimal_handshake_passes_none_in_slots_4_6_7_8(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``minimal_handshake=True`` passa ``None`` literal nos 7 slots não-state.
+    """``minimal_handshake=True`` passa ``None`` literal nos slots 4/6/7/8.
 
-    Story 1.7c: espelho exato de ``scripts/probe_init.py`` (linhas 239-251) e
-    exemplo Nelogica ``main.py:742-743``. Refuta empiricamente Q11-E
-    ("JAMAIS None") — probe conecta em <3s passando ``None`` em 4 slots.
+    Story 1.7d (corrige bug 1.7c): espelho EXATO de ``scripts/probe_init.py``
+    (linhas 239-251) e exemplo Nelogica ``main.py:742-743``. Slots
+    ``newTradeCallback`` (4), ``newHistoryCallback`` (6), ``priceBookCallback``
+    (7) e ``offerBookCallback`` (8) recebem ``None`` LITERAL — refuta
+    empiricamente Q11-E ("JAMAIS None") porque o probe conecta em <3s
+    com essa configuração.
     """
     monkeypatch.setattr(sys, "platform", "win32")
     windll_mock, dll_instance = _make_mock_dll_module()
@@ -372,9 +375,75 @@ def test_initialize_minimal_handshake_passes_none_in_unused_slots(
         assert args[i] is not None, f"credencial arg[{i}] não pode ser None"
     # Slot 3 = state callback REAL — não-None (sempre).
     assert args[3] is not None, "state callback (slot 3) não pode ser None"
-    # Slots 4-10 (7 slots restantes) = None LITERAL no minimal path.
-    for i in range(4, 11):
-        assert args[i] is None, f"minimal_handshake: slot {i} esperado None, recebido {args[i]!r}"
+    # Slots 4, 6, 7, 8 = None LITERAL (espelho probe Story 1.7d).
+    for i in (4, 6, 7, 8):
+        assert args[i] is None, (
+            f"minimal_handshake (Story 1.7d): slot {i} esperado None, " f"recebido {args[i]!r}"
+        )
+
+
+@pytest.mark.unit
+def test_initialize_minimal_handshake_passes_real_callbacks_in_slots_5_9_10(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``minimal_handshake=True`` passa callbacks REAIS nos slots 5/9/10.
+
+    Story 1.7d (Q-DRIFT-12): probe canônico (``scripts/probe_init.py``
+    L239-251) e exemplo Nelogica (``main.py:742-743``) ambos passam
+    callbacks reais nos slots ``newDailyCallback`` (5), ``progressCallBack``
+    (9) e ``tinyBookCallBack`` (10). Hipótese: servidor Nelogica exige
+    callback funcional nesses 3 slots para promover MARKET_DATA → result=4.
+
+    Verifica que slots 5/9/10:
+      - NÃO são ``None``.
+      - Têm signatures ctypes ``TDailyCallback`` / ``TProgressCallback`` /
+        ``TTinyBookCallback`` (todas com ``TAssetID`` por valor — Q-DRIFT-05).
+    """
+    from data_downloader.dll.types import (
+        TDailyCallback,
+        TProgressCallback,
+        TTinyBookCallback,
+    )
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS", minimal_handshake=True)
+
+    init_call = dll_instance.DLLInitializeMarketLogin.call_args
+    assert init_call is not None, "DLLInitializeMarketLogin não foi chamado"
+    args = init_call.args
+    assert len(args) == 11, f"Esperado 11 args, recebido {len(args)}: {args}"
+
+    # Slots 5/9/10 NÃO são None.
+    for i in (5, 9, 10):
+        assert args[i] is not None, (
+            f"minimal_handshake (Story 1.7d / Q-DRIFT-12): slot {i} deve ser "
+            f"callback REAL, recebido None"
+        )
+
+    # Slot 5 = TDailyCallback. Verificamos via isinstance() do tipo retornado
+    # pelo factory — ctypes WINFUNCTYPE retorna instâncias do próprio funtype.
+    assert isinstance(
+        args[5], TDailyCallback
+    ), f"slot 5 deve ser TDailyCallback; recebido {type(args[5]).__name__}"
+    # Slot 9 = TProgressCallback.
+    assert isinstance(
+        args[9], TProgressCallback
+    ), f"slot 9 deve ser TProgressCallback; recebido {type(args[9]).__name__}"
+    # Slot 10 = TTinyBookCallback.
+    assert isinstance(
+        args[10], TTinyBookCallback
+    ), f"slot 10 deve ser TTinyBookCallback; recebido {type(args[10]).__name__}"
 
 
 @pytest.mark.unit

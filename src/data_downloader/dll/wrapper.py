@@ -55,7 +55,10 @@ from data_downloader.dll.types import (
     NOOP_SLOT_SIGNATURES,
     STATE_CODE_ALIAS,
     TConnectorTrade,
+    TDailyCallback,
+    TProgressCallback,
     TradeFields,
+    TTinyBookCallback,
 )
 
 __all__ = ["DEFAULT_DLL_PATH", "ProfitDLL"]
@@ -563,19 +566,31 @@ class ProfitDLL:
                 livro/ordens, este kwarg pode ser ``True`` — mas antes
                 precisamos signatures corretas (TODO: Story 1.7b-Q-DRIFT-09
                 follow-up para auditar e corrigir signatures por callback).
-            minimal_handshake: **Story 1.7c — Bisseção A/B Q-DRIFT-02**.
+            minimal_handshake: **Story 1.7d — Espelho ESTRITO do probe**
+                (corrige bug da 1.7c que passava ``None`` em slots 5/9/10).
                 Quando ``True``, espelha EXATAMENTE o caminho do probe
-                canônico ``scripts/probe_init.py`` (que conecta em <3s onde
-                o wrapper trava 600s+). Diferenças vs default:
+                canônico ``scripts/probe_init.py`` L239-251 e do exemplo
+                Nelogica ``profitdll/Exemplo Python/main.py:742-743``
+                (que conectam em <3s onde o wrapper legacy trava 600s+):
 
                 - Pula ``_configure_dll_signatures()`` em larga escala —
                   configura APENAS o mínimo absoluto (restype de
                   ``DLLInitializeMarketLogin``).
                 - Pula ``SetEnabledLogToDebug(0)`` (probe e exemplo
-                  Nelogica ``main.py:742-743`` NÃO chamam).
-                - Passa ``None`` LITERAL nos slots 4, 6, 7, 8 (newTrade,
-                  newHistory, priceBook, offerBook) — espelho exato do
-                  probe (linhas 239-251) e exemplo Nelogica.
+                  Nelogica NÃO chamam).
+                - Slots 4 / 6 / 7 / 8 (``newTrade``, ``newHistory``,
+                  ``priceBook``, ``offerBook``): ``None`` LITERAL —
+                  espelho exato do probe e exemplo Nelogica.
+                - Slots 5 / 9 / 10 (``newDaily``, ``progress``,
+                  ``tinyBook``): callbacks REAIS via
+                  :func:`make_noop_callback` com signatures
+                  ``TDailyCallback`` / ``TProgressCallback`` /
+                  ``TTinyBookCallback`` (todas com ``TAssetID`` por
+                  valor — Q-DRIFT-05). Funcionalmente no-op, mas o
+                  ponteiro ctypes é VÁLIDO e a DLL pode invocá-los sem
+                  early-return — testando empiricamente Q-DRIFT-12
+                  (hipótese de que servidor exige callback funcional
+                  em 5/9/10 para promover ``MARKET_DATA → result=4``).
 
                 Mantém em ambos paths: ``os.chdir`` (Q-DRIFT-10 — provado
                 necessário) e state callback REAL (slot 3) com Queue path.
@@ -583,9 +598,9 @@ class ProfitDLL:
                 Default ``False`` preserva 100% do comportamento atual
                 (zero risco de regressão para callers existentes).
 
-                Ver: ``docs/stories/1.7c.story.md`` e
-                ``docs/qa/SMOKE_EVIDENCE/1.7b-20260504T220650Z-attempt7-flakey.md``
-                (seção *Análise Pós-Mortem*).
+                Ver: ``docs/stories/1.7d.story.md`` e
+                ``docs/qa/SMOKE_EVIDENCE/1.7c-20260504T224457Z-attempt8-FAIL-still-stuck.md``
+                (seção *Análise técnica* / Q-DRIFT-12).
 
         Raises:
             DLLInitError: Se companions faltantes (COMPANIONS_MISSING),
@@ -711,37 +726,60 @@ class ProfitDLL:
         # canônico também passa state callback REAL (queue path).
         state_cb = make_state_callback(self._state_queue)
 
-        # Slots 4..10 (7 callbacks): branch entre None literal (espelho probe)
-        # e NoopCallback (caminho default herdado de Q11-E / Sentinel §12 —
-        # premissa "JAMAIS None" REFUTADA empiricamente pelo probe que conecta
-        # em <3s passando ``None`` em slots 4/6/7/8).
+        # Slots 4..10 (7 callbacks): branch entre espelho ESTRITO do probe
+        # (Story 1.7d — None em 4/6/7/8 + REAL em 5/9/10) e o caminho default
+        # herdado de Q11-E / Sentinel §12 (7 NoopCallback). Premissa "JAMAIS
+        # None" foi REFUTADA empiricamente pelo probe (conecta em <3s passando
+        # None em slots 4/6/7/8). Slots 5/9/10 são REAL no probe e no exemplo
+        # Nelogica — Story 1.7d testa Q-DRIFT-12 (servidor exige callback
+        # funcional nesses 3 slots para promover MARKET_DATA → result=4).
         from ctypes import c_wchar_p
 
         if minimal_handshake:
-            # Espelho EXATO do probe (linhas 239-251) e exemplo Nelogica
-            # (``main.py:742-743``):
+            # Story 1.7d — Espelho ESTRITO do probe (linhas 239-251) e
+            # exemplo Nelogica (``main.py:742-743``):
             #   slot 4  = newTradeCallback     -> None
-            #   slot 5  = newDailyCallback     -> None (NoopCallback no probe
-            #                                          é REAL — usamos None
-            #                                          para o caminho mínimo;
-            #                                          se travar aqui, AC3
-            #                                          isolará reintroduzindo
-            #                                          REAL one-by-one)
+            #   slot 5  = newDailyCallback     -> REAL (TDailyCallback)
             #   slot 6  = newHistoryCallback   -> None
             #   slot 7  = priceBookCallback    -> None
             #   slot 8  = offerBookCallback    -> None
-            #   slot 9  = progressCallBack     -> None (idem nota slot 5)
-            #   slot 10 = tinyBookCallBack     -> None (idem)
-            non_state_slots: list[Any] = [None] * 7
+            #   slot 9  = progressCallBack     -> REAL (TProgressCallback)
+            #   slot 10 = tinyBookCallBack     -> REAL (TTinyBookCallback)
+            #
+            # Story 1.7c (commit 2d17923) tentou passar ``None`` em todos
+            # os 7 slots — divergiu do probe nos slots 5/9/10. O attempt 8
+            # falhou (MARKET_DATA/1 stuck), levantando Q-DRIFT-12: servidor
+            # Nelogica pode exigir callback funcional em 5/9/10 para promover
+            # MARKET_DATA → result=4. Esta variante estrita testa Q-DRIFT-12
+            # diretamente — se conectar <60s, hipótese confirmada.
+            #
+            # Nota sobre "REAL": o probe usa callbacks com bodies ``print``;
+            # aqui usamos ``make_noop_callback`` (drena args, retorna). O
+            # essencial é que o ponteiro de função em ctypes seja não-NULL
+            # e a signature WINFUNCTYPE bate com o que a DLL espera. O
+            # comportamento Python do callback (no-op vs. log) é irrelevante
+            # — a DLL não inspeciona, só invoca.
+            non_state_slots: list[Any] = [
+                None,  # slot 4  newTradeCallback
+                make_noop_callback(TDailyCallback),  # slot 5  newDailyCallback
+                None,  # slot 6  newHistoryCallback
+                None,  # slot 7  priceBookCallback
+                None,  # slot 8  offerBookCallback
+                make_noop_callback(TProgressCallback),  # slot 9  progressCallBack
+                make_noop_callback(TTinyBookCallback),  # slot 10 tinyBookCallBack
+            ]
             log.info(
                 "dll.initialize_call",
                 key_redacted="***",
                 user=user,
                 credential_redacted="***",
-                slots_active=["state"],
-                slots_none=7,
-                total_callback_slots=1,
+                slots_active=["state", "newDaily", "progress", "tinyBook"],
+                slots_none=4,
+                slots_real_noop=3,
+                total_callback_slots=4,
                 minimal_handshake=True,
+                story="1.7d",
+                quirk_under_test="Q-DRIFT-12",
             )
         else:
             # AC2 — construir 8 callbacks (1 state ativo + 7 NoopCallback).
