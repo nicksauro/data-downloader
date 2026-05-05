@@ -15,53 +15,94 @@
 
 ## Índice
 
+> **Legenda de status:**
+> - ✅ **valid / validated** — confirmado por evidência empírica direta + alinhado com manual/exemplo Nelogica.
+> - ⚠️ **refuted** — hipótese registrada que foi refutada por evidência posterior (mantida pelo histórico, NÃO seguir).
+> - 🧪 **hypothesis** — pendente validação empírica.
+> - 🐛 **bug-código** — bug em código nosso, hotfix aplicado e validado.
+> - ❓ **open** — pergunta sem resposta, aguarda probe.
+> - 📜 **histórico** — quirk legado superseded por outra entrada mais recente.
+>
+> **Auditoria de consolidação 2026-05-05** (council Sol — `docs/decisions/COUNCIL-35-Sol-documentacao-2026-05-05.md`): contradição Q01-V × Q-DRIFT-32 detectada e resolvida — Q01-V superseded por Q-DRIFT-32 (`WDOFUT` é continuous future correto para histórico, refutando "WDOFUT retorna 0 trades"). Q-DRIFT-13 a 25 + Q-DRIFT-27 a 30 viviam apenas em `RESUMO_EXECUTIVO_AUTONOMOUS_2026-05-04.md` — agora referenciados aqui como histórico de bisseção. Q-DRIFT-35 emergente do hotfix postfix-35 adicionada.
+
 | ID | Status | Categoria | Sumário |
 |----|--------|-----------|---------|
-| [Q01-V](#q01-v) | ✅ validated | history | `WDOFUT`/`WINFUT` retornam 0 trades; usar contrato vigente |
-| [Q02-E](#q02-e) | ✅ validated | history | Progresso 99% reconectando — não é trava (workaround formalizado em Story 2.6) |
+| [Q01-V](#q01-v) | ⚠️ **REFUTED 2026-05-05** (superseded por [Q-DRIFT-32](#q-drift-32)) | history | "WDOFUT/WINFUT retornam 0 trades; usar contrato vigente" — REFUTADO: WDOFUT entrega 723k trades em 4d (probe 2026-05-05); contratos específicos é que retornam 0 quando vencidos |
+| [Q02-E](#q02-e) | ✅ valid | history | Progresso 99% reconectando — não é trava (workaround formalizado em Story 2.6) |
 | [Q03-AMB](#q03-amb) | ⚠️ ambiguous | timestamp | Formato `.ZZZ` (manual) vs `:ZZZ` (whale-detector v2) |
-| [Q04-E](#q04-e) | 🔬 empirical | timestamp | Timestamps em BRT naive (manual silencioso) |
-| [Q05-V](#q05-v) | ✅ validated | subscription | Bolsa = uma letra (`B`, `F`); `BMF` retorna NL_EXCHANGE_UNKNOWN |
-| [Q06-V](#q06-v) | ✅ validated | callback / threading | Callback NÃO pode chamar funções da DLL |
-| [Q07-V](#q07-v) | ✅ validated | ctypes | `_cb_refs` global previne GC dos callbacks |
-| [Q08-E](#q08-e) | 🔬 empirical | lifecycle | DLL não-idempotente em init→finalize→init na mesma sessão Python |
+| [Q04-E](#q04-e) | ✅ valid | timestamp | Timestamps em BRT naive (manual silencioso) |
+| [Q05-V](#q05-v) | ✅ valid | subscription | Bolsa = uma letra (`B`, `F`); `BMF` retorna NL_EXCHANGE_UNKNOWN |
+| [Q06-V](#q06-v) | ✅ valid | callback / threading | Callback NÃO pode chamar funções da DLL |
+| [Q07-V](#q07-v) | ✅ valid | ctypes | `_cb_refs` global previne GC dos callbacks |
+| [Q08-E](#q08-e) | ✅ valid | lifecycle | DLL não-idempotente em init→finalize→init na mesma sessão Python |
 | [Q09-AMB](#q09-amb) | ⚠️ ambiguous | lifecycle | `DLLFinalize` (manual) vs `Finalize` (whale-detector) |
 | [Q10-AMB](#q10-amb) | ⚠️ ambiguous | state | `MARKET_CONNECTED=4` (manual) vs `MARKET_WAITING=2` (prática) |
-| [Q11-E](#q11-e) | ⚠️ REFUTADA (2026-05-04) | init | "JAMAIS None nos slots" — folclore Sentinel §12 refutado por probe empírico (1.82s + 2.43s) |
-| [Q12-E](#q12-e) | 🔬 empirical | history | Chunk size adaptativo: WDO=5d, WIN=1d funciona |
-| [Q13-V](#q13-v) | ✅ validated | api | Funções V1 obsoletas — usar V2 sempre que existir |
-| [Q14-E](#q14-e) | 🔬 empirical | metadata | `GetAgentName` requer `GetAgentNameLength` PRIMEIRO |
+| [Q11-E](#q11-e) | ⚠️ **REFUTED 2026-05-04** | init | "JAMAIS None nos slots" — folclore Sentinel §12 refutado por probe empírico (1.82s + 2.43s) |
+| [Q12-E](#q12-e) | ✅ valid (= [Q-DRIFT-31](#q-drift-31)) | history | Chunk size adaptativo: WDO=5d, WIN=1d funciona |
+| [Q13-V](#q13-v) | ✅ valid | api | Funções V1 obsoletas — usar V2 sempre que existir |
+| [Q14-E](#q14-e) | ✅ valid | metadata | `GetAgentName` requer `GetAgentNameLength` PRIMEIRO; signatures argtypes obrigatórios em `minimal_handshake` (ver [Q-DRIFT-35](#q-drift-35)) |
 | [Q15-OPEN](#q15-open) | ❓ open | threading | Comportamento ConnectorThread quando `put_nowait` bloqueia (drop ou wait?) |
-| [Q16-VALIDATED](#q16-validated) | ✅ validated | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
+| [Q16-VALIDATED](#q16-validated) | ✅ valid | auxiliary file / calendar | `holidays.dat` Nelogica omite feriados oficiais que caem em fim de semana |
 | [Q17-OPEN](#q17-open) | ❓ open | licença / multi-process | Múltiplas instâncias da mesma chave Nelogica em processos diferentes na mesma máquina é OK? (Story 4.1 broker pré-requisito) |
 | [Q18-OPEN](#q18-open) | ❓ open | history / contract calendar | Vigência exata WIN H/M/U/Z conforme regra B3 oficial (5º dia útil mês X-3 → quarta mais próxima 15/X)? |
-| [Q-DRIFT-01](#q-drift-01) | 🔬 empirical | api drift | `SetProgressCallback` e `GetDLLVersion` **NÃO exportadas** pela DLL real |
-| [Q-DRIFT-02](#q-drift-02) | ⚠️ ambiguous → 🔬 ROOT CAUSE: signatures NoopCallback erradas | lifecycle | `wait_market_connected` trava em (2,1) MARKET_CONNECTING; hipótese ProfitChart REFUTADA |
-| [Q-DRIFT-03](#q-drift-03) | ✅ validated | config | Env vars do código divergiam de `.env.example` — padronizado em `PROFITDLL_*` |
-| [Q-DRIFT-04](#q-drift-04) | 🔬 empirical | tooling / encoding | Rich Panel emoji crash em Windows cp1252 — CLI força `PYTHONIOENCODING=utf-8` |
-| [Q-DRIFT-05](#q-drift-05) | 🔬 empirical | init / signatures | NoopCallback signatures expandem TAssetID em 3 args primitivos (errado) — exemplo Nelogica usa TAssetID struct por valor |
-| [Q-DRIFT-06](#q-drift-06) | ⚠️ corrected | init | Q11-E "JAMAIS passar None" REFUTADO pelo exemplo oficial — Nelogica passa `None` em 4 dos 8 slots em `DLLInitializeMarketLogin` |
-| [Q-DRIFT-07](#q-drift-07) | ✅ validated | history / subscription | `SubscribeTicker(ticker, exchange)` é PRÉ-REQUISITO de `GetHistoryTrades` — sem subscribe, callback V2 nunca dispara |
-| [Q-DRIFT-08](#q-drift-08) | 🔬 empirical | ctypes / argtypes | argtypes/restype JAMAIS configurados no wrapper; exemplo oficial configura ~30 funções em `profit_dll.py` — sem isso, x64 stdcall pode truncar handles e desalinhar stack |
-| [Q-DRIFT-09](#q-drift-09) | 🔬 empirical → hipótese | callback / signatures | Smoke 5: 14 SetXxxCallback NoopCallback signatures suspeitas → access violations + stack overflow após MARKET_LOGIN_OK; Q11-E refutado parcialmente (passar `None` pode ser MAIS SEGURO que NoopCallback errado) |
-| [Q-DRIFT-10](#q-drift-10) | 🔬 empirical → hipótese forte | init / divergência exemplo | Smoke 6 (commit `7badeea`): `MARKET_DATA` trava em `(2,1)` MARKET_CONNECTING. Audit linha-por-linha vs `dllStart()` (main.py L729-764) revela 3 divergências do exemplo oficial: (a) wrapper passa **7 NoopCallbacks** onde exemplo passa **`None` em 4 slots**; (b) wrapper chama `SetEnabledLogToDebug(0)` ANTES do init (exemplo NÃO chama); (c) wrapper SKIPA os 14 `SetXxxCallback` que exemplo chama ANTES de `wait_login`. Hipótese primária: NoopCallback nos slots 5/7/8/9 onde exemplo usa `None` — DLL pode validar callback no handshake (não só no fire) e signatures Noop divergentes corrompem state machine antes do `result=4`. |
-| [Q-DRIFT-11](#q-drift-11) | 🧪 HIPÓTESE — attempt 8 NÃO conclusivo (pendente Story 1.7d) | init / threading | NoopCallback nos slots não usados de `DLLInitializeMarketLogin` pode bloquear ConnectorThread interna durante handshake. Probe (None nos slots 4/6/7/8 + REAL em 5/9/10) conecta em 1.82–2.43s; wrapper attempt 7 (NoopCallback em todos 7 slots) trava em `result=1`. Attempt 8 (`minimal_handshake=True` — None em todos 7 slots, divergiu do probe em 5/9/10) também travou — não isolou Q-DRIFT-11 de Q-DRIFT-12. Pendente Story 1.7d com espelho ESTRITO do probe. |
-| [Q-DRIFT-12](#q-drift-12) | 🧪 HIPÓTESE — emergente attempt 8 | init / handshake / snapshot | DLL pode condicionar transição `MARKET_DATA (2,1) → (2,4)` ao recebimento bem-sucedido de snapshot inicial via `newDailyCallback` (slot 5), `progressCallBack` (slot 9) e/ou `tinyBookCallBack` (slot 10). Probe e exemplo Nelogica passam REAL nestes 3 slots; attempt 8 do wrapper passou `None` e travou. Validação: Story 1.7d com espelho ESTRITO do probe (REAL em 5/9/10, None em 4/6/7/8). |
+| [Q-DRIFT-01](#q-drift-01) | ✅ valid | api drift | `SetProgressCallback` e `GetDLLVersion` **NÃO exportadas** pela DLL real |
+| [Q-DRIFT-02](#q-drift-02) | ✅ valid (root cause = Q-DRIFT-11/12/33/34/35) | lifecycle | `wait_market_connected` trava em (2,1) MARKET_CONNECTING; hipótese ProfitChart REFUTADA — root cause real era cadeia de bugs Q-DRIFT-11/12/33/34/35 |
+| [Q-DRIFT-03](#q-drift-03) | ✅ valid (corrected) | config | Env vars do código divergiam de `.env.example` — padronizado em `PROFITDLL_*` |
+| [Q-DRIFT-04](#q-drift-04) | ✅ valid | tooling / encoding | Rich Panel emoji crash em Windows cp1252 — CLI força `PYTHONIOENCODING=utf-8` |
+| [Q-DRIFT-05](#q-drift-05) | ✅ valid | init / signatures | NoopCallback signatures expandem TAssetID em 3 args primitivos (errado) — exemplo Nelogica usa TAssetID struct por valor |
+| [Q-DRIFT-06](#q-drift-06) | ✅ valid (corrected) | init | Q11-E "JAMAIS passar None" REFUTADO pelo exemplo oficial — Nelogica passa `None` em 4 dos 8 slots em `DLLInitializeMarketLogin` |
+| [Q-DRIFT-07](#q-drift-07) | ✅ valid | history / subscription | `SubscribeTicker(ticker, exchange)` é PRÉ-REQUISITO de `GetHistoryTrades` — sem subscribe, callback V2 nunca dispara |
+| [Q-DRIFT-08](#q-drift-08) | ✅ valid | ctypes / argtypes | argtypes/restype JAMAIS configurados no wrapper; exemplo oficial configura ~30 funções em `profit_dll.py` — sem isso, x64 stdcall pode truncar handles e desalinhar stack |
+| [Q-DRIFT-09](#q-drift-09) | 🧪 hypothesis | callback / signatures | Smoke 5: 14 SetXxxCallback NoopCallback signatures suspeitas → access violations + stack overflow após MARKET_LOGIN_OK |
+| [Q-DRIFT-10](#q-drift-10) | ✅ valid (corrected via Q-DRIFT-11+12) | init / divergência exemplo | Audit linha-por-linha vs exemplo oficial revela 3 divergências de NoopCallback/None — corrigido após Q-DRIFT-11+12 |
+| [Q-DRIFT-11](#q-drift-11) | ✅ valid (validated postfix-35) | init / threading | NoopCallback nos slots não usados bloqueia ConnectorThread durante handshake. Validado: standalone com `minimal_handshake=True` (None em 4/6/7/8 + REAL em 5/9/10) conecta em 1.25s |
+| [Q-DRIFT-12](#q-drift-12) | ✅ valid (validated postfix-35) | init / handshake / snapshot | DLL exige callbacks REAIS em slots 5/9/10 (newDaily/progress/tinyBook) para handshake. Validado postfix-35 (handshake 1.25s, 796k trades) |
+| [Q-DRIFT-13](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | Race condition `_set_state_callback` antes init — refutada |
+| [Q-DRIFT-14](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | Lifetime de callback CFUNCTYPE — refutada |
+| [Q-DRIFT-15](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | argtypes/restype mutados pós-init — refutada |
+| [Q-DRIFT-16](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | Threading model MTA vs STA — refutada |
+| [Q-DRIFT-17](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | DLL hash diferente / múltiplo carregamento — refutada |
+| [Q-DRIFT-18](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | pytest-qt autoload `CoInitializeEx(MTA)` — refutada |
+| [Q-DRIFT-19](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | pytest fd-capture → ConnectorThread bloqueia em write — refutada |
+| [Q-DRIFT-20](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | pytest-cov instala `sys.settrace` global — refutada |
+| [Q-DRIFT-22](#q-drift-13--25-bissection-history) | ⚠️ refuted (histórico) | bisseção pytest | `tests/conftest.py` raiz importa MockProfitDLL → ctypes pré-poluído — refutada |
+| [Q-DRIFT-23..25](#q-drift-13--25-bissection-history) | 🧪 hypothesis (não validadas) | bisseção pytest | pytest core SIGINT/atexit/trace residual — Sintoma A pytest harness travado |
+| [Q-DRIFT-26](#q-drift-26) | ⚠️ **REFUTED 2026-05-05** | download | Hipótese "data antiga não dispara callback" — refutada (data dinâmica também trava) |
+| [Q-DRIFT-27..30](#q-drift-27--30-sucessores-historico) | ⚠️ refuted (histórico) | download / wrapper | Exchange code, registro V2, struct mismatch — todas refutadas: bug real era Q-DRIFT-32 (contrato vencido vs WDOFUT) |
+| [Q-DRIFT-31](#q-drift-31) | ✅ valid | download / window | `GetHistoryTrades` janela máx ~5 dias úteis (servidor Nelogica) |
+| [Q-DRIFT-32](#q-drift-32) | ✅ valid | download / symbol | Usar `WDOFUT` (continuous) para histórico, NÃO `WDOJ26`/`WDOK26` (vencidos retornam 0 trades). **Supersede Q01-V.** |
+| [Q-DRIFT-33](#q-drift-33) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `TranslateTrade.argtypes` → OverflowError; hotfix cirúrgico aplicado |
+| [Q-DRIFT-34](#q-drift-34) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | orchestrator / ingestor | `_process_trade` morre em `format_brt_timestamp(ns<0)`; guard + try/except aplicados |
+| [Q-DRIFT-35](#q-drift-35) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `GetAgentName{,Length}.argtypes` → length lido como `0x80000004` negativo; hotfix cirúrgico aplicado |
 
 ---
 
 ## Q01-V
 
+## ⚠️ REFUTED 2026-05-05
+
+> **Esta entrada foi REFUTADA pela validação de [Q-DRIFT-32](#q-drift-32).**
+>
+> O sintoma original ("WDOFUT retorna 0 trades, usar contrato específico") veio de **folclore Sentinel/whale-detector v2** sem evidência empírica reproduzível.
+>
+> **Realidade verificada (probe `scripts/probe_history_minimal.py` + smoke postfix-35, 2026-05-05):** `WDOFUT` (continuous future) entrega **723.587 trades em 4 dias úteis** e **796.963 trades em 5 dias úteis**. Os contratos específicos vencidos (`WDOJ26` abril/2026 expirado) é que retornam 0 trades.
+>
+> **Diretriz canônica atualizada (Q-DRIFT-32):** **SEMPRE usar `WDOFUT`/`WINFUT` para download histórico.** Para subscription real-time pode-se usar contrato específico vigente, mas histórico exige continuous future.
+>
+> Mantido aqui pelo histórico — NÃO seguir.
+
 - **ID:** Q01-V
-- **Status:** ✅ validated
+- **Status:** ⚠️ **REFUTED 2026-05-05** — superseded por [Q-DRIFT-32](#q-drift-32)
 - **Categoria:** history
-- **Sintoma:** `GetHistoryTrades(ticker="WDOFUT", ...)` ou `GetHistoryTrades(ticker="WINFUT", ...)` retorna **0 trades** mesmo em janelas históricas com pregão ativo.
-- **Causa raiz:** `WDOFUT` / `WINFUT` são apenas **aliases live** que apontam para o contrato vigente em tempo real. O servidor de histórico só conhece **contratos específicos por mês** (`WDOJ26` = abril 2026, `WINH26` = março 2026, etc.).
-- **Evidência:** validado em whale-detector v2 (2026-03-09) e Sentinel §12. Manual §3.1 linha 1747 só mostra exemplo com `"PETR4"` (ação cash, não tem alias).
-- **Workaround:** Resolver alias → contrato vigente via tabela de rollover (responsabilidade da Nova, não da DLL).
-- **Manual diz:** silencioso sobre aliases.
-- **Data descoberta:** ~2026-03 (whale-detector v2).
-- **Aplica a stories:** 1.6 (probe), 1.7a/b (orchestrator), 2.1 (validator).
+- **Sintoma original (refutado):** `GetHistoryTrades(ticker="WDOFUT", ...)` ou `GetHistoryTrades(ticker="WINFUT", ...)` retorna **0 trades** mesmo em janelas históricas com pregão ativo.
+- **Causa raiz hipotetizada (refutada):** `WDOFUT` / `WINFUT` seriam apenas **aliases live** que apontam para o contrato vigente em tempo real. O servidor de histórico só conheceria **contratos específicos por mês** (`WDOJ26` = abril 2026, `WINH26` = março 2026, etc.).
+- **Evidência refutadora (2026-05-05, Story 1.7d):** probe minimalista (`scripts/probe_history_minimal.py`) com `WDOFUT/F` + janela 4d entregou 723.587 trades + LAST_PACKET; smoke postfix-35 com `WDOFUT/F` + 5d entregou 796.963 trades. Já contrato específico `WDOJ26` (abril/2026 vencido) retornou 0 trades em janela equivalente.
+- **Workaround original (NÃO seguir):** resolver alias → contrato vigente via tabela de rollover. **REVOGADO** — usar continuous future direto.
+- **Manual diz:** silencioso sobre aliases. Exemplo C++ (`profitdll/Exemplo Python/main.cpp:875`) usa `WDOFUT`.
+- **Data descoberta:** ~2026-03 (whale-detector v2 — folclore).
+- **Data REFUTADA:** 2026-05-05 (Quinn @qa, Story 1.7d).
+- **Aplica a stories:** 1.6 (probe), 1.7a/b/d (orchestrator), 2.1 (validator), 4.2 (multi-asset).
+- **Refs:** [Q-DRIFT-32](#q-drift-32) (validation canônica).
 
 ---
 
@@ -1160,8 +1201,14 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ## Q-DRIFT-26
 
+## ⚠️ REFUTED 2026-05-05
+
+> Hipótese "GetHistoryTrades exige data dentro de janela de pregão recente" foi refutada empiricamente: data dinâmica em pregão aberto também travou (zero trades). Causa real era contrato vencido (Q-DRIFT-32) + bugs de wrapper (Q-DRIFT-33/34/35), não a data.
+>
+> Mantida aqui pelo histórico de bisseção. NÃO seguir.
+
 - **ID:** Q-DRIFT-26
-- **Status:** ❌ **REFUTADA — Story 1.7d standalone-pregao 2026-05-05 10:35 BRT (Quinn @qa)**
+- **Status:** ⚠️ **REFUTED 2026-05-05** (standalone-pregao, Quinn @qa) — superseded por [Q-DRIFT-32](#q-drift-32)
 - **Categoria:** download / history / data validity
 - **Título:** Hipótese: GetHistoryTrades exige data dentro de janela de pregão recente — data antiga (e.g. 2026-04-15) ou data fora de pregão NÃO dispara TC_LAST_PACKET (callback nunca chamado).
 - **Sintoma original (attempt 11 sub-2, 2026-05-05 10:15 BRT):** `scripts/run_smoke_real_standalone.py` com data fixa 2026-04-15 09:00→17:30 (WDOJ26, 'F') CONECTOU em 1.43s, GetHistoryTrades retornou code=0, mas após 600s NENHUM trade chegou. Suspeita: data fora de janela útil → servidor Nelogica não despacha histórico.
@@ -1228,7 +1275,7 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 ## Q-DRIFT-33
 
 - **ID:** Q-DRIFT-33
-- **Status:** 🐛 **BUG-CÓDIGO — descoberta Story 1.7d 2026-05-05 (Quinn @qa)**
+- **Status:** 🐛 **BUG-CÓDIGO — HOTFIX-APPLIED-VALIDATED 2026-05-05 (Story 1.7d, postfix-35 standalone PASS, 796 963 trades)**
 - **Categoria:** wrapper / dll / signatures / minimal-handshake
 - **Título:** `minimal_handshake=True` skipa `_configure_dll_signatures` integralmente, mas `TranslateTrade.argtypes` é necessário para download — handle V2 (`c_size_t`) overflow em ctypes default `c_int`.
 - **Sintoma:** `run_smoke_real_standalone.py` com `DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE=1` e WDOFUT/F + 4d. DLL inicializa OK (signature skip funciona para handshake), MARKET_CONNECTED OK, GetHistoryTrades ret=0, callback V2 dispara — mas IngestorThread crasha:
@@ -1254,7 +1301,7 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 ## Q-DRIFT-34
 
 - **ID:** Q-DRIFT-34
-- **Status:** 🐛 **BUG-CÓDIGO — descoberta Story 1.7d 2026-05-05 (Quinn @qa)**
+- **Status:** 🐛 **BUG-CÓDIGO — HOTFIX-APPLIED-VALIDATED 2026-05-05 (Story 1.7d, postfix-35 standalone PASS, 796 963 trades)**
 - **Categoria:** orchestrator / ingestor / error-handling
 - **Título:** `IngestorThread._process_trade` morre silenciosamente em `format_brt_timestamp(timestamp_ns < 0)`, parando drenagem da queue mesmo com callback V2 ativo.
 - **Sintoma:** `run_smoke_real_standalone.py` (modo NÃO-minimal — full signatures) com WDOFUT/F + 4d. DLL OK, MARKET_CONNECTED OK, GetHistoryTrades ret=0, callback V2 dispara — primeira invocação de `translate_trade` retorna `rc=0` (DLL contente) mas `TConnectorTrade.TradeDate` ficou zerado (struct sentinel ou trade vazio inicial). `_system_time_to_ns_local(SystemTime zero)` produz `-2209161600000000000` (1601-01-01 BRT em ns relativo a 1970). `format_brt_timestamp` valida `ns >= 0` e levanta `ValueError`. `_process_trade` NÃO tem try/except → `IngestorThread` morre. Callback V2 segue enfileirando handles em `trade_queue`, ninguém drena, log final reporta `trades_count=0`.
@@ -1273,6 +1320,86 @@ ret: int = self._dll.DLLInitializeMarketLogin(
   - `src/data_downloader/dll/wrapper.py:1628-1646` (translate_trade — sem validação de TradeDate zero).
   - `src/data_downloader/orchestrator/download_primitive.py:323-369` (`_process_trade` — sem try/except).
   - `src/data_downloader/orchestrator/timestamp.py:141-142` (`format_brt_timestamp` — guard ns < 0 leva a kill thread).
+
+---
+
+## Q-DRIFT-35
+
+- **ID:** Q-DRIFT-35
+- **Status:** 🐛 **BUG-CÓDIGO — HOTFIX-APPLIED-VALIDATED 2026-05-05 (Story 1.7d, postfix-35 standalone PASS, 796 963 trades em 150s)**
+- **Categoria:** wrapper / dll / signatures / minimal-handshake
+- **Título:** `minimal_handshake=True` skipava `GetAgentNameLength` / `GetAgentName.argtypes` — length retornava `0x80000004` (`NL_NOT_FOUND`) reinterpretado como `c_int signed` = `-2147483636`, podendo causar access violation nativa silenciosa.
+- **Sintoma:** smoke postfix-34 (commit `8cc2b38`) morria em ~35s **sem traceback Python**. Log: `agent_resolver.unknown_id length=-2147483636` (×4). Processo terminava abruptamente.
+- **Causa raiz:** mesmo padrão de Q-DRIFT-33 — em modo `minimal_handshake=True`, `_configure_dll_signatures` é skipado integralmente. Q-DRIFT-33 já registrava `TranslateTrade.argtypes` cirurgicamente. Mas `GetAgentNameLength`/`GetAgentName` ficavam com defaults ctypes (argtypes None, restype c_int signed). Sem coerção stdcall em x64, retorno `c_uint32` (length positivo) interpretado como negativo gigantesco. Passar esse "length" como tamanho de buffer poderia causar AV nativa.
+- **Workaround / fix aplicado (commit `0f6c2ea`):** em modo `minimal_handshake`, registrar também `GetAgentNameLength` + `GetAgentName.argtypes/restype`:
+  ```python
+  self._dll.GetAgentNameLength.argtypes = [c_int, c_int]
+  self._dll.GetAgentNameLength.restype = c_int
+  self._dll.GetAgentName.argtypes = [c_int, c_int, c_wchar_p, c_int]
+  self._dll.GetAgentName.restype = c_int
+  ```
+  Adicionalmente: `faulthandler.enable(file=sys.stderr, all_threads=True)` em `scripts/run_smoke_real_standalone.py` e `scripts/probe_history_minimal.py` para capturar AVs nativas com stack trace.
+- **Manual diz:** silencioso (não menciona ctypes signatures).
+- **Evidência:** `docs/qa/SMOKE_EVIDENCE/logs/standalone-wdofut-postfix35-20260505T123005Z.log` (PASS, 796 963 trades).
+- **Data descoberta:** 2026-05-05 (mini-council pós smoke postfix-34).
+- **Data validation:** 2026-05-05 12:44 BRT (smoke standalone postfix-35 PASS).
+- **Aplica a stories:** 1.7d (smoke real WDOFUT), 1.7b (smoke MVP gate).
+- **Refs:**
+  - `src/data_downloader/dll/wrapper.py` (path `minimal_handshake=True` — argtypes preservados).
+  - [Q-DRIFT-33](#q-drift-33) (mesma classe — TranslateTrade signatures).
+  - [Q-DRIFT-12](#q-drift-12) (parent — bissection skip de signatures).
+  - `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T124433Z-postfix35-MIXED.md` (consolidado).
+
+---
+
+## Q-DRIFT-13 a 25 — bissection history
+
+> ⚠️ **Esta seção agrupa 13 hipóteses de bisseção da Story 1.7d (2026-05-04/05) sobre o "Sintoma A" — pytest harness trava `wait_market_connected` enquanto standalone funciona. Detalhes completos em [`docs/qa/SMOKE_EVIDENCE/RESUMO_EXECUTIVO_AUTONOMOUS_2026-05-04.md`](../qa/SMOKE_EVIDENCE/RESUMO_EXECUTIVO_AUTONOMOUS_2026-05-04.md). Quirks 13-22 todas REFUTADAS empiricamente; 23-25 ainda HIPÓTESES não validadas (especulativas).**
+>
+> **NOTA:** Sintoma A (pytest harness) é **separado** dos bugs reais de wrapper (Q-DRIFT-11/12/33/34/35) que afetavam tanto pytest quanto standalone. Após hotfixes 33/34/35, standalone PASS (796k trades em 150s). Pytest FAIL-handshake ainda em aberto — provavelmente bug de interação harness × ConnectorThread, não bug do nosso código de produção.
+
+| ID | Status | Hipótese | Refutada por |
+|----|--------|----------|--------------|
+| Q-DRIFT-13 | ⚠️ refuted | Signature `c_int` vs `wintypes.HRESULT` | Nelo audit |
+| Q-DRIFT-14 | ⚠️ refuted | Lifetime de callback CFUNCTYPE | Wrapper retém refs corretamente em `_cb_refs` |
+| Q-DRIFT-15 | ⚠️ refuted | argtypes/restype mutados pós-init | Match exato pré/pós |
+| Q-DRIFT-16 | ⚠️ refuted | Threading model MTA vs STA | Sem pytest funciona |
+| Q-DRIFT-17 | ⚠️ refuted | DLL hash diferente / múltiplo carregamento | sha256 idêntico |
+| Q-DRIFT-18 | ⚠️ refuted | pytest-qt autoload `CoInitializeEx(MTA)` | `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` mantém trava |
+| Q-DRIFT-19 | ⚠️ refuted | pytest fd-capture → ConnectorThread bloqueia em write | Callback dispara 2s/2s durante a "trava" |
+| Q-DRIFT-20 | ⚠️ refuted | pytest-cov instala `sys.settrace` global | Sem cov, trava igual |
+| Q-DRIFT-21 | ⚠️ refuted (tag não atribuída — gap de numeração no resumo executivo) | n/a | n/a |
+| Q-DRIFT-22 | ⚠️ refuted | `tests/conftest.py` raiz importa MockProfitDLL → ctypes pré-poluído | `--confcutdir=tests/smoke` mantém trava |
+| Q-DRIFT-23 | 🧪 hypothesis | pytest core `signal.signal(SIGINT, ...)` interage mal com DLL ConnectorThread | NÃO validada |
+| Q-DRIFT-24 | 🧪 hypothesis | assertion rewriter via `sys.settrace`/`sys.setprofile` residual | NÃO validada |
+| Q-DRIFT-25 | 🧪 hypothesis | pytest core `atexit` handlers | NÃO validada |
+
+**Recomendação:** Sintoma A (pytest harness) deve virar Story 1.7e separada com WAIVER se Q-DRIFT-23/24/25 não confirmarem em probe direcionado. Smoke real para release passa via `scripts/run_smoke_real_standalone.py`.
+
+**Refs:**
+- `docs/qa/SMOKE_EVIDENCE/RESUMO_EXECUTIVO_AUTONOMOUS_2026-05-04.md` (cronologia completa attempts 7-13).
+- `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T101516Z-attempt11-fastpath-FAIL-download.md`.
+- `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T100753Z-attempt11-confcutdir-FAIL.md`.
+
+---
+
+## Q-DRIFT-27 a 30 — sucessores históricos
+
+> ⚠️ **Esta seção agrupa 4 hipóteses sucessoras emergidas após Q-DRIFT-26 ser refutada (2026-05-05 ~10:35 BRT) e antes de Q-DRIFT-32 ser identificada (2026-05-05 ~11:22 BRT). TODAS REFUTADAS pela validação Q-DRIFT-32: bug real era contrato vencido (`WDOJ26`) vs continuous future (`WDOFUT`), NÃO os fluxos de wrapper.**
+
+| ID | Status | Hipótese | Refutada por |
+|----|--------|----------|--------------|
+| Q-DRIFT-27 | ⚠️ refuted | Exchange code `'F'` errado para WDOJ26 — talvez deveria ser `'BMF'`/`'B3'`/outro | Q-DRIFT-32 (PETR4/B PASS, WDOFUT/F PASS) |
+| Q-DRIFT-28 | ⚠️ refuted | `set_history_trade_callback_v2` race / ordem registrar/disparar | Probe ctypes puro espelhando exemplo Nelogica reproduz mesmo zero-trades com `WDOJ26` |
+| Q-DRIFT-29 | ⚠️ refuted | `TConnectorTrade` struct mismatch | `translate_failures=0` indica callback v2 nunca chamado, não falhou no translate |
+| Q-DRIFT-30 | ⚠️ refuted | `make_history_trade_callback_v2` factory ref-lifetime | Probe ctypes puro com factory inline reproduz mesmo zero-trades |
+
+**Verdict consolidado:** Q-DRIFT-32 explicou todos os 4 sintomas — usar `WDOFUT` (continuous) e o problema desaparece. Demais hipóteses ficam como histórico.
+
+**Refs:**
+- [Q-DRIFT-32](#q-drift-32) (validation canônica).
+- `docs/qa/SMOKE_EVIDENCE/sanity-petr4-wdok26-20260505T110756Z.md`.
+- `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T114247Z-wdofut-CONSOLIDADO-PARTIAL.md`.
 
 ---
 

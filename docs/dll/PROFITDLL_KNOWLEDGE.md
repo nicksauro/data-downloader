@@ -10,6 +10,24 @@
 
 ---
 
+## ⚡ Quick Reference Canonical (top 5 do-and-don't)
+
+Auditoria 2026-05-05 (council Sol — `docs/decisions/COUNCIL-35-Sol-documentacao-2026-05-05.md`) consolidou as seguintes regras de ouro a partir da cadeia Q-DRIFT-31..35:
+
+| # | DO ✅ | DON'T ❌ | Ref |
+|---|-------|----------|-----|
+| 1 | **Histórico:** usar `WDOFUT`/`WINFUT` (continuous future) — entrega 723k–796k trades em 4–5d | NÃO usar contrato específico vencido (`WDOJ26` abril/2026) — retorna 0 trades silenciosamente | [Q-DRIFT-32](./QUIRKS.md#q-drift-32) (supersede Q01-V refutada) |
+| 2 | **Janela:** `GetHistoryTrades` máximo ~5 dias úteis para WDO (1d para WIN). Exemplo C++ usa 2d. | NÃO pedir 30d em uma chamada — servidor Nelogica retorna code=0 silenciosamente sem despachar trades | [Q-DRIFT-31](./QUIRKS.md#q-drift-31), [Q12-E](./QUIRKS.md#q12-e) |
+| 3 | **Subscribe sempre antes de GetHistory:** `SubscribeTicker(symbol, exchange)` → `SetHistoryTradeCallbackV2` → `GetHistoryTrades` → `UnsubscribeTicker` | NÃO chamar `GetHistoryTrades` sem `SubscribeTicker` prévio (autoridade Nelogica direta) — callback V2 nunca dispara mesmo com `NL_OK` | [Q-DRIFT-07](./QUIRKS.md#q-drift-07), §2.7 |
+| 4 | **Init slots:** passar `None` literal nos 4 slots não usados de `DLLInitializeMarketLogin` (4=trade, 6=histTrade, 7=priceBook, 8=offerBook); `None` nos 4 + REAL nos 3 (5=daily, 9=progress, 10=tinyBook). Espelha `main.py` L742-743 | NÃO usar `NoopCallback` em slots não usados — bloqueia ConnectorThread durante handshake. NÃO passar `None` em slots 5/9/10 — DLL espera ack do snapshot inicial e trava em `(2,1)` | [Q11-E REFUTED](./QUIRKS.md#q11-e), [Q-DRIFT-06](./QUIRKS.md#q-drift-06), [Q-DRIFT-11](./QUIRKS.md#q-drift-11), [Q-DRIFT-12](./QUIRKS.md#q-drift-12) |
+| 5 | **Argtypes/restype canônicos:** mesmo em `minimal_handshake=True`, registrar argtypes para `TranslateTrade`, `GetAgentNameLength`, `GetAgentName`, `SubscribeTicker`, `UnsubscribeTicker`, `GetHistoryTrades` ANTES de qualquer download | NÃO confiar em defaults ctypes (`c_int 32-bit signed`) em x64 stdcall — handles `c_size_t` truncam, length retorna `0x80000004 = -2147483636` | [Q-DRIFT-08](./QUIRKS.md#q-drift-08), [Q-DRIFT-33](./QUIRKS.md#q-drift-33), [Q-DRIFT-35](./QUIRKS.md#q-drift-35), §2.8 |
+
+> **Regra absoluta de callback (R3 / [Q06-V](./QUIRKS.md#q06-v)):** todo callback registrado faz APENAS `queue.put_nowait(...)` e retorna em <100µs. NUNCA chamar funções da DLL de dentro do callback. NUNCA fazer log/print/I/O/sleep dentro do callback.
+
+> **Regra absoluta de ctypes ([Q07-V](./QUIRKS.md#q07-v)):** lista global `_cb_refs: list = []` retém todos `WINFUNCTYPE`-wrapped objects. Append todo callback criado, never clear durante a vida do processo.
+
+---
+
 ## Índice
 
 1. [Visão geral da DLL (manual §2)](#1-visão-geral)
@@ -114,9 +132,9 @@ A Nelogica modernizou a API ao longo das versões 4.0.0.18+ adicionando funçõe
 | `GetHistoryTrades(ticker, bolsa, dtStart, dtEnd)` | dispara `HistoryTradeCallback` + `ProgressCallback` |
 
 **`GetHistoryTrades` quirks:**
-- **Q01-V**: `WDOFUT`/`WINFUT` (genéricos) retornam **0 trades** em janelas históricas. Usar **contrato vigente** (`WDOJ26`, `WINH26`).
+- ~~**Q01-V**: `WDOFUT`/`WINFUT` (genéricos) retornam **0 trades** em janelas históricas. Usar **contrato vigente** (`WDOJ26`, `WINH26`).~~ **REFUTADA 2026-05-05** — ver [Q-DRIFT-32](./QUIRKS.md#q-drift-32). Realidade: **SEMPRE usar `WDOFUT`/`WINFUT` (continuous future)** para histórico. Contratos específicos vencidos é que retornam 0 trades.
 - **Q02-E**: progresso 99% NÃO é trava — DLL cicla conexão antes de entregar histórico. Aguardar até **1800s** sem progresso real.
-- **Q12-E**: chunk size **adaptativo** — WDO 5d, WIN 1d funciona. Maior pode timeout.
+- **Q-DRIFT-31 / Q12-E**: chunk size **adaptativo** — WDO 5d, WIN 1d funciona. Maior pode timeout. Validado empiricamente 2026-05-05 (probe entrega 723k trades em 4d com WDOFUT).
 
 ### 2.5 Trading — Ordens (V2)
 
