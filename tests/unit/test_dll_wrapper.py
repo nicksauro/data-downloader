@@ -229,6 +229,90 @@ def test_initialize_market_only_raises_dllinit_error_on_negative_return(
 
 
 # =====================================================================
+# Story 1.7b-followup smoke 5 — register_extra_callbacks default OFF
+# =====================================================================
+
+
+@pytest.mark.unit
+def test_initialize_market_only_skips_extra_callbacks_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``register_extra_callbacks=False`` NÃO chama _register_default_callbacks.
+
+    Story 1.7b-followup smoke 5: 14 NoopCallback registrados via SetXxxCallback
+    causaram access violations + stack overflow durante wait_market_connected
+    (signatures genéricas vs. signatures DIFERENTES esperadas por cada
+    Set*Callback). Fix conservador: registro EXTRA é opt-in.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, _dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch.object(dll, "_register_default_callbacks") as mock_register,
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS")
+
+    # Default: opt-in NÃO acionado — método não foi chamado.
+    mock_register.assert_not_called()
+
+
+@pytest.mark.unit
+def test_initialize_market_only_registers_extra_callbacks_when_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``register_extra_callbacks=True`` chama _register_default_callbacks (opt-in)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, _dll_instance = _make_mock_dll_module()
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch.object(dll, "_register_default_callbacks") as mock_register,
+        patch("ctypes.WinDLL", windll_mock, create=True),
+    ):
+        dll.initialize_market_only("KEY", "USER", "PASS", register_extra_callbacks=True)
+
+    # Opt-in acionado — método foi chamado uma vez.
+    mock_register.assert_called_once()
+
+
+@pytest.mark.unit
+def test_initialize_market_only_skips_extra_callbacks_on_negative_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Erro no init NÃO deve chamar _register_default_callbacks (raise antes)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    windll_mock, dll_instance = _make_mock_dll_module()
+    dll_instance.DLLInitializeMarketLogin.return_value = -2147483393
+
+    fake_dll_path = tmp_path / "ProfitDLL.dll"
+    fake_dll_path.touch()
+    dll = ProfitDLL(dll_path=fake_dll_path)
+
+    with (
+        patch.object(dll, "_verify_companions"),
+        patch.object(dll, "_register_default_callbacks") as mock_register,
+        patch("ctypes.WinDLL", windll_mock, create=True),
+        pytest.raises(DLLInitError),
+    ):
+        # Mesmo com opt-in, erro no init impede registro extra.
+        dll.initialize_market_only("KEY", "USER", "PASS", register_extra_callbacks=True)
+    mock_register.assert_not_called()
+
+
+# =====================================================================
 # AC5 / Q-AMB-01 — wait_market_connected
 # =====================================================================
 

@@ -474,6 +474,8 @@ class ProfitDLL:
         key: str,
         user: str,
         password: str,
+        *,
+        register_extra_callbacks: bool = False,
     ) -> None:
         """Inicializa a DLL em modo market-only (sem trading).
 
@@ -490,11 +492,35 @@ class ProfitDLL:
             6. ``DLLInitializeMarketLogin(key, user, password, state, ...7
                noop)`` — 11 args totais (manual §3.1).
             7. Verifica retorno; se < 0, raises ``DLLInitError`` (AC7).
+            8. Opcional (``register_extra_callbacks=True``): registra os 14
+               ``Set*Callback`` extras alinhados ao exemplo Nelogica
+               (main.py L745-761). DESABILITADO por default — ver nota abaixo.
 
         Args:
             key: Chave de licença ProfitDLL (Nelogica).
             user: Usuário Profit (B3 broker login).
             password: Senha Profit.
+            register_extra_callbacks: Se ``True``, registra os 14
+                ``Set*Callback`` default (AssetList, OfferBookV2, OrderCallback,
+                etc.) com NoopCallbacks após o init. **Default ``False``**
+                (Story 1.7b-followup smoke 5): smoke real 2026-05-04 chegou a
+                ``MARKET_LOGIN_OK`` + ``LOGIN_CONNECTED`` mas a DLL crashou
+                repetidamente durante ``wait_market_connected`` com access
+                violations + stack overflow. Causa-raiz mais provável: as 14
+                ``NoopCallback`` registradas têm signatures genéricas, mas cada
+                ``Set*Callback`` espera uma signature DIFERENTE — invocações
+                desalinhadas geram corrupção de stack.
+
+                Para download histórico (caso de uso atual) precisamos APENAS
+                de: state callback (já registrado no slot 4 do
+                ``DLLInitializeMarketLogin``), ``SetHistoryTradeCallbackV2``
+                registrado on-demand em ``download_chunk``, e
+                ``subscribe_ticker`` (chamada direta, não callback). Os 14
+                extras são para casos de uso DIFERENTES (livro de ofertas em
+                tempo real, ordens, contas). Quando Epic 3 implementar UI de
+                livro/ordens, este kwarg pode ser ``True`` — mas antes
+                precisamos signatures corretas (TODO: Story 1.7b-Q-DRIFT-09
+                follow-up para auditar e corrigir signatures por callback).
 
         Raises:
             DLLInitError: Se companions faltantes (COMPANIONS_MISSING),
@@ -614,13 +640,31 @@ class ProfitDLL:
 
         log.info("dll.initialized", code=ret)
 
-        # Story 1.7b-followup: registrar 14 callbacks default ANTES de
-        # ``wait_market_connected`` — alinha exatamente com exemplo oficial
-        # Nelogica (main.py L745-761). Inicialização sem esses registros pode
-        # deixar slots NULL e impedir o handshake (smoke 2026-05-04 refutou
-        # hipóteses ProfitChart e MARKET_WAITING — alinhamento ao exemplo é
-        # o caminho seguro).
-        self._register_default_callbacks()
+        # Story 1.7b-followup smoke 5 (2026-05-04): smoke real chegou a
+        # MARKET_LOGIN_OK + LOGIN_CONNECTED mas a DLL crashou repetidamente
+        # durante ``wait_market_connected`` com access violations + stack
+        # overflow. Causa-raiz mais provável: os 14 ``NoopCallback``
+        # registrados em ``_register_default_callbacks`` têm signatures
+        # genéricas, mas cada ``Set*Callback`` espera signature DIFERENTE —
+        # invocações desalinhadas pela DLL corrompem a stack.
+        #
+        # Fix conservador: registro EXTRA é OPCIONAL (default False). Para
+        # download histórico (caso de uso atual) precisamos só de:
+        #   - state callback (já registrado no slot 4 do init)
+        #   - SetHistoryTradeCallbackV2 (registrado on-demand em download_chunk)
+        #   - subscribe_ticker (chamada direta)
+        # Os 14 extras são para casos de uso DIFERENTES (livro tempo real,
+        # ordens, contas). Quando Epic 3 implementar UI livro/ordens, ativar
+        # esta flag — MAS antes precisamos auditar signatures por callback.
+        # TODO Story 1.7b-Q-DRIFT-09 follow-up: signatures corretas.
+        if register_extra_callbacks:
+            log.info("dll.register_extra_callbacks_enabled")
+            self._register_default_callbacks()
+        else:
+            log.info(
+                "dll.register_extra_callbacks_skipped",
+                reason="default_disabled_smoke5_access_violations",
+            )
 
     # =================================================================
     # Default callbacks registration (Story 1.7b-followup)
@@ -628,6 +672,14 @@ class ProfitDLL:
 
     def _register_default_callbacks(self) -> None:
         """Registra 14 callbacks default com NoopCallback (alinha exemplo Nelogica).
+
+        **OPT-IN (Story 1.7b-followup smoke 5):** Este método é chamado APENAS
+        quando ``initialize_market_only(..., register_extra_callbacks=True)``.
+        Default é ``False`` porque smoke real 2026-05-04 mostrou access
+        violations + stack overflow durante ``wait_market_connected`` com este
+        registro ativo — signatures genéricas dos 14 NoopCallback não batem
+        com o que cada ``Set*Callback`` espera (TODO Story 1.7b-Q-DRIFT-09:
+        auditar signatures por callback).
 
         Itera ``DEFAULT_CALLBACK_REGISTRATIONS`` (definição em ``types.py``
         — ordem replicada literalmente de ``profitdll/Exemplo Python/main.py``
