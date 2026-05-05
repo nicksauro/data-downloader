@@ -1158,6 +1158,34 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ---
 
+## Q-DRIFT-26
+
+- **ID:** Q-DRIFT-26
+- **Status:** ❌ **REFUTADA — Story 1.7d standalone-pregao 2026-05-05 10:35 BRT (Quinn @qa)**
+- **Categoria:** download / history / data validity
+- **Título:** Hipótese: GetHistoryTrades exige data dentro de janela de pregão recente — data antiga (e.g. 2026-04-15) ou data fora de pregão NÃO dispara TC_LAST_PACKET (callback nunca chamado).
+- **Sintoma original (attempt 11 sub-2, 2026-05-05 10:15 BRT):** `scripts/run_smoke_real_standalone.py` com data fixa 2026-04-15 09:00→17:30 (WDOJ26, 'F') CONECTOU em 1.43s, GetHistoryTrades retornou code=0, mas após 600s NENHUM trade chegou. Suspeita: data fora de janela útil → servidor Nelogica não despacha histórico.
+- **Experimento discriminante (Story 1.7d, sub-run 2026-05-05 10:35 BRT — TERÇA, pregão B3 ABERTO):**
+  - **Setup idêntico** ao sub-2 anterior, EXCETO data: `dt_start = datetime.now() - timedelta(hours=2)` e `dt_end = datetime.now() - timedelta(minutes=10)`. Janela ativa: 05/05/2026 08:35:39 → 10:25:39 BRT, durante pregão aberto.
+  - **Resultado:** **FAIL-zero-trades-novamente** (idêntico ao sub-2 com data antiga). Connect=1.40s, download=600.21s timeout, trades=0, last_packet_seen=False, progress_history_len=0, translate_failures=0, trade_edits=0.
+  - **Diferença única vs sub-2:** apenas a data (de 2026-04-15 fixa → janela dinâmica em pregão aberto). Todo resto idêntico (mesmo símbolo WDOJ26, mesmo exchange 'F', mesmo wrapper, mesmo `minimal_handshake=True`, mesmo timeout 600s, mesmo standalone fast-path).
+- **Conclusão:** O bug **NÃO** é a data. Mesmo em pregão B3 aberto (terça 05/05 ~10h35 BRT, mercado ativo) com janela dinâmica recente, callback v2 nunca dispara. **O bug está no fluxo `subscribe_ticker → set_history_trade_callback_v2 → get_history_trades` em si**, independente da data.
+- **Hipóteses sucessoras (a investigar — NÃO refutadas):**
+  - **Q-DRIFT-27:** Exchange code `'F'` errado para WDOJ26 — talvez deveria ser `'BMF'`, `'B3'` ou outro. (Manual ProfitDLL §3.1 L1673 lista `('F','B')` mas pode haver tickers que exigem string específica.)
+  - **Q-DRIFT-28:** `set_history_trade_callback_v2` não está sendo registrado ANTES de `get_history_trades` (race / ordem) OU não persiste corretamente entre chamadas.
+  - **Q-DRIFT-29:** `TConnectorTrade` struct mismatch — `translate_trade(handle)` retorna `None` silenciosamente para todos os trades chegando do servidor (counter `translate_failures` deveria refletir, mas marcou 0 — indica que callback v2 nunca foi chamado, não que falhou no translate).
+  - **Q-DRIFT-30 (alternativa):** `make_history_trade_callback_v2` factory grava CFUNCTYPE em ref local mas `set_history_trade_callback_v2` aceita só wrapper (lifetime do ctypes pode estar coletado entre register e fire).
+- **Próxima ação:** comparar fluxo subscribe+history do `profitdll/Exemplo Python/main.py` com nosso `download_chunk` linha-a-linha; rodar probe `ctypes` puro (sem ProfitDLL class) que faz subscribe+history+v2_callback para isolar se é wrapper ou DLL.
+- **Data descoberta (refutação):** 2026-05-05 10:35 BRT (Quinn @qa, modo autônomo).
+- **Aplica a stories:** 1.7d (smoke real fail), 1.7b (smoke MVP gate — bloqueado).
+- **Refs:**
+  - `docs/qa/SMOKE_EVIDENCE/logs/standalone-pregao-20260505T103538Z.log` (evidência refutação).
+  - `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T103538Z-standalone-pregao-FAIL-zero-trades-novamente.md` (relatório).
+  - `scripts/run_smoke_real_standalone.py` L60-65 (data dinâmica aplicada).
+  - `src/data_downloader/orchestrator/download_primitive.py:496-749` (download_chunk completo).
+
+---
+
 ## Manutenção
 
 - **Adicionar quirk:** comando Nelo `*add-quirk {description}` OU edit manual aqui.

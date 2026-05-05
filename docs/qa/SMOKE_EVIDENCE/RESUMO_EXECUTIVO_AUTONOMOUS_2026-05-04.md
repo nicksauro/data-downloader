@@ -130,3 +130,36 @@ Workaround possível (não aplicado): WAIVER formal para Story 1.7 com checklist
 ---
 
 **Última atualização:** 2026-05-05 10:35 BRT (attempt 11 completo).
+
+---
+
+## Adendo 2026-05-05 ~10:46 BRT — sub-run 3 (PREGÃO ABERTO + DATA DINÂMICA)
+
+**Verdict:** `FAIL-zero-trades-novamente` (idêntico ao sub-2 com data fixa).
+
+**Setup:** Mesmo `scripts/run_smoke_real_standalone.py`, terça 05/05 10:35 BRT
+(pregão B3 ABERTO), com **única alteração** vs sub-2: data dinâmica
+`datetime.now() - timedelta(hours=2)` → `datetime.now() - timedelta(minutes=10)`.
+
+**Resultado:** connect=1.40s, download=600.21s timeout, trades=0,
+last_packet_seen=False, progress_history_len=0, translate_failures=0,
+trade_edits=0, get_history_trades **code=0** (success).
+
+**Q-DRIFT-26 REFUTADA.** Bug NÃO é a data — é o fluxo de download
+(`subscribe_ticker → set_history_trade_callback_v2 → get_history_trades`)
+em si. DLL aceita todas as chamadas (`code=0`) mas callback v2 NUNCA dispara.
+
+**Hipóteses sucessoras (Q-DRIFT-27/28/29/30):** Q-DRIFT-26 documentada como
+REFUTADA em `docs/dll/QUIRKS.md`. Hipóteses 27-30 listadas como "a investigar"
+— próximo turno: probe `ctypes` puro reproduzindo `profitdll/Exemplo Python/main.py`
+linha-a-linha para isolar wrapper vs semântica DLL.
+
+**Refs:**
+- `docs/qa/SMOKE_EVIDENCE/1.7d-20260505T103538Z-standalone-pregao-FAIL-zero-trades-novamente.md`
+- `docs/qa/SMOKE_EVIDENCE/logs/standalone-pregao-20260505T103538Z.log`
+
+**Caminhos atualizados:**
+- ❌ Caminho C (data dinâmica) **REFUTADO** como solução técnica simples.
+- Caminho A (continuar bisection) **agora é Q-DRIFT-27/28/29/30** — não mais Q-DRIFT-26.
+- Caminho B (WAIVER) **prioridade aumentada** — Sintoma B é mais fundo do que
+  apenas "data inválida"; pode levar dias para discriminar wrapper vs DLL.
