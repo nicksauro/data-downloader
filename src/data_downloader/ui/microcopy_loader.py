@@ -623,6 +623,27 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "BTN_CHANGE_DATA_DIR": MicrocopyEntry(msg_type="button", title="Mudar Pasta"),
     "BTN_OPEN_DATA_DIR": MicrocopyEntry(msg_type="button", title="Abrir no Explorer"),
     "BTN_INTEGRITY_CHECK": MicrocopyEntry(msg_type="button", title="Verificar Integridade"),
+    # Story 4.10 v1.0.3 — Settings/Storage actions (integrity + reconcile from
+    # SettingsScreen). Distintos dos toasts do CatalogScreen pois o fluxo aqui
+    # é "validar todas partições" (integrity) ou "reconciliar tudo" (reconcile).
+    "TST_SETTINGS_INTEGRITY_RUNNING": MicrocopyEntry(
+        msg_type="info",
+        title="↻ Verificando integridade de {n_partitions} partições...",
+    ),
+    "TST_SETTINGS_INTEGRITY_OK": MicrocopyEntry(
+        msg_type="success",
+        title="✓ Integridade OK ({n_ok}/{n_total} partições válidas).",
+    ),
+    "TST_SETTINGS_INTEGRITY_DRIFT": MicrocopyEntry(
+        msg_type="warning",
+        title="⚠ {n_bad} de {n_total} partições com drift detectado.",
+    ),
+    "TST_SETTINGS_RECONCILE_RUNNING": MicrocopyEntry(
+        msg_type="info", title="↻ Reconciliando catálogo..."
+    ),
+    "TST_SETTINGS_OPERATION_ERROR": MicrocopyEntry(
+        msg_type="error", title="✗ Erro ao executar operação: {error}"
+    ),
     "BTN_DOCTOR_FULL": MicrocopyEntry(msg_type="button", title="Diagnóstico Completo (doctor)"),
     "BTN_SAVE_SETTINGS": MicrocopyEntry(msg_type="button", title="Salvar"),
     "BTN_OPEN_ENV_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta .env"),

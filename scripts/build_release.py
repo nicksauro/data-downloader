@@ -30,7 +30,10 @@ Pipeline:
     5. Invoca ``python -m PyInstaller build/data_downloader.spec
        --noconfirm --clean`` (skip se ``--dry-run``).
     6. Valida output:
-       - ``dist/data_downloader/data_downloader.exe`` existe.
+       - ``dist/data_downloader/data_downloader.exe`` existe (UI windowed).
+       - ``dist/data_downloader/data_downloader-cli.exe`` existe (CLI console).
+         (Story 4.8 dual EXE — Pichau directive 2026-05-06, council Aria
+         Opção A: separar default UI sem janela preta de CLI explícita.)
        - DLLs companions presentes.
        - Tamanho total no range esperado (50-200 MB).
     7. Computa SHA256 de cada arquivo no ``dist/data_downloader/``
@@ -105,6 +108,15 @@ ICON_PATH_REL: Final[str] = "../src/data_downloader/ui/assets/icon.ico"
 
 # Output directory name produced by spec (matches spec.coll.name).
 ONEDIR_NAME: Final[str] = "data_downloader"
+
+# Story 4.8 (Pichau directive 2026-05-06, council Aria Opção A): bundle agora
+# emite DOIS executáveis no mesmo onedir — `data_downloader.exe` (windowed,
+# default UI) e `data_downloader-cli.exe` (console, CLI explícita). Ambos
+# precisam estar presentes no output para o build ser válido.
+REQUIRED_EXECUTABLES: Final[tuple[str, ...]] = (
+    "data_downloader.exe",
+    "data_downloader-cli.exe",
+)
 
 # Size sanity range (MB).
 #
@@ -299,9 +311,15 @@ def validate_output() -> Path:
     if not onedir.is_dir():
         raise FileNotFoundError(f"Output onedir ausente: {onedir}")
 
-    exe = onedir / f"{ONEDIR_NAME}.exe"
-    if not exe.is_file():
-        raise FileNotFoundError(f"Executável ausente: {exe}")
+    # Story 4.8: dual EXE — ambos `data_downloader.exe` (windowed) e
+    # `data_downloader-cli.exe` (console) precisam estar presentes.
+    for exe_name in REQUIRED_EXECUTABLES:
+        exe_path = onedir / exe_name
+        if not exe_path.is_file():
+            raise FileNotFoundError(
+                f"Executável ausente: {exe_path} "
+                f"(Story 4.8 dual EXE — UI + CLI ambos requeridos)"
+            )
 
     for companion in REQUIRED_DLL_COMPANIONS:
         # PyInstaller 6.x default isola binaries em ``_internal/``. Aceitar
