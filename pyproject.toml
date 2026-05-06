@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data_downloader"
-version = "0.1.0"
+version = "1.0.0"
 description = "Downloader de histórico de ativos via ProfitDLL — fundação para projetos futuros"
 requires-python = ">=3.12"
 authors = [{name = "Squad data-downloader"}]
 readme = "README.md"
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: Other/Proprietary License",
     "Operating System :: Microsoft :: Windows",

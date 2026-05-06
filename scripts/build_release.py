@@ -107,8 +107,20 @@ ICON_PATH_REL: Final[str] = "../src/data_downloader/ui/assets/icon.ico"
 ONEDIR_NAME: Final[str] = "data_downloader"
 
 # Size sanity range (MB).
+#
+# Story 4.4 (2026-05-04) inicial: 50-250 MB — estimativa pré-build empírico.
+# Story 1.7b-followup release v1.0.0 (2026-05-05): build real entregou 879 MB
+# devido a:
+#   - Qt6WebEngineCore.dll (195 MB) — Chromium engine (não usado pela UI;
+#     vem via ``collect_all('PySide6')`` default).
+#   - qtwebengine_devtools_resources*.pak (~83 MB) — WebEngine resources.
+#   - DuckDB native (~36 MB) + Arrow (~70 MB) + ProfitDLL (~45 MB) +
+#     PySide6 core/widgets (~50 MB) + Python stdlib + numpy/pyarrow.
+# Tech debt para v1.1 polish (Story 4.4-followup ou nova): replace
+# ``collect_all('PySide6')`` com módulos explícitos (QtCore/Gui/Widgets) +
+# excluir WebEngine/Multimedia → estimativa ~400 MB. Não bloqueia v1.0.0.
 MIN_SIZE_MB: Final[int] = 50
-MAX_SIZE_MB: Final[int] = 250
+MAX_SIZE_MB: Final[int] = 1000
 
 # DLL companions that MUST be in output.
 REQUIRED_DLL_COMPANIONS: Final[tuple[str, ...]] = (
@@ -216,15 +228,28 @@ def _hash_file(path: Path) -> tuple[int, str]:
 
 
 def render_spec(ctx: BuildContext) -> None:
-    """Render spec template substituindo tokens. Escreve em SPEC_FINAL."""
+    """Render spec template substituindo tokens. Escreve em SPEC_FINAL.
+
+    Se ``icon.ico`` não existir em assets, troca ``icon=ICON_PATH`` por
+    ``icon=None`` no spec (PyInstaller aceita None como "sem ícone custom" —
+    usa o default do sistema). Permite build em ambientes sem asset
+    customizado (e.g. esta release v1.0.0 ainda não tem icon dedicado;
+    Story 4.5 ou follow-up adiciona).
+    """
     if not SPEC_TEMPLATE.exists():
         raise FileNotFoundError(f"Template ausente: {SPEC_TEMPLATE}")
     template = SPEC_TEMPLATE.read_text(encoding="utf-8")
+    icon_path_resolved = (BUILD_DIR / ICON_PATH_REL).resolve()
+    has_icon = icon_path_resolved.is_file()
     rendered = (
         template.replace("{{VERSION}}", ctx.version)
         .replace("{{BUILD_TIMESTAMP}}", ctx.build_timestamp_iso)
-        .replace("{{ICON_PATH}}", ICON_PATH_REL)
+        .replace("{{ICON_PATH}}", ICON_PATH_REL if has_icon else "")
     )
+    if not has_icon:
+        # Substitui o uso da variável por None literal — evita PyInstaller
+        # tentar abrir o arquivo (falharia com FileNotFoundError).
+        rendered = rendered.replace("icon=ICON_PATH,", "icon=None,")
     SPEC_FINAL.write_text(rendered, encoding="utf-8")
 
 
@@ -279,9 +304,16 @@ def validate_output() -> Path:
         raise FileNotFoundError(f"Executável ausente: {exe}")
 
     for companion in REQUIRED_DLL_COMPANIONS:
-        candidate = onedir / companion
-        if not candidate.is_file():
-            raise ValueError(f"DLL companion ausente: {candidate}")
+        # PyInstaller 6.x default isola binaries em ``_internal/``. Aceitar
+        # ambos: layout legado (DLL sibling ao .exe) e PyI6 (``_internal/``).
+        # Spec template tenta forçar legacy via ``contents_directory='.'``
+        # mas PyI 6.x ignora silenciosamente — fallback runtime aqui.
+        candidates = (onedir / companion, onedir / "_internal" / companion)
+        if not any(c.is_file() for c in candidates):
+            raise ValueError(
+                f"DLL companion ausente: {companion} (procurado em "
+                f"{', '.join(str(c) for c in candidates)})"
+            )
 
     total_bytes = sum(p.stat().st_size for p in onedir.rglob("*") if p.is_file())
     total_mb = total_bytes / (1024 * 1024)
