@@ -48,7 +48,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
@@ -59,6 +59,7 @@ from data_downloader.observability.logging_config import (
     clear_context,
     unbind_context,
 )
+from data_downloader.orchestrator.chunk_strategy import get_chunk_days
 from data_downloader.orchestrator.chunker import ChunkRange, chunk_date_range
 from data_downloader.orchestrator.circuit_breaker import (
     CircuitBreaker,
@@ -85,7 +86,7 @@ from data_downloader.storage.partition import PartitionKey
 from data_downloader.storage.schema import TradeRecord as SchemaTradeRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from data_downloader.dll.wrapper import ProfitDLL
@@ -96,6 +97,8 @@ if TYPE_CHECKING:
     from data_downloader.storage.parquet_writer import ParquetWriter, WriteResult
 
 __all__ = [
+    "ChunkCompletedEvent",
+    "ChunkListener",
     "JobConfig",
     "JobResult",
     "Orchestrator",
@@ -195,6 +198,85 @@ class OrchestratorMetrics:
 
 
 @dataclass(frozen=True)
+class ChunkCompletedEvent:
+    """Evento imutável emitido após cada chunk processado (Story 4.16).
+
+    Owner: Dex (impl) | Pichau directive 2026-05-06.
+
+    Produzido pelo orchestrator após cada chunk (independente de status —
+    sucesso, no_trades ou falha definitiva) e entregue ao ``chunk_listener``
+    injetado em :meth:`Orchestrator.run`. UI consome para atualizar a barra
+    de progresso (chunks_completed / total_chunks * 100).
+
+    Frozen por design (R6 — thread-safety por imutabilidade). Cool path
+    cool-rate (1 evento por chunk — R21 OK).
+
+    Attributes:
+        chunk_index: Índice 0-based do chunk no plano de execução. Em jobs
+            resume, conta a partir de 0 do plano de chunks faltantes.
+        total_chunks: Total de chunks planejados para este run. Em jobs
+            resume, reflete apenas os chunks faltantes (não inclui os
+            já-completos da run anterior).
+        chunk_start: Início do chunk (apenas a parte ``date`` — convenção
+            stable da DownloadProgress; UI agrega range, não timestamp
+            preciso).
+        chunk_end: Fim do chunk (apenas a parte ``date``).
+        trades_count: Trades baixados+persistidos neste chunk. ``0`` se
+            o chunk não retornou trades (gap registrado) ou falhou.
+        duration_seconds: Tempo total do chunk (download + write +
+            register), em segundos com precisão de microssegundos.
+        status: ``"success"`` (trades persistidos), ``"no_trades"`` (chunk
+            válido mas vazio — gap registrado), ``"failed"`` (falha
+            definitiva pós-retry; gap registrado), ``"circuit_open"``
+            (rejeitado pelo breaker).
+
+    Examples:
+        Wiring orchestrator → UI Qt::
+
+            def emit_to_ui(event: ChunkCompletedEvent) -> None:
+                progress_bar.setValue(int(event.progress_pct))
+                label.setText(
+                    f"{event.chunk_index + 1}/{event.total_chunks} "
+                    f"chunks ({event.trades_count:,} trades) — "
+                    f"{event.progress_pct:.1f}%"
+                )
+
+            orchestrator.run(config, chunk_listener=emit_to_ui)
+    """
+
+    chunk_index: int
+    total_chunks: int
+    chunk_start: date
+    chunk_end: date
+    trades_count: int
+    duration_seconds: float
+    status: Literal["success", "no_trades", "failed", "circuit_open"] = "success"
+
+    @property
+    def progress_pct(self) -> float:
+        """Percentual de progresso (0.0 .. 100.0) após este chunk.
+
+        ``(chunk_index + 1) / total_chunks * 100`` — assume ``chunk_index``
+        é 0-based. Defesa: se ``total_chunks <= 0``, retorna 0.0
+        (evita ZeroDivisionError em jobs degenerados).
+        """
+        if self.total_chunks <= 0:
+            return 0.0
+        return 100.0 * (self.chunk_index + 1) / self.total_chunks
+
+
+# Type alias — listener callback para chunk events.
+# Usado em :meth:`Orchestrator.run` para wiring opcional com UI / events_queue.
+# Definido como type-comment em runtime (não vira tipo callable) — uso só
+# para documentação. Caller passa ``Callable[[ChunkCompletedEvent], None]``
+# em ``chunk_listener=``.
+if TYPE_CHECKING:
+    ChunkListener = Callable[[ChunkCompletedEvent], None]
+else:
+    ChunkListener = object  # placeholder — runtime usa duck-typing
+
+
+@dataclass(frozen=True)
 class JobResult:
     """Resultado imutável de :meth:`Orchestrator.run`.
 
@@ -283,6 +365,7 @@ class Orchestrator:
         *,
         resume_job_id: str | None = None,
         cancel_event: threading.Event | None = None,
+        chunk_listener: Callable[[ChunkCompletedEvent], None] | None = None,
     ) -> JobResult:
         """Executa o job: chunking → loop download/write/register → finalize.
 
@@ -298,6 +381,12 @@ class Orchestrator:
                 AC8). Se ``None``, registra novo job.
             cancel_event: Event cooperativo opcional. Se setado, loop de
                 chunks aborta na próxima iteração (graceful drain).
+            chunk_listener: Callback opcional invocado APÓS cada chunk
+                processado (Story 4.16 — Pichau directive 2026-05-06).
+                Recebe :class:`ChunkCompletedEvent` com índice / total /
+                duration / status. Cool path (1 chamada por chunk —
+                R21 OK). Falhas no listener são suprimidas (best-effort
+                — UI não pode quebrar o orchestrator).
 
         Returns:
             :class:`JobResult` com status final + métricas.
@@ -402,7 +491,8 @@ class Orchestrator:
             # (cool path — set 1x antes do loop, 0 ao final no finally).
             self._metrics.set_gauge("active_downloads", 1.0)
             partitions_written: list[Path] = []
-            for chunk in chunks:
+            total_chunks = len(chunks)
+            for chunk_index, chunk in enumerate(chunks):
                 # Story 2.11 — H10 closure: cancel cooperativo entre chunks.
                 # NÃO interrompe chunk em andamento (preserva idempotência R5
                 # + INV-12: chunk começa com fila vazia, termina com partition
@@ -413,12 +503,12 @@ class Orchestrator:
                         job_id=job_id,
                         chunks_completed=metrics.chunks_completed,
                         chunks_failed=metrics.chunks_failed,
-                        chunks_remaining=len(chunks)
+                        chunks_remaining=total_chunks
                         - (metrics.chunks_completed + metrics.chunks_failed),
                     )
                     break
 
-                result = self._process_chunk(
+                result, event_status, chunk_duration, chunk_trades = self._process_chunk(
                     job_id=job_id,
                     config=config,
                     contract_code=contract_code,
@@ -427,6 +517,38 @@ class Orchestrator:
                 )
                 if result is not None:
                     partitions_written.append(result.path)
+
+                # Story 4.16 — emite ChunkCompletedEvent (cool path, 1x por
+                # chunk — R21 OK). Listener é best-effort: exceções suprimidas
+                # para que UI não derrube orchestrator. Emitido APÓS gap/
+                # partition register para que o estado já esteja persistido.
+                if chunk_listener is not None:
+                    # mypy: event_status é str genérico em runtime mas Literal
+                    # no contrato do dataclass. cast para satisfazer.
+                    from typing import Literal
+                    from typing import cast as _cast
+
+                    event = ChunkCompletedEvent(
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                        chunk_start=chunk.start.date(),
+                        chunk_end=chunk.end.date(),
+                        trades_count=chunk_trades,
+                        duration_seconds=chunk_duration,
+                        status=_cast(
+                            Literal["success", "no_trades", "failed", "circuit_open"],
+                            event_status,
+                        ),
+                    )
+                    try:
+                        chunk_listener(event)
+                    except Exception as listener_exc:
+                        log.warning(
+                            "orchestrator.chunk_listener_failed",
+                            job_id=job_id,
+                            chunk_index=chunk_index,
+                            error=repr(listener_exc),
+                        )
 
             # 7. State transitions: drain → commit.
             sm.transition(JobState.DRAINING_DLL)
@@ -587,6 +709,28 @@ class Orchestrator:
                 month += 1
         return True
 
+    def _resolve_chunk_days_map(
+        self,
+        config: JobConfig,
+        contract_code: str,
+    ) -> Mapping[str, int] | None:
+        """Resolve qual ``chunk_days_map`` passar ao chunker (Story 4.16).
+
+        Ordem de precedência:
+
+        1. ``config.chunk_days_map`` explícito → usado direto (testes/avançado).
+        2. Caso contrário → constrói ``{contract_code: get_chunk_days(contract_code)}``,
+           o que garante que o chunker use exatamente o N do strategy
+           (Pichau directive: WINFUT=1, demais=5).
+
+        O map de 1 entrada funciona porque ``chunker.chunk_days_for_symbol``
+        faz match por ``startswith`` — ``contract_code.startswith(contract_code)``
+        é sempre verdadeiro (longest-prefix wins), então o lookup acerta.
+        """
+        if config.chunk_days_map is not None:
+            return config.chunk_days_map
+        return {contract_code: get_chunk_days(contract_code)}
+
     def _compute_chunks(
         self,
         config: JobConfig,
@@ -596,20 +740,26 @@ class Orchestrator:
         """Calcula sub-chunks (granularidade dias úteis) para o run.
 
         Caminho **fresh:** chunker quebra ``[config.start, config.end]`` em
-        sub-intervalos por prefixo (5 dias úteis WDO/WIN, 1 dia equity).
+        sub-intervalos. Story 4.16 (Pichau directive 2026-05-06):
+        ``chunk_days_map`` é derivado de :func:`get_chunk_days` — WINFUT=1,
+        demais=5 — sobrescrevendo o legacy 1d/equity. Se o caller passou
+        ``config.chunk_days_map`` explicitamente, este override do caller
+        prevalece (utilizado em testes que precisam isolar a estratégia).
 
         Caminho **resume:** subtrai partições já completas (granularidade
         mensal Story 1.5). Para cada mês ainda não-completo dentro do
         range, gera sub-chunks com chunker. Garante que re-rodar é safe
         (R5).
         """
+        chunk_days_map = self._resolve_chunk_days_map(config, contract_code)
+
         if resume_pending_chunks is None:
             return chunk_date_range(
                 contract_code,
                 config.exchange,
                 config.start,
                 config.end,
-                chunk_days_map=config.chunk_days_map,
+                chunk_days_map=chunk_days_map,
             )
 
         # Caminho resume — meses já feitos viram set; expandimos os meses
@@ -642,7 +792,7 @@ class Orchestrator:
                         config.exchange,
                         month_start,
                         month_end,
-                        chunk_days_map=config.chunk_days_map,
+                        chunk_days_map=chunk_days_map,
                     )
                 )
             if month == 12:
@@ -660,10 +810,22 @@ class Orchestrator:
         contract_code: str,
         chunk: ChunkRange,
         metrics: OrchestratorMetrics,
-    ) -> WriteResult | None:
+    ) -> tuple[WriteResult | None, str, float, int]:
         """Processa 1 chunk: download (com retry) → writer → register_partition.
 
-        Retorna :class:`WriteResult` se sucesso; ``None`` se falhou.
+        Retorna tupla ``(write_result, event_status, duration_seconds,
+        trades_count)``:
+
+        - ``write_result``: :class:`WriteResult` se chunk persistiu trades;
+          ``None`` se falhou OU não havia trades.
+        - ``event_status``: ``"success"``, ``"no_trades"``, ``"failed"`` ou
+          ``"circuit_open"`` — alimenta :class:`ChunkCompletedEvent.status`
+          consumido pela UI (Story 4.16).
+        - ``duration_seconds``: tempo total deste chunk (download+write+
+          register).
+        - ``trades_count``: trades persistidos neste chunk (0 em failed/
+          no_trades/circuit_open).
+
         Falhas são absorvidas (registra gap + segue) — não levanta para
         o caller (loop deve continuar próximo chunk).
 
@@ -700,7 +862,7 @@ class Orchestrator:
         contract_code: str,
         chunk: ChunkRange,
         metrics: OrchestratorMetrics,
-    ) -> WriteResult | None:
+    ) -> tuple[WriteResult | None, str, float, int]:
         """Corpo de :meth:`_process_chunk` (ver docstring).
 
         Separado em método interno para permitir try/finally limpo no
@@ -791,7 +953,7 @@ class Orchestrator:
                 retry_after_seconds=round(exc.retry_after_seconds, 1),
                 failure_count=exc.failure_count,
             )
-            return None
+            return None, "circuit_open", chunk_duration, 0
         except RetryError as exc:
             # Falha definitiva após todas as tentativas (V1 path).
             metrics.chunks_failed += 1
@@ -822,7 +984,7 @@ class Orchestrator:
                 attempts=exc.attempts,
                 last_error=repr(exc.last_exception),
             )
-            return None
+            return None, "failed", chunk_duration, 0
         except (OSError, TimeoutError) as exc:
             # Story 2.6 — quando RetryPolicy é usada (caminho default),
             # ela re-raise a última exception em vez de RetryError. Captura
@@ -861,7 +1023,7 @@ class Orchestrator:
                 last_error=repr(exc),
                 nl_code=nl_code,
             )
-            return None
+            return None, "failed", chunk_duration, 0
 
         metrics.callbacks_received += len(chunk_result.trades)
         # Story 2.4 — counter trades recebidos (per-chunk batch — R21 OK).
@@ -904,7 +1066,7 @@ class Orchestrator:
                 duration_ms=int(chunk_duration * 1000),
                 cache_hit=False,
             )
-            return None
+            return None, "no_trades", chunk_duration, 0
 
         # Converte TradeRecord (dataclass orchestrator) → TradeRecord
         # (TypedDict storage) e escreve.
@@ -959,7 +1121,7 @@ class Orchestrator:
             partition_total_rows=write_result.row_count,
             duration_ms=int(chunk_duration * 1000),
         )
-        return write_result
+        return write_result, "success", chunk_duration, len(chunk_result.trades)
 
     def _handle_fatal_error(
         self,

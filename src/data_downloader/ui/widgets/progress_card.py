@@ -136,7 +136,15 @@ class ProgressCard(QGroupBox):
     # ------------------------------------------------------------------
 
     def set_progress(self, progress: object) -> None:
-        """Atualiza barra + label do contrato a partir de ``DownloadProgress``."""
+        """Atualiza barra + label do contrato a partir de ``DownloadProgress``.
+
+        Story 4.16 (Pichau directive 2026-05-06): quando ``total > 0`` o
+        subtitle mostra ``X/Y chunks (N trades) — Z%`` para que o usuário
+        veja o progresso fino-granular ("quanto tempo falta"). Para
+        ``message == "INF_CHUNK_COMPLETE"`` o subtitle prioriza a
+        formatação de chunks; outras mensagens (INF_99_RECONNECT etc.)
+        seguem o caminho normal de microcopy.
+        """
         # Duck-typing — adapter sempre passa DownloadProgress, mas evitamos
         # importar diretamente para não acoplar a tipos no construtor.
         total = int(getattr(progress, "total", 0) or 0)
@@ -144,6 +152,7 @@ class ProgressCard(QGroupBox):
         contract = getattr(progress, "current_contract", None) or "—"
         is_99 = bool(getattr(progress, "is_99_reconnect", False))
         message = str(getattr(progress, "message", "") or "")
+        trades_received = int(getattr(progress, "trades_received", 0) or 0)
 
         self._contract_value.setText(str(contract))
         if total > 0:
@@ -163,13 +172,22 @@ class ProgressCard(QGroupBox):
             # Restaura state normal apenas se não estamos cancelando.
             if self._bar.property("state") == "reconnecting":
                 self.set_state("normal")
-        # Subtitle: usa microcopy ID se for um (INF_*), senão texto cru.
-        from data_downloader.ui.microcopy_loader import MSG
-
-        if message in MSG:
-            self._subtitle.setText(MSG[message].title or "")
+        # Subtitle: Story 4.16 — chunk progress em formato "X/Y chunks
+        # (N trades) — Z%" para dar feedback fino-granular ao usuário.
+        # Quando o evento é INF_CHUNK_COMPLETE (orchestrator chunk_listener),
+        # priorizamos o formato de chunks. Outros eventos (INF_*, WAR_*)
+        # seguem o caminho normal de microcopy.
+        if message == "INF_CHUNK_COMPLETE" and total > 0:
+            pct = 100.0 * done / total
+            n_trades_fmt = f"{trades_received:,}".replace(",", ".")
+            self._subtitle.setText(f"{done}/{total} chunks ({n_trades_fmt} trades) — {pct:.1f}%")
         else:
-            self._subtitle.setText(message)
+            from data_downloader.ui.microcopy_loader import MSG
+
+            if message in MSG:
+                self._subtitle.setText(MSG[message].title or "")
+            else:
+                self._subtitle.setText(message)
         # Log linha.
         if message:
             self.append_log(message)

@@ -348,12 +348,39 @@ def _run_download_worker(
             ),
         )
 
+        # Story 4.16 — wire ChunkCompletedEvent → DownloadProgress.
+        # Listener é cool path (1 chamada por chunk — R21 OK). Cada chunk
+        # finalizado vira um DownloadProgress(done=index+1, total=total_chunks)
+        # consumido pela UI Qt para atualizar a barra (Pichau directive
+        # 2026-05-06). Trades acumulados via closure mutável (_trades_acc).
+        from data_downloader.orchestrator.orchestrator import ChunkCompletedEvent
+
+        _trades_acc = [0]  # mutável pelo closure (int não pode rebind sem nonlocal)
+
+        def _on_chunk(event: ChunkCompletedEvent) -> None:
+            _trades_acc[0] += event.trades_count
+            _emit(
+                events_queue,
+                DownloadProgress(
+                    total=event.total_chunks,
+                    done=event.chunk_index + 1,
+                    message="INF_CHUNK_COMPLETE",
+                    trades_received=_trades_acc[0],
+                    current_contract=contract_code if contract_code else symbol,
+                ),
+            )
+
         # 6. Execute. Story 2.11 — H10 closure: passa cancel_event ao
         # orchestrator. Loop interno checa entre chunks (graceful drain,
         # NÃO interrompe chunk em andamento). Após retorno, verificamos
         # cancel_event.is_set() para decidir entre status='cancelled' e
         # status normal (mapeamento de JobResult.status).
-        result_obj: JobResult = orchestrator.run(config, cancel_event=cancel_event)
+        # Story 4.16 — chunk_listener emite progresso fino-granular para UI.
+        result_obj: JobResult = orchestrator.run(
+            config,
+            cancel_event=cancel_event,
+            chunk_listener=_on_chunk,
+        )
 
         contract_code = result_obj.contract_code
         job_id = result_obj.job_id

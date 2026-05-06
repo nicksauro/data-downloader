@@ -434,6 +434,12 @@ default; aparece com `--verbose` ou no log expansível da progress bar.
 | `EMP_SETTINGS_DLL_FIRST_RUN_STEP3` | empty | SettingsScreen — empty DLL passo 3 | 3. Clique em Testar Conexão |
 | `SUC_SETTINGS_SAVED` | success | SettingsScreen — settings salvos | Configurações salvas. |
 | `TST_SETTINGS_SAVED` | success toast | SettingsScreen — toast salvar | ✓ Configurações salvas. |
+| `BTN_DLL_BROWSE` | button | SettingsScreen — botão "Procurar..." abrir QFileDialog (Story 4.14) | Procurar... |
+| `TOOLTIP_DLL_BROWSE` | tooltip | SettingsScreen — tooltip do botão Procurar (Story 4.14) | Selecionar ProfitDLL.dll do disco |
+| `LBL_DLL_PATH_AUTO_DETECTED` | info | SettingsScreen — toast quando auto-detect populou DLL path (Story 4.14) | DLL detectada automaticamente |
+| `LBL_DLL_PATH_VALID` | label | SettingsScreen — status visual ✓ verde quando DLL válida (Story 4.14) | Arquivo encontrado |
+| `LBL_DLL_PATH_NOT_DLL` | label | SettingsScreen — status visual ⚠ ambar quando arquivo existe mas não é ProfitDLL.dll (Story 4.14) | Arquivo existe mas não é ProfitDLL.dll |
+| `LBL_DLL_PATH_NOT_FOUND` | label | SettingsScreen — status visual ✗ vermelho quando path inexistente (Story 4.14) | Arquivo não encontrado |
 
 ### 17b.4 — MainWindow / Status Bar (Story 3.1)
 

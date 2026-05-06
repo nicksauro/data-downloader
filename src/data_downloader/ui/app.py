@@ -63,11 +63,43 @@ def main() -> int:
     app.setOrganizationName("data-downloader")
 
     # Tema QSS — fonte única em assets/style.qss (QT_PATTERNS §5).
-    qss_path = Path(__file__).parent / "assets" / "style.qss"
-    if qss_path.exists():
-        # Best-effort — QSS é cosmético; UI funciona sem.
-        with contextlib.suppress(OSError):
-            app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+    #
+    # Story 4.15 P0 release-blocker (Pichau live test 2026-05-06): em frozen
+    # mode (PyInstaller build) o spec ``data_downloader.spec`` bundla
+    # ``../src/data_downloader/ui/assets`` no destino ``assets/`` — ou seja,
+    # ``<bundle_root>/assets/style.qss``. Mas ``Path(__file__).parent`` em
+    # frozen aponta para ``<bundle_root>/data_downloader/ui/`` → o lookup
+    # original procurava em ``<bundle_root>/data_downloader/ui/assets/`` (que
+    # NÃO EXISTE no bundle). Resultado: ``setStyleSheet`` nunca era chamado,
+    # ``QPushButton[variant="primary"]`` perdia background azul + padding,
+    # e o botão "Salvar" no Settings ficava com sizing default Qt (~20px,
+    # cinza, mesma dimensão de outros botões secundários) — visualmente
+    # passava despercebido. Pichau reportou: "n tem nhnum lugar para
+    # apertar save".
+    #
+    # Fix: tenta múltiplos paths ordenados (dev > frozen-flat > frozen-MEIPASS),
+    # primeiro existente vence. Determinístico, sem fallback silencioso.
+    qss_candidates: list[Path] = [
+        # 1. Dev mode / unfrozen install: relative to module file.
+        Path(__file__).parent / "assets" / "style.qss",
+        # 2. Frozen mode (PyInstaller --onedir): spec datas put assets/ at root.
+        Path(sys.executable).parent / "_internal" / "assets" / "style.qss",
+        Path(sys.executable).parent / "assets" / "style.qss",
+    ]
+    # 3. Frozen mode (sys._MEIPASS) — onefile or runtime-extracted.
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        qss_candidates.append(Path(meipass) / "assets" / "style.qss")
+
+    for qss_path in qss_candidates:
+        try:
+            if qss_path.is_file():
+                # Best-effort — QSS é cosmético; UI funciona sem.
+                with contextlib.suppress(OSError):
+                    app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+                break
+        except OSError:
+            continue
 
     # Import deferido para evitar custo se main() não for chamado (ex.:
     # ``import data_downloader.ui.app`` em REPL para inspeção).

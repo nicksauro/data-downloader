@@ -18,6 +18,10 @@ Fronteiras (Aria, ARCHITECTURE.md §5):
 
 from __future__ import annotations
 
+from data_downloader.orchestrator.chunk_strategy import (
+    DEFAULT_CHUNK_DAYS,
+    get_chunk_days,
+)
 from data_downloader.orchestrator.chunker import (
     CHUNK_DAYS,
     ChunkRange,
@@ -48,6 +52,7 @@ from data_downloader.orchestrator.download_primitive import (
     download_chunk,
 )
 from data_downloader.orchestrator.orchestrator import (
+    ChunkCompletedEvent,
     JobConfig,
     JobResult,
     Orchestrator,
@@ -74,7 +79,9 @@ from data_downloader.orchestrator.timestamp import (
 
 __all__ = [
     "CHUNK_DAYS",
+    "DEFAULT_CHUNK_DAYS",
     "BreakerState",
+    "ChunkCompletedEvent",
     "ChunkRange",
     "ChunkResult",
     "CircuitBreaker",
@@ -96,6 +103,7 @@ __all__ = [
     "default_retry_policy",
     "download_chunk",
     "format_brt_timestamp",
+    "get_chunk_days",
     "list_contracts",
     "month_from_letter",
     "month_letter",

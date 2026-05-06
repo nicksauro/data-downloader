@@ -346,6 +346,14 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="info",
         title="Chunk {x}/{y} OK ({n_trades} trades em {duration}).",
     ),
+    # Story 4.16 (Pichau directive 2026-05-06) — evento agregado por
+    # ChunkCompletedEvent emitido pelo orchestrator. ProgressCard formata
+    # subtitle inline ("X/Y chunks (N trades) — Z%") em vez de usar este
+    # title — a entry serve como ID estável para roteamento.
+    "INF_CHUNK_COMPLETE": MicrocopyEntry(
+        msg_type="info",
+        title="Chunk concluído.",
+    ),
     "INF_GRACEFUL_SHUTDOWN": MicrocopyEntry(
         msg_type="info",
         title="Drenando fila + commitando parcial...",
@@ -620,6 +628,21 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "LBL_ABOUT_BUG_LINK": MicrocopyEntry(msg_type="label", title="🐛 Reportar bug"),
     "BTN_TEST_CONNECTION": MicrocopyEntry(msg_type="button", title="Testar Conexão"),
     "BTN_OPEN_DLL_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta DLL"),
+    # Story 4.14 (Pichau live test 2026-05-05) — auto-detect DLL +
+    # file picker. Usuário do .exe não sabia path completo da DLL para
+    # colar manualmente; precisa de UX onde ele nem precise saber path.
+    "BTN_DLL_BROWSE": MicrocopyEntry(msg_type="button", title="Procurar..."),
+    "TOOLTIP_DLL_BROWSE": MicrocopyEntry(
+        msg_type="label", title="Selecionar ProfitDLL.dll do disco"
+    ),
+    "LBL_DLL_PATH_AUTO_DETECTED": MicrocopyEntry(
+        msg_type="info", title="DLL detectada automaticamente"
+    ),
+    "LBL_DLL_PATH_VALID": MicrocopyEntry(msg_type="label", title="Arquivo encontrado"),
+    "LBL_DLL_PATH_NOT_DLL": MicrocopyEntry(
+        msg_type="label", title="Arquivo existe mas não é ProfitDLL.dll"
+    ),
+    "LBL_DLL_PATH_NOT_FOUND": MicrocopyEntry(msg_type="label", title="Arquivo não encontrado"),
     "BTN_CHANGE_DATA_DIR": MicrocopyEntry(msg_type="button", title="Mudar Pasta"),
     "BTN_OPEN_DATA_DIR": MicrocopyEntry(msg_type="button", title="Abrir no Explorer"),
     "BTN_INTEGRITY_CHECK": MicrocopyEntry(msg_type="button", title="Verificar Integridade"),

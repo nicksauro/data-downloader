@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -88,6 +89,61 @@ STATE_SUCCESS = "success"
 # Path para persistência (ADR-012).
 def _config_path() -> Path:
     return Path.home() / ".data_downloader" / "config.toml"
+
+
+def _auto_detect_dll_path() -> Path | None:
+    """Detecta automaticamente o ``ProfitDLL.dll`` em paths conhecidos.
+
+    Story 4.14 (Pichau live test 2026-05-05): usuário do .exe não sabe
+    o path completo da DLL; UX deve auto-popular Settings → DLL Path.
+
+    Ordem de busca:
+
+        1. **Frozen mode (PyInstaller)**: ``sys._MEIPASS / ProfitDLL.dll``
+           — DLL bundled com o .exe é o golden path para o usuário final.
+        2. **Common Nelogica install paths** (Windows): Program Files
+           (x64 e x86) + ``%PROGRAMFILES%`` env var.
+        3. **Bundled dev path** (repo): ``profitdll/DLLs/Win64/ProfitDLL.dll``
+           — útil em dev/CI quando rodando ``python -m data_downloader``.
+
+    Returns:
+        Primeiro path existente como :class:`pathlib.Path`, ou ``None`` se
+        nenhum candidato existe (usuário precisa usar Browse... ou colar).
+    """
+    # 1. Frozen mode — bundled DLL é o golden path.
+    if getattr(sys, "frozen", False):
+        meipass_str = getattr(sys, "_MEIPASS", "")
+        if meipass_str:
+            bundled = Path(meipass_str) / "ProfitDLL.dll"
+            if bundled.is_file():
+                return bundled
+
+    # 2. Common Nelogica install paths (Windows).
+    candidates: list[Path] = [
+        Path(r"C:\Program Files\Nelogica\ProfitChart\DLLs\Win64\ProfitDLL.dll"),
+        Path(r"C:\Program Files (x86)\Nelogica\ProfitChart\DLLs\Win64\ProfitDLL.dll"),
+    ]
+    program_files = os.environ.get("PROGRAMFILES", "").strip()
+    if program_files:
+        candidates.append(
+            Path(program_files) / "Nelogica" / "ProfitChart" / "DLLs" / "Win64" / "ProfitDLL.dll"
+        )
+
+    # 3. Bundled dev path (repo) — settings_screen.py está em
+    # ``src/data_downloader/ui/screens/``; parents[3] é o repo root.
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        candidates.append(repo_root / "profitdll" / "DLLs" / "Win64" / "ProfitDLL.dll")
+    except (IndexError, OSError):
+        pass
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 # Variáveis .env esperadas (mascaradas no display).
@@ -162,18 +218,38 @@ class SettingsScreen(QWidget):
         self._scroll.setWidget(scroll_content)
 
         # Bottom action bar (doctor + save).
+        #
+        # Story 4.15 P0 release-blocker (Pichau live test 2026-05-06):
+        # botão Save desaparecia visualmente em frozen build porque QSS não
+        # carregava (spec/app.py path mismatch — fix em app.py). Hardening
+        # defense-in-depth aqui: mesmo SEM QSS, o botão deve ser visualmente
+        # óbvio. ``setMinimumSize(140, 36)`` garante área clicável mínima
+        # confortável (Fitts's law) e diferencia do doctor button. Texto em
+        # CAIXA ALTA ("SALVAR") aumenta peso visual sem depender de
+        # font-weight QSS. ``setDefault(True)`` faz o botão receber o realce
+        # nativo de "default action" (Enter ativa).
         bottom_bar = QHBoxLayout()
+        bottom_bar.setSpacing(12)
+        bottom_bar.setContentsMargins(0, 8, 0, 0)
         self._doctor_btn = QPushButton(format_msg("BTN_DOCTOR_FULL"), self)
         self._doctor_btn.setObjectName("doctorBtn")
+        self._doctor_btn.setMinimumSize(180, 36)
         # Story 4.9 (v1.0.3 hotfix — Owners Council B5): cabeia o botão
         # ao slot ``_on_doctor_clicked`` que invoca ``run_doctor_checks``
         # via import direto + mostra resultado em modal.
         self._doctor_btn.clicked.connect(self._on_doctor_clicked)
         bottom_bar.addWidget(self._doctor_btn)
         bottom_bar.addStretch(1)
-        self._save_btn = QPushButton(format_msg("BTN_SAVE_SETTINGS"), self)
+        # Story 4.15: caixa alta + minimum size + setDefault(True) garantem
+        # visibilidade mesmo se QSS falhar a carregar (frozen build).
+        save_label = format_msg("BTN_SAVE_SETTINGS")
+        self._save_btn = QPushButton(save_label.upper() if save_label else "SALVAR", self)
         self._save_btn.setObjectName("saveBtn")
         self._save_btn.setProperty("variant", "primary")
+        self._save_btn.setMinimumSize(140, 36)
+        self._save_btn.setDefault(True)
+        self._save_btn.setAutoDefault(True)
+        self._save_btn.setToolTip(format_msg("BTN_SAVE_SETTINGS") or "Salvar")
         self._save_btn.clicked.connect(self._on_save_clicked)
         bottom_bar.addWidget(self._save_btn)
 
@@ -224,11 +300,33 @@ class SettingsScreen(QWidget):
         self._dll_status_label.setProperty("status", "not_configured")
         form.addRow(QLabel("Status:", section), self._dll_status_label)
 
-        # DLL path.
+        # DLL path — edit + Browse button (Story 4.14, Pichau 2026-05-05).
+        # Browse abre QFileDialog (DontUseNativeDialog, ADR-003 amendment M9)
+        # para o usuário não precisar saber/colar o path manualmente.
+        dll_path_row = QHBoxLayout()
         self._dll_path_edit = QLineEdit(section)
         self._dll_path_edit.setObjectName("dllPathEdit")
         self._dll_path_edit.textEdited.connect(self._mark_dirty)
-        form.addRow(QLabel(format_msg("LBL_DLL_PATH") + ":", section), self._dll_path_edit)
+        # textChanged dispara em qualquer mudança (programática ou usuário) —
+        # garante que validação visual reage tanto a Browse quanto a digitação.
+        self._dll_path_edit.textChanged.connect(self._update_dll_path_validation)
+        dll_path_row.addWidget(self._dll_path_edit, stretch=1)
+
+        self._dll_browse_btn = QPushButton(format_msg("BTN_DLL_BROWSE"), section)
+        self._dll_browse_btn.setObjectName("dllBrowseBtn")
+        self._dll_browse_btn.setToolTip(format_msg("TOOLTIP_DLL_BROWSE"))
+        self._dll_browse_btn.clicked.connect(self._on_dll_browse_clicked)
+        dll_path_row.addWidget(self._dll_browse_btn)
+
+        dll_path_widget = QWidget(section)
+        dll_path_widget.setLayout(dll_path_row)
+        form.addRow(QLabel(format_msg("LBL_DLL_PATH") + ":", section), dll_path_widget)
+
+        # Status visual da DLL path (✓ encontrado / ⚠ nome errado / ✗ não existe).
+        self._dll_path_status = QLabel("", section)
+        self._dll_path_status.setObjectName("dllPathStatus")
+        self._dll_path_status.setProperty("role", "muted")
+        form.addRow(self._dll_path_status)
 
         # Env vars — mascarados.
         env_label = QLabel(format_msg("LBL_ENV_VARS") + ":", section)
@@ -503,18 +601,30 @@ class SettingsScreen(QWidget):
     # ------------------------------------------------------------------
 
     def _load_initial_values(self) -> None:
-        # DLL path: env or default.
+        # DLL path: env > auto-detect > vazio. Story 4.14 (Pichau 2026-05-05):
+        # se ``PROFITDLL_PATH`` está vazio, tentamos auto-detect (frozen
+        # bundled ou install paths comuns Nelogica) — usuário do .exe não
+        # deveria precisar saber/colar o path manualmente.
         dll_path = os.environ.get("PROFITDLL_PATH", "")
+        auto_detected = False
         if not dll_path:
-            # Heurística Windows.
-            for candidate in (
-                Path("C:/ProfitDLL/ProfitDLL.dll"),
-                Path.cwd() / "ProfitDLL" / "ProfitDLL.dll",
-            ):
-                if candidate.exists():
-                    dll_path = str(candidate)
-                    break
+            detected = _auto_detect_dll_path()
+            if detected is not None:
+                dll_path = str(detected)
+                auto_detected = True
         self._dll_path_edit.setText(dll_path)
+        if auto_detected:
+            # Toast curto informando que populamos automaticamente —
+            # ``_show_toast`` requer widget visível; defer para depois do
+            # show() inicial via QTimer (idem padrão de outras screens).
+            QTimer.singleShot(
+                250,
+                lambda: self._show_toast(
+                    format_msg("LBL_DLL_PATH_AUTO_DETECTED"),
+                    variant="info",
+                    duration_ms=3000,
+                ),
+            )
 
         # Env vars from environment.
         for var_name, (edit, _toggle) in self._env_widgets.items():
@@ -662,6 +772,79 @@ class SettingsScreen(QWidget):
         if not path_str:
             return
         self._open_in_explorer(Path(path_str).parent)
+
+    def _on_dll_browse_clicked(self) -> None:
+        """Abre QFileDialog para usuário selecionar ``ProfitDLL.dll`` do disco.
+
+        Story 4.14 (Pichau live test 2026-05-05): usuário pediu botão de
+        "buscar" porque não sabia o path completo da DLL para colar.
+        Atalho: começa em ``Path(current).parent`` se já há valor; caso
+        contrário ``C:\\Program Files`` (Windows install típico Nelogica).
+
+        Filtros do diálogo priorizam ``ProfitDLL (ProfitDLL.dll)`` para
+        guiar — usuários avançados podem mudar para *.dll ou All Files.
+
+        ADR-003 amendment M9: usa ``DontUseNativeDialog`` para evitar
+        problemas de modal Win32 com PySide6 (mesma flag de ``Mudar Pasta``).
+        """
+        start_dir = ""
+        current = self._dll_path_edit.text().strip()
+        if current:
+            try:
+                parent = Path(current).parent
+                if parent.is_dir():
+                    start_dir = str(parent)
+            except OSError:
+                start_dir = ""
+        if not start_dir and sys.platform == "win32":
+            start_dir = r"C:\Program Files"
+
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar ProfitDLL.dll",
+            start_dir,
+            "ProfitDLL (ProfitDLL.dll);;DLL Files (*.dll);;All Files (*)",
+            "",
+            QFileDialog.Option.DontUseNativeDialog,  # ADR-003 amendment M9
+        )
+        if file_path:
+            self._dll_path_edit.setText(file_path)
+            self._mark_dirty()
+            self._update_dll_path_validation()
+
+    def _update_dll_path_validation(self) -> None:
+        """Atualiza ``_dll_path_status`` com feedback visual do path digitado.
+
+        Estados:
+            - vazio → label vazio (neutral, sem ruído).
+            - arquivo existe + nome ``profitdll.dll`` (case-insensitive)
+              → ✓ verde (success).
+            - arquivo existe mas nome diferente → ⚠ ambar (warn).
+            - arquivo não existe → ✗ vermelho (error).
+
+        Cores hex inline garantem consistência mesmo se theme não carregou.
+        """
+        path = self._dll_path_edit.text().strip()
+        if not path:
+            self._dll_path_status.setText("")
+            self._dll_path_status.setStyleSheet("")
+            return
+        try:
+            p = Path(path)
+            is_file = p.is_file()
+        except OSError:
+            is_file = False
+            p = Path(path)
+
+        if is_file and p.name.lower() == "profitdll.dll":
+            self._dll_path_status.setText("✓ " + format_msg("LBL_DLL_PATH_VALID"))
+            self._dll_path_status.setStyleSheet("color: #3FCB6F;")  # success green
+        elif is_file:
+            self._dll_path_status.setText("⚠ " + format_msg("LBL_DLL_PATH_NOT_DLL"))
+            self._dll_path_status.setStyleSheet("color: #F2C04B;")  # warn amber
+        else:
+            self._dll_path_status.setText("✗ " + format_msg("LBL_DLL_PATH_NOT_FOUND"))
+            self._dll_path_status.setStyleSheet("color: #F25656;")  # error red
 
     def _on_change_data_dir_clicked(self) -> None:
         # QFileDialog DontUseNativeDialog (QT_PATTERNS §1, finding M9).
