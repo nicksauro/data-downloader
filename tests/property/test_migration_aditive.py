@@ -1,10 +1,14 @@
-"""Property test (Hypothesis) — Story 2.3 AC9.
+"""Property test (Hypothesis) — Story 2.3 AC9 + Story 1.7g (Nelo Council 32 P0).
 
 Para qualquer Table v1.0.0 gerada via strategy de TradeRecord, após
-migrate(write_v1):
-- todos os campos canônicos preservados byte-a-byte (to_pylist excl. coluna nova),
-- novo campo `liquidity_classification` presente como uint8 nullable com
-  TODOS os valores NULL.
+``V100ToV110.transform``:
+
+- Todos os campos canônicos v1.0.0 preservados byte-a-byte
+  (to_pylist comparison).
+- Os 3 campos aditivos v1.1.0 (``buy_agent_name``, ``sell_agent_name``,
+  ``trade_type_name``) presentes como ``string`` nullable com fallback
+  determinístico aplicado.
+- Schema do output bate com ``pyarrow_schema()`` v1.1.0 (20 campos).
 
 Hypothesis 100 examples (default mais alto que mínimo aceitável de 50;
 INV-9 R5 — schema migration aditivo idempotente).
@@ -76,11 +80,13 @@ def test_migrate_v100_to_v110_preserves_common_fields(
     """INV-9: migrate(write_v1) preserva todos os campos canônicos.
 
     Strategy:
-    1. Escreve trades v1.0.0 via ParquetWriter (schema canônico).
-    2. Lê tabela bruta (pre-migration snapshot).
+    1. Escreve trades via ParquetWriter (schema canônico v1.1.0 atual).
+    2. Lê tabela bruta (snapshot pré-migration).
     3. Aplica V100ToV110.transform.
     4. Verifica que cada coluna original mantém os mesmos valores
-       (to_pylist comparison) e que `liquidity_classification` é NULL.
+       (to_pylist comparison) e que os 3 campos aditivos v1.1.0
+       (``buy_agent_name``, ``sell_agent_name``, ``trade_type_name``)
+       estão presentes (string nullable).
     """
     data_dir = tmp_path_factory.mktemp("migrate_property")
     writer = ParquetWriter(data_dir=data_dir)
@@ -100,7 +106,8 @@ def test_migrate_v100_to_v110_preserves_common_fields(
     write_result = writer.write(trades, partition, dll_version="4.0.0.34")
     assert write_result.path.exists()
 
-    # Snapshot v1.0.0.
+    # Snapshot — writer atual já escreve schema v1.1.0 (20 colunas);
+    # migration deve ser idempotente (apenas re-cast canônico).
     table_v1 = pq.read_table(write_result.path)
     snapshot_columns = {name: table_v1.column(name).to_pylist() for name in table_v1.column_names}
 
@@ -108,10 +115,14 @@ def test_migrate_v100_to_v110_preserves_common_fields(
     migration = V100ToV110()
     table_v11 = migration.transform(table_v1)
 
-    # Campo novo presente.
-    assert migration.NEW_FIELD_NAME in table_v11.schema.names
-    new_col = table_v11.column(migration.NEW_FIELD_NAME)
-    assert new_col.null_count == table_v11.num_rows
+    # 3 campos aditivos v1.1.0 presentes como string nullable.
+    for name in migration.NEW_FIELD_NAMES:
+        assert name in table_v11.schema.names
+        f = table_v11.schema.field(name)
+        import pyarrow as _pa
+
+        assert _pa.types.is_string(f.type)
+        assert f.nullable
 
     # Campos antigos preservados byte-a-byte.
     for name in snapshot_columns:

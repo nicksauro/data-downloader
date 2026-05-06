@@ -26,15 +26,40 @@ from data_downloader.storage.migrations.parquet.v1_0_0_to_v1_1_0 import V100ToV1
 
 @pytest.fixture
 def sample_table() -> pa.Table:
-    """Tabela mínima — schema canônico v1.0.0 reduzido para testes."""
-    return pa.table(
-        {
-            "symbol": pa.array(["WDOJ26"] * 3, type=pa.string()),
-            "timestamp_ns": pa.array([1, 2, 3], type=pa.int64()),
-            "price": pa.array([100.0, 200.0, 300.0], type=pa.float64()),
-            "quantity": pa.array([10, 20, 30], type=pa.int64()),
-        }
-    )
+    """Tabela v1.0.0 sintética — schema completo de 17 campos.
+
+    Schema v1.0.0 = pyarrow_schema() v1.1.0 SEM os 3 campos resolvidos.
+    Necessário para o V100ToV110.transform alcançar o schema canônico
+    v1.1.0 (cast preserva ordem/tipos).
+    """
+    from data_downloader.storage.schema import pyarrow_schema as _full_schema
+
+    full = _full_schema()
+    drop = {"buy_agent_name", "sell_agent_name", "trade_type_name"}
+    schema_v100 = pa.schema([f for f in full if f.name not in drop])
+    n = 3
+    base_ts = 1_700_000_000_000_000_000
+    cols: dict[str, list[object]] = {
+        "symbol": ["WDOJ26"] * n,
+        "exchange": ["F"] * n,
+        "timestamp_ns": [base_ts + i for i in range(n)],
+        "timestamp_str": ["01/03/2024 00:00:00.000"] * n,
+        "price": [100.0, 200.0, 300.0],
+        "quantity": [10, 20, 30],
+        "trade_id": [1, 2, 3],
+        "trade_type": [2, 2, 99],
+        "buy_agent_id": [1, None, 5],
+        "sell_agent_id": [2, 4, None],
+        "flags": [0, 0, 0],
+        "source_callback": ["history_v2"] * n,
+        "side": [None, None, None],
+        "ingestion_ts_ns": [base_ts + i + 1 for i in range(n)],
+        "chunk_id": [None] * n,
+        "dll_version": ["0.0.0+stub"] * n,
+        "sequence_within_ns": [0, 0, 0],
+    }
+    arrays = [pa.array(cols[f.name], type=f.type) for f in schema_v100]
+    return pa.Table.from_arrays(arrays, schema=schema_v100)
 
 
 # =====================================================================
@@ -66,39 +91,54 @@ def test_parquet_migration_subclass_must_implement_transform() -> None:
 
 @pytest.mark.unit
 def test_v100_to_v110_metadata() -> None:
-    """V100ToV110 declara from/to/breaking corretos."""
+    """V100ToV110 declara from/to/breaking corretos.
+
+    Owners Council 2026-05-05 (B1 fix): description menciona os 3 campos
+    aditivos reais (``buy_agent_name`` etc), NÃO ``liquidity_classification``.
+    """
     m = V100ToV110()
     assert m.from_version == "1.0.0"
     assert m.to_version == "1.1.0"
     assert m.breaking is False
     assert m.rollback_supported is True
-    assert "liquidity_classification" in m.description
+    assert "buy_agent_name" in m.description
+    assert "sell_agent_name" in m.description
+    assert "trade_type_name" in m.description
 
 
 @pytest.mark.unit
-def test_v100_to_v110_transform_adds_field(sample_table: pa.Table) -> None:
-    """transform adiciona `liquidity_classification` (uint8 nullable, todos NULL)."""
+def test_v100_to_v110_transform_adds_three_resolved_fields(sample_table: pa.Table) -> None:
+    """transform adiciona ``buy_agent_name`` / ``sell_agent_name`` /
+    ``trade_type_name`` (string nullable) com fallback determinístico."""
     m = V100ToV110()
     new_table = m.transform(sample_table)
-    assert m.NEW_FIELD_NAME in new_table.schema.names
 
-    field = new_table.schema.field(m.NEW_FIELD_NAME)
-    assert pa.types.is_uint8(field.type)
-    assert field.nullable
+    for name in m.NEW_FIELD_NAMES:
+        assert name in new_table.schema.names
+        f = new_table.schema.field(name)
+        assert pa.types.is_string(f.type)
+        assert f.nullable
 
-    # Todos os valores são NULL.
-    col = new_table.column(m.NEW_FIELD_NAME)
-    assert col.null_count == new_table.num_rows
+    # Fallback: row 0 tem buy_agent_id=1, sell_agent_id=2, trade_type=2.
+    assert new_table.column("buy_agent_name").to_pylist()[0] == "Agent#1"
+    assert new_table.column("sell_agent_name").to_pylist()[0] == "Agent#2"
+    assert new_table.column("trade_type_name").to_pylist()[0] == "AgressionBuy"
+    # Row 2: trade_type=99 (fora do dict) → fallback.
+    assert new_table.column("trade_type_name").to_pylist()[2] == "TradeType#99"
+    # Row 1: buy_agent_id=None → buy_agent_name=None (não inventa).
+    assert new_table.column("buy_agent_name").to_pylist()[1] is None
 
 
 @pytest.mark.unit
 def test_v100_to_v110_transform_idempotent(sample_table: pa.Table) -> None:
-    """transform aplicado 2x = no-op (campo já existe)."""
+    """transform aplicado 2x produz schema + valores idênticos."""
     m = V100ToV110()
     once = m.transform(sample_table)
     twice = m.transform(once)
-    assert once.schema == twice.schema
+    assert once.schema.equals(twice.schema)
     assert once.num_rows == twice.num_rows
+    for name in once.column_names:
+        assert once.column(name).to_pylist() == twice.column(name).to_pylist()
 
 
 @pytest.mark.unit

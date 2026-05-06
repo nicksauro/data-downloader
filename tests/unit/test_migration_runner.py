@@ -151,10 +151,13 @@ def test_execute_round_trip(
     assert result.partitions_migrated == 1
     assert result.partitions_failed == 0
 
-    # Arquivo lido tem novo campo.
+    # Arquivo lido tem os 3 campos resolvidos v1.1.0 (Nelo Council 32 P0).
+    # Caso aqui: writer já escreve schema v1.1.0; migration só faz re-cast
+    # idempotente (3 campos já presentes) — schema_version metadata = 1.1.0.
     table = pq.read_table(parquet_path)
-    assert "liquidity_classification" in table.schema.names
-    assert table.column("liquidity_classification").null_count == table.num_rows
+    assert "buy_agent_name" in table.schema.names
+    assert "sell_agent_name" in table.schema.names
+    assert "trade_type_name" in table.schema.names
 
     # Catalog atualizou schema_version (AC6).
     conn = catalog._conn_or_raise()

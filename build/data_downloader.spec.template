@@ -1,0 +1,203 @@
+# -*- mode: python ; coding: utf-8 -*-
+# =============================================================================
+# data_downloader.spec.template — PyInstaller Build Specification (TEMPLATE)
+# =============================================================================
+#
+# OWNER: Felix (frontend-dev) maintains this template; Gage (devops) generates
+#        the final `data_downloader.spec` at release time with version injected.
+#
+# THIS FILE IS A TEMPLATE — DO NOT BUILD DIRECTLY FROM IT.
+# Gage's release pipeline copies this to `build/data_downloader.spec`,
+# substitutes `{{VERSION}}`, `{{BUILD_TIMESTAMP}}`, and `{{ICON_PATH}}` tokens,
+# then invokes PyInstaller against the resolved spec.
+#
+# -----------------------------------------------------------------------------
+# WHY --onedir (NOT --onefile) — finding H23 from PLAN_REVIEW_2026-05-03.md
+# -----------------------------------------------------------------------------
+# --onefile is an attractive footgun for desktop apps with native deps:
+#   1. Startup cost: --onefile extracts the entire app to %TEMP% on EVERY
+#      launch. With ProfitDLL (~5MB) + Qt platform plugins + Python stdlib,
+#      this adds 3-5s of cold-start latency that users feel as "app frozen".
+#   2. Antivirus false positives: Self-extracting executables that drop DLLs
+#      to %TEMP% trigger Windows Defender heuristics far more often than a
+#      static --onedir layout. ProfitDLL is already AV-noisy (R-P3 / Pyro).
+#   3. Path resolution breaks: ProfitDLL.dll requires sibling .dat companions
+#      (timezone2.dat, holidays.dat, etc.) AND folder companions (MarketHours2/,
+#      database/, PopupManagerV2/, strategy/). Onefile extracts to
+#      sys._MEIPASS, but the DLL searches CWD/sibling — paths drift, DLL
+#      fails silently with cryptic NL_INTERNAL_ERROR.
+#   4. Code signing (ADR-016 / future): single-file binaries are harder to
+#      sign incrementally; --onedir lets us sign DLL + exe separately.
+#
+# --onedir produces dist/data_downloader/ (folder, ~80-120MB) with:
+#   - data_downloader.exe (entry point, console=False)
+#   - All DLLs as siblings (DLL load works correctly)
+#   - All .dat / folder companions in expected layout
+#   - PySide6 Qt plugins under platforms/qwindows.dll (mandatory for any UI)
+#
+# -----------------------------------------------------------------------------
+# DETERMINISM — alignment with ADR-009 Build Determinism
+# -----------------------------------------------------------------------------
+# Gage MUST set the following env vars before invoking PyInstaller:
+#   SOURCE_DATE_EPOCH=<commit-unix-timestamp>   # reproducible mtimes
+#   PYTHONHASHSEED=0                            # stable hash ordering
+#   PYTHONDONTWRITEBYTECODE=1                   # no .pyc side effects
+#   TZ=UTC                                      # locale-independent
+# And ensure a clean environment:
+#   - Resolved lockfile (uv.lock or poetry.lock pinned)
+#   - Fresh venv (no cached PyInstaller hooks from prior builds)
+#   - PyInstaller version pinned in dev-deps (not "latest")
+#   - dist/ and build/work/ purged before each run
+#
+# See build/BUILD_PROTOCOL.md for the full release procedure.
+#
+# -----------------------------------------------------------------------------
+# Qt PLATFORM PLUGIN — CRITICAL (Felix §3 finding)
+# -----------------------------------------------------------------------------
+# PySide6 apps will silently fail with "Could not load the Qt platform plugin
+# 'windows'" if platforms/qwindows.dll is not bundled. PyInstaller's default
+# hook for PySide6 is incomplete for some sub-modules. We use collect_all to
+# force inclusion of every PySide6 dataf/binary, then explicitly resolve the
+# platform plugin path via QLibraryInfo at build time.
+# =============================================================================
+
+import os
+from PyInstaller.utils.hooks import collect_all
+from PySide6.QtCore import QLibraryInfo
+
+# -----------------------------------------------------------------------------
+# Tokens injected by Gage's release pipeline
+# -----------------------------------------------------------------------------
+APP_VERSION = '{{VERSION}}'              # e.g. '0.1.0'
+BUILD_TIMESTAMP = '{{BUILD_TIMESTAMP}}'  # e.g. '2026-05-03T12:00:00Z'
+ICON_PATH = '{{ICON_PATH}}'              # e.g. '../src/data_downloader/ui/assets/icon.ico'
+
+block_cipher = None
+
+# -----------------------------------------------------------------------------
+# PySide6 — collect ALL data, binaries, hidden imports
+# -----------------------------------------------------------------------------
+# This pulls Qt platform plugins (qwindows.dll), styles, imageformats,
+# translations — anything PySide6 may load at runtime. Without this, the
+# app dies on first show() with no actionable error.
+# -----------------------------------------------------------------------------
+pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all('PySide6')
+
+# Explicit resolution of Qt plugins path (defense in depth)
+qt_plugins_path = QLibraryInfo.path(QLibraryInfo.PluginsPath)
+qt_platform_plugin = os.path.join(qt_plugins_path, 'platforms', 'qwindows.dll')
+if os.path.exists(qt_platform_plugin):
+    pyside6_binaries.append((qt_platform_plugin, 'PySide6/plugins/platforms'))
+
+# -----------------------------------------------------------------------------
+# Analysis — what to include
+# -----------------------------------------------------------------------------
+a = Analysis(
+    ['../src/data_downloader/ui/app.py'],   # UI entry point
+    pathex=['../src'],
+    binaries=[
+        # ProfitDLL + companion DLLs (Win64) — must sit beside the exe
+        ('../profitdll/DLLs/Win64/ProfitDLL.dll', '.'),
+        ('../profitdll/DLLs/Win64/libcrypto-1_1-x64.dll', '.'),
+        ('../profitdll/DLLs/Win64/libssl-1_1-x64.dll', '.'),
+        ('../profitdll/DLLs/Win64/libeay32.dll', '.'),
+        ('../profitdll/DLLs/Win64/ssleay32.dll', '.'),
+    ] + pyside6_binaries,
+    datas=[
+        # ProfitDLL .dat companions (loaded by DLL on init)
+        ('../profitdll/DLLs/Win64/timezone2.dat', '.'),
+        ('../profitdll/DLLs/Win64/holidays.dat', '.'),
+        ('../profitdll/DLLs/Win64/exchangeinfo2.dat', '.'),
+        ('../profitdll/DLLs/Win64/newagents.dat', '.'),
+        # Story v1.0.2 fix B-Frozen (Nelo+Aria 2026-05-05):
+        # verify-dll-companions é invocado pelo wrapper em frozen mode; precisa
+        # estar bundled. Path resolução em ``data_downloader.dll.wrapper`` agora
+        # detecta sys._MEIPASS (fix B-Frozen #2 abaixo).
+        ('../scripts/verify-dll-companions.py', 'scripts'),
+        # Story v1.0.2 (Pichau smoke 2026-05-06): seed YAML de contratos
+        # bundled para auto-populate em first-run do .exe (sem precisar
+        # ``contracts populate`` manual). populate_contracts_from_seed
+        # detecta frozen mode e lê de _MEIPASS/docs/storage/CONTRACTS.md.
+        ('../docs/storage/CONTRACTS.md', 'docs/storage'),
+        # Companions .dat reais que estavam ausentes (Nelo audit v1.0.2):
+        ('../profitdll/DLLs/Win64/ServerAddr6.dat', '.'),
+        ('../profitdll/DLLs/Win64/HadesSSLServerAddr3.dat', '.'),
+        ('../profitdll/DLLs/Win64/InfoSSLServerAddr3.dat', '.'),
+        ('../profitdll/DLLs/Win64/ReplayServerAddr3.dat', '.'),
+        ('../profitdll/DLLs/Win64/newInfoReg7.dat', '.'),
+        # ProfitDLL folder companions (preserve directory structure)
+        ('../profitdll/DLLs/Win64/MarketHours2', 'MarketHours2'),
+        ('../profitdll/DLLs/Win64/database', 'database'),
+        ('../profitdll/DLLs/Win64/PopupManagerV2', 'PopupManagerV2'),
+        ('../profitdll/DLLs/Win64/strategy', 'strategy'),
+        # UI assets (style.qss, icons) — Felix's territory
+        ('../src/data_downloader/ui/assets', 'assets'),
+    ] + pyside6_datas,
+    hiddenimports=[
+        'pyarrow',
+        'pyarrow.parquet',
+        'duckdb',
+        'PySide6.QtCore',
+        'PySide6.QtGui',
+        'PySide6.QtWidgets',
+    ] + pyside6_hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        # Heavy deps we explicitly don't ship — keeps build small + AV-quiet
+        'tkinter',
+        'matplotlib',
+        'scipy',
+        'pandas',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+# -----------------------------------------------------------------------------
+# PYZ — pure-Python bytecode archive
+# -----------------------------------------------------------------------------
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+# -----------------------------------------------------------------------------
+# EXE — the launcher (small stub in --onedir mode)
+# -----------------------------------------------------------------------------
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,            # --onedir: binaries live alongside, not inside
+    name='data_downloader',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,                        # UPX corrupts signed DLLs; never enable
+    console=True,                     # CLI-first: stdout disponível para `data_downloader.exe download ...`. UI ainda abre normalmente quando executado sem subcomando (v1.0.1 fix — INSTALL.md prometia CLI). Trade-off: console window pisca brevemente quando user clica para abrir UI; aceitável para v1.0.1, refinar em v1.1 com .exe duplo (console + windowed).
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=ICON_PATH,
+)
+
+# -----------------------------------------------------------------------------
+# COLLECT — assembles dist/data_downloader/ for --onedir output
+# -----------------------------------------------------------------------------
+# contents_directory='.' restaura layout legado (binaries siblings ao .exe).
+# PyInstaller 6.x default é '_internal' — quebraria validação companion DLLs
+# em build_release.py + design intent (linha 34: "All DLLs as siblings").
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,                        # see EXE() — UPX is forbidden
+    upx_exclude=[],
+    name='data_downloader',
+    contents_directory='.',
+)

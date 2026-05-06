@@ -50,7 +50,7 @@ from typing import Final
 
 # Repo GitHub do data-downloader. Configurável via env em deploy futuro
 # (V1.1 com tufup, esse vai virar config TUF root).
-DEFAULT_GITHUB_OWNER: Final[str] = "synkra-aiox"
+DEFAULT_GITHUB_OWNER: Final[str] = "nicksauro"
 DEFAULT_GITHUB_REPO: Final[str] = "data-downloader"
 
 # Endpoint GitHub Releases API.
@@ -186,7 +186,7 @@ class UpdaterStub:
     para V1.1 (Story 4.4-followup).
 
     Args:
-        github_owner: Owner do repo GitHub (default: ``synkra-aiox``).
+        github_owner: Owner do repo GitHub (default: ``nicksauro``).
         github_repo: Nome do repo (default: ``data-downloader``).
         current_version: Versão atualmente instalada. Se ``None``, lê de
             ``data_downloader.public_api.__api_version__``.

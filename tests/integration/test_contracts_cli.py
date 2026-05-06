@@ -122,7 +122,12 @@ def test_cli_contracts_validate_missing_creds(
     runner: CliRunner, isolated_catalog_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Sem credenciais env → exit 3 com mensagem clara."""
+    # Story v1.0.2 B2 (2026-05-05): naming canônico ``PROFITDLL_*``.
+    # Mantemos delenv dos legados também para evitar contamination via
+    # backwards-compat fallback (que casaria PROFIT_USER → PROFITDLL_USER).
     monkeypatch.delenv("PROFITDLL_KEY", raising=False)
+    monkeypatch.delenv("PROFITDLL_USER", raising=False)
+    monkeypatch.delenv("PROFITDLL_PASS", raising=False)
     monkeypatch.delenv("PROFIT_USER", raising=False)
     monkeypatch.delenv("PROFIT_PASS", raising=False)
     result = runner.invoke(app, ["contracts", "validate", "WDO", "WDOJ26"])

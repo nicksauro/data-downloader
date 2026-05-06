@@ -150,8 +150,8 @@ mypy src/
 ## 🎬 Uso planejado (após Story 1.7 — MVP gate)
 
 ```powershell
-# Baixar 30 dias de WDOJ26
-data-downloader download --symbol WDOJ26 --start 2026-03-01 --end 2026-03-30
+# Baixar 5 dias úteis de mini-dólar (continuous future, recomendado)
+data-downloader download --symbol WDOFUT --start 2026-04-28 --end 2026-05-02
 
 # Resumir job interrompido
 data-downloader download --resume <job_id>

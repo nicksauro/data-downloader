@@ -30,6 +30,7 @@ import os
 import signal
 import sys
 import threading
+import warnings
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -79,6 +80,171 @@ app = typer.Typer(
 )
 
 
+# =====================================================================
+# Story v1.0.2 fix B3 — dotenv bootstrap (Nelo+Aria 2026-05-05)
+# =====================================================================
+# Carrega ``.env`` de candidatos em ordem de precedência ANTES de qualquer
+# leitura ``os.getenv``. Sem isto o usuário precisava ``export PROFITDLL_*``
+# em cada terminal — fonte recorrente de "NL_NO_LICENSE" em smoke real.
+#
+# Ordem (primeiro arquivo encontrado vence):
+#   1. ``cwd / .env``                              — projeto local (dev)
+#   2. ``<exe-dir> / .env``                        — distribuição PyInstaller
+#   3. ``~/.data-downloader/.env``                 — config user-global
+#
+# Graceful degrade: se ``python-dotenv`` não estiver instalado, retorna
+# silenciosamente (variáveis precisam ser exportadas no shell — rota antiga).
+
+
+def _bootstrap_env() -> None:
+    """Carrega ``.env`` do primeiro candidato existente (cwd > exe > user-home).
+
+    Idempotent — chamada múltipla é segura (load_dotenv não sobrescreve por
+    default). Best-effort: qualquer erro é silenciado (CLI ainda funciona
+    sem .env quando vars já estão no ambiente).
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        # python-dotenv não instalado — graceful degrade. Usuário precisa
+        # exportar PROFITDLL_* no shell ou via launcher dedicado.
+        return
+
+    candidates: list[Path | None] = [
+        Path.cwd() / ".env",
+        # PyInstaller --onedir: .env junto do .exe é o caminho natural para
+        # usuário final que não conhece cwd.
+        Path(sys.executable).parent / ".env" if getattr(sys, "frozen", False) else None,
+        Path.home() / ".data-downloader" / ".env",
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if candidate.is_file():
+                load_dotenv(candidate)
+                return
+        except OSError:  # pragma: no cover defensive
+            continue
+
+
+def _get_credential(canonical: str, deprecated: str | None = None) -> str | None:
+    """Lê env var canônica com fallback warning para nome deprecated.
+
+    Story v1.0.2 fix B2 (Nelo+Aria 2026-05-05): backwards-compat para os
+    naming antigos ``PROFIT_USER`` / ``PROFIT_PASS`` (sem prefixo). Naming
+    canônico é ``PROFITDLL_*``. Quando só o deprecated está set, emitimos
+    ``DeprecationWarning`` e retornamos o valor — assim usuários com .env
+    legado continuam funcionando até atualizar.
+
+    Args:
+        canonical: Nome canônico (``PROFITDLL_USER``).
+        deprecated: Nome legado opcional (``PROFIT_USER``).
+
+    Returns:
+        Valor da var ou ``None`` quando nenhuma das duas está set.
+    """
+    val = os.getenv(canonical)
+    if val:
+        return val
+    if deprecated is not None:
+        legacy = os.getenv(deprecated)
+        if legacy:
+            warnings.warn(
+                f"{deprecated} is deprecated; use {canonical} (Story v1.0.2 B2).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return legacy
+    return None
+
+
+# Executado em import (uma única vez). Idempotente — load_dotenv não
+# sobrescreve vars já no ambiente.
+_bootstrap_env()
+
+
+# =====================================================================
+# Story v1.0.2 fix B-Frozen #3 — sentinelas frozen-mode → microcopy
+# =====================================================================
+# Mapa de sentinelas internas (não-``NL_*``) que podem aparecer em
+# ``DownloadResult.error_message`` quando algo falha no frozen mode
+# (PyInstaller bundle). Cada uma traz microcopy específica; ``{tail}``
+# (com fallbacks ``{path}``/``{symbol}``) vem do segmento após o ``:``
+# no ``error_message`` (formato ``SENTINEL: <texto livre>``).
+#
+# Mantido módulo-level para evitar reconstrução em hot path do download_cmd
+# (Pyro R21) e satisfazer ruff N806.
+
+
+def _build_known_sentinels() -> dict[str, _MicrocopyEntryT]:
+    """Lazy builder do mapa de sentinelas — evita import circular cli↔microcopy."""
+    from data_downloader.ui.microcopy_loader import MicrocopyEntry
+
+    return {
+        "VERIFY_SCRIPT_MISSING": MicrocopyEntry(
+            msg_type="error",
+            title="Script de verificação ausente",
+            detail=(
+                "O script ``verify-dll-companions.py`` não foi encontrado "
+                "no bundle PyInstaller. Provável corrupção do build."
+            ),
+            action=("Reinstale o data-downloader (ou rode `data-downloader doctor`)."),
+        ),
+        "VERIFY_SCRIPT_LOAD_FAILED": MicrocopyEntry(
+            msg_type="error",
+            title="Falha ao carregar verify-dll-companions",
+            detail="Importlib não conseguiu carregar o script de verificação.",
+            action="Reinstale o data-downloader.",
+        ),
+        "COMPANIONS_MISSING": MicrocopyEntry(
+            msg_type="error",
+            title="DLL companions ausentes",
+            detail="Arquivos companions da ProfitDLL não foram encontrados ({tail}).",
+            action=(
+                "Rode `bootstrap-dll.ps1` ou reinstale o data-downloader "
+                "para restaurar os companions."
+            ),
+        ),
+        "WINDLL_LOAD_FAILED": MicrocopyEntry(
+            msg_type="error",
+            title="Falha ao carregar ProfitDLL.dll",
+            detail="Não consegui carregar a ProfitDLL ({tail}).",
+            action="Verifique que o Windows é x64 e que a DLL não está bloqueada.",
+        ),
+        "UNSUPPORTED_PLATFORM": MicrocopyEntry(
+            msg_type="error",
+            title="Plataforma não suportada",
+            detail="data-downloader requer Windows x64 (ProfitDLL é Win64-only).",
+            action="Use uma máquina Windows 10/11 x64.",
+        ),
+        "InvalidContract": MicrocopyEntry(
+            msg_type="error",
+            title="Contrato inválido",
+            detail="O símbolo ``{tail}`` não é um contrato vigente.",
+            action="Liste vigentes: `data-downloader contracts list`.",
+        ),
+    }
+
+
+# Type alias para referência forward (preenchido na 1ª chamada de
+# ``_get_known_sentinels``). Evitamos importar MicrocopyEntry aqui pra
+# manter cli.py importável sem ui/ resolvido (R17 — lazy load).
+if TYPE_CHECKING:
+    from data_downloader.ui.microcopy_loader import MicrocopyEntry as _MicrocopyEntryT
+else:
+    _MicrocopyEntryT = object  # placeholder runtime; concreto via TYPE_CHECKING
+_KNOWN_SENTINELS: dict[str, _MicrocopyEntryT] | None = None
+
+
+def _get_known_sentinels() -> dict[str, _MicrocopyEntryT]:
+    """Retorna o mapa cacheado de sentinelas (lazy build na 1ª chamada)."""
+    global _KNOWN_SENTINELS
+    if _KNOWN_SENTINELS is None:
+        _KNOWN_SENTINELS = _build_known_sentinels()
+    return _KNOWN_SENTINELS
+
+
 # Story 2.9 — flags globais de logging (ADR-010 / AC5).
 _LOG_LEVEL_OPT = typer.Option(
     None,
@@ -113,7 +279,7 @@ def _resolve_default_format() -> str:
     return "json"
 
 
-@app.callback()  # type: ignore[misc]
+@app.callback()  # type: ignore[misc,unused-ignore]
 def _global_callback(
     log_level: str | None = _LOG_LEVEL_OPT,
     log_format: str | None = _LOG_FORMAT_OPT,
@@ -167,11 +333,32 @@ def _open_catalog(db_path: Path | None = None) -> Catalog:
 
     Import local evita custo de importar storage para comandos que não
     precisam (``version``).
+
+    Story v1.0.2 fix (Pichau smoke 2026-05-06): catalog vazio (first-run
+    do .exe distribuído) auto-populava do seed YAML embutido em
+    ``CONTRACTS.md``. Sem isso, primeiro ``download --symbol WDOFUT``
+    falhava com ``InvalidContract`` mesmo com o seed atualizado, porque
+    o catalog SQLite só era populado via ``contracts populate`` manual.
     """
+    from data_downloader.orchestrator.contracts import (
+        list_contracts,
+        populate_contracts_from_seed,
+    )
     from data_downloader.storage.catalog import Catalog
 
     path = db_path if db_path is not None else _DEFAULT_CATALOG_PATH
-    return Catalog(db_path=path)
+    catalog = Catalog(db_path=path)
+    # First-run auto-populate: se catalog vazio, carregar seed (idempotente).
+    try:
+        existing = list_contracts(catalog)
+        if not existing:
+            populate_contracts_from_seed(catalog)
+    except Exception:
+        # Defensivo — falha em populate não bloqueia comandos read-only.
+        # Usuário verá InvalidContract downstream com hint para
+        # `contracts list`/`contracts populate`.
+        pass
+    return catalog
 
 
 @app.command()  # type: ignore[misc,unused-ignore]
@@ -371,9 +558,11 @@ def contracts_validate(
 
     console = Console()
 
-    key = os.getenv("PROFITDLL_KEY")
-    user = os.getenv("PROFITDLL_USER")
-    password = os.getenv("PROFITDLL_PASS")
+    # Story v1.0.2 B2: leitura via _get_credential com fallback p/ naming
+    # legado (PROFIT_USER / PROFIT_PASS) — emite DeprecationWarning.
+    key = _get_credential("PROFITDLL_KEY")
+    user = _get_credential("PROFITDLL_USER", "PROFIT_USER")
+    password = _get_credential("PROFITDLL_PASS", "PROFIT_PASS")
     if not (key and user and password):
         console.print(
             "[red]Credenciais ausentes.[/red] Defina PROFITDLL_KEY, PROFITDLL_USER, "
@@ -400,7 +589,7 @@ def contracts_validate(
                 raise typer.Exit(code=4)
 
             console.print(
-                f"Probing [bold]{contract_code}[/bold] " f"(sample_date={parsed_date or 'auto'})..."
+                f"Probing [bold]{contract_code}[/bold] (sample_date={parsed_date or 'auto'})..."
             )
             result = probe_contract(
                 dll=dll,
@@ -515,11 +704,27 @@ def _open_catalog_for_validation(data_dir: Path) -> Catalog:
 
     Variant de :func:`_open_catalog` que respeita ``data_dir`` arbitrário
     (a versão de ``contracts`` usa o path canônico fixo).
+
+    Story v1.0.2 fix (Pichau smoke 2026-05-06): auto-populate seed se
+    catalog vazio. Mesma motivação que :func:`_open_catalog` — first-run
+    do .exe distribuído precisa contratos populados pra resolver
+    ``WDOFUT/PETR4/etc`` em ``vigent_contract``.
     """
+    from data_downloader.orchestrator.contracts import (
+        list_contracts,
+        populate_contracts_from_seed,
+    )
     from data_downloader.storage.catalog import Catalog as _Catalog
 
     db_path = data_dir / "history" / "catalog.db"
-    return _Catalog(db_path=db_path, data_dir=data_dir, auto_reconcile=False)
+    catalog = _Catalog(db_path=db_path, data_dir=data_dir, auto_reconcile=False)
+    try:
+        existing = list_contracts(catalog)
+        if not existing:
+            populate_contracts_from_seed(catalog)
+    except Exception:
+        pass
+    return catalog
 
 
 def _print_integrity_table(report: IntegrityReport, console: Console) -> None:
@@ -679,8 +884,13 @@ _DOWNLOAD_SYMBOL_OPT = typer.Option(
     "--symbol",
     "-s",
     help=(
-        "Símbolo (ex. WDOJ26). Repetível para múltiplos: "
-        "--symbol WDOJ26 --symbol WINH26 (Story 4.1). "
+        # Story v1.0.2 / 4.6 (Q-DRIFT-32 2026-05-05): help text simplificado.
+        # WDOFUT/WINFUT (continuous future) é o ticker recomendado; antes
+        # exemplificávamos WDOJ26 (vencimento), forçando o usuário a saber
+        # letra-do-mês CME. Equities ficam diretos.
+        "Símbolo (ex. WDOFUT, WINFUT, PETR4). Repetível para múltiplos: "
+        "--symbol WDOFUT --symbol PETR4. "
+        "Aliases (WDO/WIN/IND/DOL) viram <ROOT>FUT automaticamente. "
         "Default: última usada."
     ),
 )
@@ -797,15 +1007,20 @@ def download_cmd(
     _ = resume  # placeholder V2
 
     # ---- 1. Normaliza lista de símbolos (Story 4.1 AC6) ----
+    # Story v1.0.2 / 4.6 (Q-DRIFT-32 2026-05-05): aplicamos resolve_alias()
+    # ANTES da rota single/multi para que o cache last_symbol guarde o
+    # canônico (evita warning repetido em re-runs com cache hit).
+    from data_downloader.orchestrator.symbol_alias import resolve_alias
+
     symbols: list[str] = []
     if symbol:
-        symbols = [s.strip() for s in symbol if s and s.strip()]
+        symbols = [resolve_alias(s) for s in symbol if s and s.strip()]
 
     if not symbols:
         cached = _load_last_symbol()
         if cached:
-            symbols = [cached]
-            console.print(f"[dim]Símbolo (cache): [bold]{cached}[/bold][/dim]")
+            symbols = [resolve_alias(cached)]
+            console.print(f"[dim]Símbolo (cache): [bold]{symbols[0]}[/bold][/dim]")
         else:
             console.print(
                 f"[red]✗ {_format_microcopy('ERR_INPUT_SYMBOL_REQUIRED', 'title')}[/red]\n"
@@ -1141,15 +1356,47 @@ def download_cmd(
         raise typer.Exit(code=130)
     if status in ("partial", "failed"):
         # Erro humanizado via humanize_nl_error quando possível.
-        from data_downloader.ui.microcopy_loader import humanize_nl_error
+        # Story v1.0.2 fix B-Frozen #3 (Nelo+Aria 2026-05-05): estender o mapping
+        # para sentinelas internas usadas em frozen mode (verify script, DLL
+        # load failure, etc.). Antes só humanizávamos prefix ``NL_*``; sentinelas
+        # como ``COMPANIONS_MISSING``/``VERIFY_SCRIPT_MISSING`` caíam em
+        # "Código ?: UNKNOWN", confundindo o usuário.
+        from data_downloader.ui.microcopy_loader import (
+            MicrocopyEntry,
+            humanize_nl_error,
+        )
 
-        nl_name = None
+        known_sentinels = _get_known_sentinels()
+        sentinel_name: str | None = None
+        nl_name: str | None = None
+        tail: str = ""
         if final_result.error_message:
-            # error_message vem como "NL_NAME: ..." quando DLLInitError.
-            head = final_result.error_message.split(":", 1)[0].strip()
+            head, _, tail_part = final_result.error_message.partition(":")
+            head = head.strip()
+            tail = tail_part.strip()
             if head.startswith("NL_"):
                 nl_name = head
-        entry = humanize_nl_error(nl_name)
+            elif head in known_sentinels:
+                sentinel_name = head
+
+        entry: MicrocopyEntry
+        if sentinel_name is not None:
+            template = known_sentinels[sentinel_name]
+            # Substitui {tail} (e fallback {path}/{symbol}) — best-effort, sem
+            # quebrar caso a sentinel não use placeholder.
+            try:
+                detail = (template.detail or "").format(tail=tail, path=tail, symbol=tail)
+            except (KeyError, IndexError):  # pragma: no cover defensive
+                detail = template.detail or ""
+            entry = MicrocopyEntry(
+                msg_type=template.msg_type,
+                title=template.title,
+                detail=detail,
+                action=template.action,
+            )
+        else:
+            entry = humanize_nl_error(nl_name)
+
         body = (
             f"[bold red]✗ {entry.title}[/bold red]\n"
             f"{entry.detail or final_result.error_message or ''}\n"
@@ -1158,7 +1405,9 @@ def download_cmd(
         console.print(
             Panel(body, title="erro", border_style="red"),
         )
-        raise typer.Exit(code=3 if nl_name else 1)
+        # Exit code 3 indica erro mapeado/conhecido (NL_* ou sentinel),
+        # 1 = erro não mapeado.
+        raise typer.Exit(code=3 if (nl_name or sentinel_name) else 1)
     # Defensive — status desconhecido.
     console.print(f"[red]✗ Status desconhecido: {status}[/red]")  # pragma: no cover
     raise typer.Exit(code=1)

@@ -220,6 +220,11 @@ class CatalogScreen(QWidget):
     """
 
     state_changed = Signal(str)
+    # Story 4.6 (UX polish, Pichau directive 2026-05-05) — empty state CTA
+    # solicita navegação para DownloadScreen. MainWindow conecta este sinal
+    # ao ``set_active_screen(SCREEN_DOWNLOAD)``. Quando não conectado, atalho
+    # global Ctrl+D continua funcionando como fallback.
+    request_navigate_to_download = Signal()
 
     _request_list = Signal(object)
     _request_delete = Signal(object, str)
@@ -449,16 +454,21 @@ class CatalogScreen(QWidget):
         return panel
 
     def _build_empty_card(self) -> QWidget:
+        # Story 4.6 (UX polish HIGH, Pichau directive 2026-05-05):
+        # Empty state agora inclui CTA "Baixar primeiro símbolo" (Ctrl+D)
+        # — antes era só ícone + texto sem ação visível.
         card = QWidget(self)
         layout = QVBoxLayout(card)
         layout.addStretch(1)
 
-        icon = QLabel("📁", card)
+        icon = QLabel("📊", card)
+        icon.setObjectName("emptyStateIcon")
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setStyleSheet("font-size: 48px;")
+        icon.setStyleSheet("font-size: 56px;")
         layout.addWidget(icon)
 
         title = QLabel(format_msg("EMP_CATALOG_FIRST_RUN_TITLE"), card)
+        title.setObjectName("emptyStateTitle")
         title.setProperty("role", "subtitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -467,6 +477,18 @@ class CatalogScreen(QWidget):
         sub.setProperty("role", "muted")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(sub)
+
+        # CTA primário — emite sinal para MainWindow trocar para DownloadScreen.
+        cta_row = QHBoxLayout()
+        cta_row.addStretch(1)
+        self._empty_cta_btn = QPushButton(format_msg("BTN_DOWNLOAD_FIRST_SYMBOL"), card)
+        self._empty_cta_btn.setObjectName("emptyStateCta")
+        self._empty_cta_btn.setProperty("variant", "primary")
+        self._empty_cta_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._empty_cta_btn.clicked.connect(self.request_navigate_to_download.emit)
+        cta_row.addWidget(self._empty_cta_btn)
+        cta_row.addStretch(1)
+        layout.addLayout(cta_row)
 
         layout.addStretch(1)
         return card

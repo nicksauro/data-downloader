@@ -94,7 +94,7 @@ _NL_ERROR_MAP: Final[dict[str, MicrocopyEntry]] = {
         msg_type="error",
         title="Credenciais ausentes",
         detail="Não encontrei usuário/senha para conectar.",
-        action="Configure PROFIT_USER e PROFIT_PASS em .env.",
+        action="Configure PROFITDLL_USER e PROFITDLL_PASS em .env.",
     ),
     "NL_NO_LICENSE": MicrocopyEntry(
         msg_type="error",
@@ -215,7 +215,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "ERR_DLL_NO_LICENSE": MicrocopyEntry(
         msg_type="error",
         title="Credenciais ausentes",
-        detail="Defina PROFITDLL_KEY, PROFIT_USER, PROFIT_PASS no ambiente.",
+        detail="Defina PROFITDLL_KEY, PROFITDLL_USER, PROFITDLL_PASS no ambiente.",
         action="Configure em ~/.data-downloader/.env e reinicie o terminal.",
     ),
     # Story 2.11 — IDs novos (Uma sign-off COUNCIL-17). Cancelamento H10
@@ -455,15 +455,15 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="label",
         title="Atalhos: Ctrl+D iniciar  •  Ctrl+R repetir último  •  Ctrl+/ todos",
     ),
-    "PLH_SYMBOL": MicrocopyEntry(msg_type="placeholder", title="ex: WDOJ26"),
+    "PLH_SYMBOL": MicrocopyEntry(msg_type="placeholder", title="ex: WDOFUT, PETR4"),
     "PLH_SYMBOL_SUGGESTED_HINT": MicrocopyEntry(
         msg_type="placeholder", title="{symbol} sugerido — contrato vigente do {asset}"
     ),
     "TIP_SYMBOL": MicrocopyEntry(
         msg_type="label",
         title=(
-            "Código do contrato (ex: WDOJ26 = WDO vencimento abril/2026). "
-            "Use o autocomplete para ver vigentes."
+            "Código do ativo. Para futuros use continuous (ex: WDOFUT, WINFUT). "
+            "Para ações use ticker B3 (ex: PETR4, VALE3)."
         ),
     ),
     "TIP_PERIOD": MicrocopyEntry(
@@ -528,10 +528,14 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "BTN_VALIDATE_CONTRACT": MicrocopyEntry(msg_type="button", title="Validar Contrato"),
     "BTN_REPEAT_LAST": MicrocopyEntry(msg_type="button", title="Repetir Último Download"),
     "EMP_CATALOG_FIRST_RUN_TITLE": MicrocopyEntry(
-        msg_type="empty", title="Nenhum histórico baixado ainda."
+        msg_type="empty", title="Nenhum dado baixado ainda"
     ),
     "EMP_CATALOG_FIRST_RUN_SUBTITLE": MicrocopyEntry(
-        msg_type="empty", title="Comece baixando um símbolo."
+        msg_type="empty", title="Comece baixando um símbolo (futures continuous ou ações B3)."
+    ),
+    # Story 4.6 (UX polish, Pichau directive 2026-05-05) — empty state CTA.
+    "BTN_DOWNLOAD_FIRST_SYMBOL": MicrocopyEntry(
+        msg_type="button", title="Baixar primeiro símbolo (Ctrl+D)"
     ),
     "EMP_CATALOG_FILTER_NO_MATCH_TITLE": MicrocopyEntry(
         msg_type="empty", title='Nenhum histórico encontrado para "{filter}".'
@@ -636,7 +640,8 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "EMP_SETTINGS_DLL_FIRST_RUN_STEP2": MicrocopyEntry(
         msg_type="empty",
         title=(
-            "2. Crie/edite ~/.data-downloader/.env com PROFITDLL_KEY, " "PROFIT_USER, PROFIT_PASS"
+            "2. Crie/edite ~/.data-downloader/.env com PROFITDLL_KEY, "
+            "PROFITDLL_USER, PROFITDLL_PASS"
         ),
     ),
     "EMP_SETTINGS_DLL_FIRST_RUN_STEP3": MicrocopyEntry(

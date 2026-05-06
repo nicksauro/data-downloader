@@ -264,9 +264,24 @@ def list_contracts(
 #  parents[1] = data_downloader/
 #  parents[2] = src/
 #  parents[3] = repo root
-DEFAULT_SEED_PATH: Final[Path] = (
-    Path(__file__).resolve().parents[3] / "docs" / "storage" / "CONTRACTS.md"
-)
+#
+# Story v1.0.2 (Pichau smoke 2026-05-06): em frozen mode (PyInstaller),
+# CONTRACTS.md é bundled em ``sys._MEIPASS/docs/storage/CONTRACTS.md``
+# via spec template ``datas`` tuple. Sem este branch, ``populate_contracts_
+# from_seed`` falhava silenciosamente em first-run do .exe distribuído.
+def _resolve_default_seed_path() -> Path:
+    import sys
+
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidate = Path(meipass) / "docs" / "storage" / "CONTRACTS.md"
+            if candidate.is_file():
+                return candidate
+    return Path(__file__).resolve().parents[3] / "docs" / "storage" / "CONTRACTS.md"
+
+
+DEFAULT_SEED_PATH: Final[Path] = _resolve_default_seed_path()
 """Caminho default do seed YAML embutido (CONTRACTS.md §3)."""
 
 

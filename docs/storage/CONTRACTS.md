@@ -89,8 +89,53 @@ Não escopados em V1 do seed. Adicionar via `*contract-add` quando necessário.
 contracts:
 
   # =====================================================================
-  # WDO — Mini Dólar (mensal)
+  # Continuous futures (Story 4.6 / Pichau directive 2026-05-06)
   # =====================================================================
+  # WDOFUT/WINFUT/INDFUT/DOLFUT: continuous-future aliases — DLL Nelogica
+  # entrega histórico contínuo por raiz quando o ticker termina em "FUT"
+  # (Q-DRIFT-32 validated). Vigência efetivamente perpétua — usados
+  # como caminho golden path "baixar histórico longo sem rollover manual".
+  # Equities (PETR4 etc) seguem o mesmo padrão de eternidade abaixo.
+
+  - symbol_root: WDOFUT
+    contract_code: WDOFUT
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: 2026-05-05  # smoke real 1.7b-followup MVP gate (513.686 trades)
+    validation_source: manual
+    notes: "Mini-dólar continuous (Q-DRIFT-32). Golden path."
+
+  - symbol_root: WINFUT
+    contract_code: WINFUT
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Mini-Ibovespa continuous (Q-DRIFT-32). Validar via probe Story 4.2-followup."
+
+  - symbol_root: INDFUT
+    contract_code: INDFUT
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Índice futuro continuous. Validar via probe."
+
+  - symbol_root: DOLFUT
+    contract_code: DOLFUT
+    vigent_from: 1900-01-01
+    vigent_until: 9999-12-31
+    validated_at: null
+    validation_source: manual
+    notes: "Dólar futuro (não-mini) continuous. Validar via probe."
+
+  # =====================================================================
+  # WDO — Mini Dólar (mensal — legacy contracts com vencimento)
+  # =====================================================================
+  # Mantidos por backwards-compat e para evidência histórica Q-DRIFT-32
+  # (WDOJ26 retornou 0 trades em smoke 1.7d porque vencido). Usuário casual
+  # deve usar WDOFUT acima — esses ficam para usuários que querem
+  # contrato específico (research/auditoria).
 
   - symbol_root: WDO
     contract_code: WDOH26

@@ -263,7 +263,7 @@ def _resolve_repo_slug() -> str:
                 return slug
     except (OSError, FileNotFoundError):
         pass
-    return "synkra-aiox/data-downloader"
+    return "nicksauro/data-downloader"
 
 
 # =====================================================================

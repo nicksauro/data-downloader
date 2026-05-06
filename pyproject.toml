@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data_downloader"
-version = "1.0.0"
+version = "1.0.2"
 description = "Downloader de histórico de ativos via ProfitDLL — fundação para projetos futuros"
 requires-python = ">=3.12"
 authors = [{name = "Squad data-downloader"}]
@@ -34,6 +34,12 @@ dependencies = [
     # Autorização: ADR-013 §Decisão (Opção A). Increment lock-free O(1)
     # garante hot-path safe (R21). HTTP exporter é opt-in via --metrics-port.
     "prometheus_client>=0.20",
+    # Story v1.0.2 fix B3 (Nelo+Aria 2026-05-05): dotenv loader em produção
+    # — usuário final preenche ``.env`` em cwd ou ``~/.data-downloader/`` e
+    # CLI carrega automaticamente. Antes era necessário export manual via
+    # shell, frequente fonte de "NL_NO_LICENSE" em smoke real. Graceful
+    # fallback caso o pacote não esteja disponível.
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -103,7 +103,7 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 
 | ID | Tipo | Contexto | pt-BR | en-US |
 |----|------|----------|-------|-------|
-| `PLH_SYMBOL` | placeholder | Input símbolo vazio | ex: WDOJ26 | e.g.: WDOJ26 |
+| `PLH_SYMBOL` | placeholder | Input símbolo vazio | ex: WDOFUT, PETR4 | e.g.: WDOFUT, PETR4 |
 | `PLH_PERIOD` | placeholder | Dropdown período fechado | Selecione o período | Select period |
 | `PLH_START_DATE` | placeholder | DatePicker | dd/mm/aaaa | mm/dd/yyyy |
 | `PLH_END_DATE` | placeholder | DatePicker | dd/mm/aaaa | mm/dd/yyyy |
@@ -272,7 +272,7 @@ default; aparece com `--verbose` ou no log expansível da progress bar.
 
 | ID | Contexto | Texto pt-BR |
 |----|----------|-------------|
-| `TIP_SYMBOL` | Input símbolo | Código do contrato (ex: WDOJ26 = WDO vencimento abril/2026). Use o autocomplete para ver vigentes. |
+| `TIP_SYMBOL` | Input símbolo | Código do ativo. Para futuros use continuous (ex: WDOFUT, WINFUT). Para ações use ticker B3 (ex: PETR4, VALE3). |
 | `TIP_PERIOD` | Dropdown período | Período de histórico para baixar. Default: mês corrente. Períodos > 30 dias são divididos em chunks. |
 | `TIP_OUTPUT_FOLDER` | Folder picker | Pasta onde os Parquets serão gravados. Será criada se não existir. |
 | `TIP_CHUNK_SIZE` | Drawer avançado | Tamanho de cada chunk em dias. Menor = retry mais rápido em falhas. Maior = menos overhead. Default: 30. |
@@ -386,6 +386,7 @@ default; aparece com `--verbose` ou no log expansível da progress bar.
 | `EMP_CATALOG_FILTER_NO_MATCH_SUBTITLE` | empty | CatalogScreen — empty filtrado subtítulo | Tente outros filtros ou liste tudo. |
 | `WAR_CATALOG_DRIFT_ROW` | warning | CatalogScreen — tooltip linha com drift | Diferença detectada entre catálogo e arquivos. Reconcilie para corrigir. |
 | `WAR_CATALOG_DELETE_ACTIVE_DOWNLOAD` | warning | CatalogScreen — bloqueio delete durante download | Download em progresso para este símbolo. Aguarde ou cancele primeiro. |
+| `BTN_DOWNLOAD_FIRST_SYMBOL` | button | CatalogScreen — empty state CTA (Story 4.6, Pichau 2026-05-05) | Baixar primeiro símbolo (Ctrl+D) |
 
 ### 17b.3 — SettingsScreen (Story 3.4)
 

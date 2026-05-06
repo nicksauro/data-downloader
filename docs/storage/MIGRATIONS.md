@@ -256,20 +256,37 @@ Toda migration nova deve trazer 4 testes em `tests/storage/migrations/`:
 | —       | 1.0.0   | (initial)  | —        | Story 0.0 | Em uso       |
 | 1.0.0   | 1.1.0   | aditivo    | sim      | Story 2.3 | Disponível   |
 
-### v1.0.0 → v1.1.0 — aditivo (Story 2.3)
+### v1.0.0 → v1.1.0 — aditivo (Story 1.7g + Owners Council 2026-05-05 P0)
 
-- **Mudança:** adiciona campo `liquidity_classification` (uint8 nullable, todos NULL).
-- **Rationale:** placeholder para Epic 4 multi-asset. NULL preserva R4
-  (leitor v1.0.0 lendo arquivo v1.1.0 ignora a coluna nova).
+- **Mudança:** adiciona 3 campos `string` nullable ao schema v1.0.0 (17
+  campos) → v1.1.0 (20 campos):
+  - `buy_agent_name`  — nome humano da corretora compradora.
+  - `sell_agent_name` — nome humano da corretora vendedora.
+  - `trade_type_name` — nome humano de `trade_type`
+    (`TConnectorTradeType` 0..13).
+- **Rationale:** Nelo Council 32 release blocker P0 — schema v1.0.0
+  silenciosamente descartava esses 3 campos populados pelo pipeline em
+  memória. v1.1.0 mapeia explicitamente; writer agora falha LOUDLY
+  (`SchemaIntegrityError` em `_check_no_field_drop`) se algum campo do
+  `TradeRecord` cair fora do schema.
+- **Fallback determinístico** (sem invenção, R4 + Article IV):
+  - `buy_agent_name`  := `f"Agent#{buy_agent_id}"`     (None se id null).
+  - `sell_agent_name` := `f"Agent#{sell_agent_id}"`    (None se id null).
+  - `trade_type_name` := `TRADE_TYPE_NAME[trade_type]` (lookup), ou
+    `f"TradeType#{n}"` se id desconhecido (fora 0..13).
 - **Implementação:**
   `src/data_downloader/storage/migrations/parquet/v1_0_0_to_v1_1_0.py`
-  (`V100ToV110` — herda `ParquetMigration`).
+  (`V100ToV110` — herda `ParquetMigration`). Substitui versão errada
+  anterior (Story 2.3 exemplo `liquidity_classification` foi descartado
+  pela B1 fix do Owners Council 2026-05-05).
 - **Catálogo:** DDL adicional `_migration_log` aplicada via
   `Catalog._apply_migrations` (CATALOG_VERSION=1.1.0).
-- **Testes:** `tests/unit/test_migration_base.py`,
-  `tests/unit/test_migration_runner.py` (round-trip + rollback +
-  resume), `tests/property/test_migration_aditive.py` (Hypothesis 100
-  examples — INV-9), `tests/integration/test_migrate_cli.py` (CLI).
+- **Testes:**
+  - `tests/integration/test_migrate_v1_0_to_v1_1.py` (B1 fix AC1-AC6).
+  - `tests/unit/test_migration_base.py` (ABC contract + transform).
+  - `tests/unit/test_migration_runner.py` (round-trip + rollback + resume).
+  - `tests/property/test_migration_aditive.py` (Hypothesis 100 — INV-9).
+  - `tests/integration/test_migrate_cli.py` (CLI subcommands).
 - **CLI:**
 
   ```bash

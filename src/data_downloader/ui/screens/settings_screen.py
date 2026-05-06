@@ -88,8 +88,12 @@ def _config_path() -> Path:
 
 
 # Variáveis .env esperadas (mascaradas no display).
-_ENV_VARS = ("PROFITDLL_KEY", "PROFIT_USER", "PROFIT_PASS")
-_SECRET_VARS = ("PROFITDLL_KEY", "PROFIT_PASS")
+# Story v1.0.2 B2 (Nelo+Aria 2026-05-05): naming canônico é ``PROFITDLL_*``
+# (alinhado com .env.example, public_api/download.py:514-515 e tests/smoke).
+# Versões anteriores liam ``PROFIT_USER``/``PROFIT_PASS`` sem prefixo,
+# causando smoke real a sempre falhar com NL_NO_LOGIN.
+_ENV_VARS = ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS")
+_SECRET_VARS = ("PROFITDLL_KEY", "PROFITDLL_PASS")
 
 
 class SettingsScreen(QWidget):

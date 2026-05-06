@@ -105,7 +105,7 @@ completa em 1-2s. Ver `docs/stories/1.7c.story.md` (Deprecated) e
 A release oficial está em **GitHub Releases**:
 
 ```
-https://github.com/synkra-aiox/data-downloader/releases/latest
+https://github.com/nicksauro/data-downloader/releases/latest
 ```
 
 Baixe os dois arquivos:
@@ -161,17 +161,23 @@ V1.1+ introduz instalador `.msi` assinado — ver
 O Data Downloader lê credenciais Nelogica de **variáveis de ambiente** (ou de
 um arquivo `.env` na pasta de instalação).
 
-Crie um arquivo `.env` na pasta `data_downloader/` com 3 chaves
-(substitua os placeholders pelos seus valores reais):
+Crie um arquivo `.env` na pasta `data_downloader/` com as chaves
+canônicas (substitua os placeholders pelos seus valores reais):
 
-| Chave              | Valor                                |
-|--------------------|--------------------------------------|
-| `PROFITDLL` `_KEY` | sua chave de licenca ProfitDLL       |
-| `PROFIT_USER`      | seu usuario do ProfitChart           |
-| `PROFIT_PASS`      | sua senha do ProfitChart             |
+| Chave              | Obrigatória? | Valor                                                    |
+|--------------------|--------------|----------------------------------------------------------|
+| `PROFITDLL_KEY`    | sim          | sua chave de licença ProfitDLL                           |
+| `PROFITDLL_USER`   | sim          | seu usuário do ProfitChart                               |
+| `PROFITDLL_PASS`   | sim          | sua senha do ProfitChart                                 |
+| `PROFITDLL_PATH`   | opcional     | caminho absoluto p/ `ProfitDLL.dll` (default: ao lado do .exe) |
 
-Cada linha do arquivo segue a forma `CHAVE` igual `valor`, sem aspas.
+Cada linha do arquivo segue a forma `CHAVE=valor`, sem aspas.
 Exemplo de template canônico em `.env.example` (incluído no zip).
+
+> **Depreciação (v1.0.0+):** versões antes de v1.0.0 usavam
+> `PROFIT_USER` e `PROFIT_PASS`. Esses nomes ainda são aceitos com
+> warning de depreciação, mas serão removidos em v2.0. **Recomendado
+> migrar** para `PROFITDLL_USER` / `PROFITDLL_PASS`.
 
 > **Segurança:** este arquivo contém **secrets** — não compartilhe e não
 > commite em git. O Data Downloader não logga esses valores (R12 — secret
@@ -212,14 +218,18 @@ Para validar que tudo funciona:
 
 ```powershell
 .\data_downloader.exe download `
-    --symbol WDOJ26 `
-    --start 2026-04-15 `
-    --end 2026-04-15
+    --symbol WDOFUT `
+    --start 2026-04-28 `
+    --end 2026-05-02
 ```
 
-Resultado esperado: 1 partição Parquet criada em
-`<data-dir>/history/<symbol>/<date>.parquet`. Tempo: ~30-90s para 1 dia
-de minidolar.
+Resultado esperado: partições Parquet criadas em
+`<data-dir>/history/<symbol>/<year>/<month>.parquet`. Tempo: ~30-90s
+por dia de minidolar.
+
+> Use **`WDOFUT`** (continuous future) — NÃO contratos específicos
+> vencidos como `WDOJ26`/`WDOK26` que retornam 0 trades (Q-DRIFT-32).
+> Janela máxima recomendada: **5 dias úteis** (Q-DRIFT-31).
 
 ---
 
@@ -317,7 +327,7 @@ Causa: credenciais Nelogica inválidas ou licença DLL não autorizada.
 
 Solução:
 
-1. Confirme `PROFIT_USER` + `PROFIT_PASS` entrando no ProfitChart manualmente.
+1. Confirme `PROFITDLL_USER` + `PROFITDLL_PASS` entrando no ProfitChart manualmente.
 2. Confirme `PROFITDLL_KEY` com a Nelogica (ela pode estar expirada ou
    não habilitada para sua máquina).
 
@@ -343,7 +353,7 @@ servidor, espaço em disco, schema do catálogo.
 Abrir issue em:
 
 ```
-https://github.com/synkra-aiox/data-downloader/issues
+https://github.com/nicksauro/data-downloader/issues
 ```
 
 Inclua:

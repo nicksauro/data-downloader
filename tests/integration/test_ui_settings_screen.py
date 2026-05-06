@@ -36,7 +36,8 @@ def settings_screen(qtbot, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     # Override env vars de DLL para garantir 'not_configured' state.
-    for var in ("PROFITDLL_KEY", "PROFIT_USER", "PROFIT_PASS"):
+    # Story v1.0.2 B2 (2026-05-05): naming canônico ``PROFITDLL_*``.
+    for var in ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS"):
         monkeypatch.delenv(var, raising=False)
 
     from data_downloader.ui.screens.settings_screen import SettingsScreen

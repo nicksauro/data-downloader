@@ -27,7 +27,7 @@ import contextlib
 import sys
 from pathlib import Path
 
-__all__ = ["main"]
+__all__ = ["main", "_cli_or_ui_dispatch", "_first_non_flag_token"]
 
 
 def main() -> int:
@@ -79,5 +79,141 @@ def main() -> int:
     return int(app.exec())
 
 
+# =====================================================================
+# CLI dispatch (Story 1.7b-followup release-blocker — v1.0.1 fix)
+# =====================================================================
+#
+# PyInstaller bundle (Story 4.4) tem `app.py` como entry point único —
+# mas o INSTALL.md publicado promete `data_downloader.exe download
+# --symbol ...` (CLI). Sem dispatch, args extras eram passados a
+# `QApplication(sys.argv)` que silenciosamente ignorava e abria UI.
+#
+# v1.0.0 → v1.0.1: dispatcher inicial só inspecionava `argv[1]`, mas
+# Typer aceita flags globais ANTES do subcommand
+# (e.g. `--log-level DEBUG download ...`), então `argv[1] == "--log-level"`
+# caía no fallback UI → carregava Qt → crash 0xC0000409.
+#
+# Estratégia v1.0.1: percorrer argv pulando flags globais (com ou sem
+# valor) até achar o primeiro token não-flag. Esse token decide o
+# dispatch.
+
+# Sub-comandos Typer conhecidos (mantém em sync com src/data_downloader/cli.py).
+_CLI_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "download",
+        "read",
+        "contracts",
+        "doctor",
+        "migrate",
+        "metrics",
+        "integrity",
+        "version",
+    }
+)
+
+# Flags globais com valor — consomem o próximo token quando NÃO usadas
+# em forma `--flag=valor`. Mantém em sync com `_global_callback` em cli.py
+# e qualquer `typer.Option(..., "--name", ...)` adicionado no callback global.
+_CLI_GLOBAL_FLAGS_WITH_VALUE: frozenset[str] = frozenset(
+    {
+        "--log-level",
+        "--log-format",
+    }
+)
+
+# Flags globais sem valor — autocontidas. Help/version sozinhas devem
+# ir para o CLI (Typer renderiza ajuda) em vez de abrir UI.
+_CLI_GLOBAL_FLAGS_NO_VALUE: frozenset[str] = frozenset(
+    {
+        "--help",
+        "-h",
+        "--version",
+        "-v",
+    }
+)
+
+
+def _first_non_flag_token(args: list[str]) -> str | None:
+    """Retorna o primeiro token de ``args`` que não é flag global.
+
+    Pula flags conhecidas (com ou sem valor, incluindo forma ``--flag=val``).
+    Retorna ``None`` se ``args`` só contém flags (ou está vazio).
+    """
+    i = 0
+    while i < len(args):
+        token = args[i]
+        # Forma `--flag=valor` é autocontida — pula 1 token.
+        if "=" in token and token.startswith("--"):
+            flag_name = token.split("=", 1)[0]
+            if flag_name in _CLI_GLOBAL_FLAGS_WITH_VALUE:
+                i += 1
+                continue
+            # Flag desconhecida com `=` — também consideramos autocontida.
+            if token.startswith("--"):
+                i += 1
+                continue
+        if token in _CLI_GLOBAL_FLAGS_WITH_VALUE:
+            # Pula flag + valor (próximo token).
+            i += 2
+            continue
+        if token in _CLI_GLOBAL_FLAGS_NO_VALUE:
+            i += 1
+            continue
+        if token.startswith("-"):
+            # Flag desconhecida (sem `=`) — assumimos autocontida (sem valor)
+            # para evitar consumir o subcommand. Typer reportará erro depois.
+            i += 1
+            continue
+        return token
+    return None
+
+
+def _has_cli_only_flag(args: list[str]) -> bool:
+    """True se ``args`` contém ``--help/-h/--version/-v`` em qualquer posição.
+
+    Usado quando não há subcommand explícito mas o usuário pediu help/version
+    via flag global — deve ir para CLI (Typer trata) ao invés de UI.
+    """
+    return any(token in _CLI_GLOBAL_FLAGS_NO_VALUE for token in args)
+
+
+def _cli_or_ui_dispatch() -> int:
+    """Roteia para CLI quando ``sys.argv`` contém subcommand; UI senão.
+
+    Heurística (v1.0.1):
+
+    1. ``sys.argv[1:]`` vazio → UI.
+    2. Encontra primeiro token não-flag (pulando ``--log-level VAL``,
+       ``--log-format=VAL``, ``--help``, etc).
+    3. Token está em :data:`_CLI_SUBCOMMANDS` → dispatch CLI.
+    4. Sem token não-flag, mas há ``--help/--version`` → dispatch CLI.
+    5. Default → UI (preserva behaviour original; subcommand desconhecido
+       cai no UI por segurança — usuário double-clicou .exe com lixo).
+
+    **Importante:** este caminho NÃO importa PySide6 quando indo para CLI
+    (imports Qt ficam confinados em :func:`main`). Garante que CLI rode
+    em terminal sem GUI runtime.
+    """
+    args = sys.argv[1:]
+    if not args:
+        return main()
+
+    first_positional = _first_non_flag_token(args)
+    if first_positional is not None and first_positional in _CLI_SUBCOMMANDS:
+        from data_downloader.cli import app as cli_app
+
+        cli_app()
+        return 0
+
+    # Sem subcommand mas com --help/--version: deixa Typer responder.
+    if first_positional is None and _has_cli_only_flag(args):
+        from data_downloader.cli import app as cli_app
+
+        cli_app()
+        return 0
+
+    return main()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_cli_or_ui_dispatch())

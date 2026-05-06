@@ -276,8 +276,9 @@ def test_inv7_read_returns_sorted_by_timestamp_ns(trades: list[TradeRecord]) -> 
 def test_inv9_migration_v100_to_v110_preserves_common_fields(
     trades: list[TradeRecord],
 ) -> None:
-    """INV-9: ``migrate(write_v1)`` preserva todos os campos canônicos byte-a-byte
-    e adiciona ``liquidity_classification`` NULL."""
+    """INV-9: ``V100ToV110.transform`` preserva todos os campos canônicos
+    byte-a-byte e adiciona os 3 campos resolvidos v1.1.0 (Nelo Council 32 P0).
+    """
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
@@ -295,8 +296,9 @@ def test_inv9_migration_v100_to_v110_preserves_common_fields(
 
         migration = V100ToV110()
         table_v11 = migration.transform(table_v1)
-        assert migration.NEW_FIELD_NAME in table_v11.schema.names
-        assert table_v11.column(migration.NEW_FIELD_NAME).null_count == table_v11.num_rows
+        # 3 campos aditivos v1.1.0 presentes (idempotente — writer já gerou).
+        for name in migration.NEW_FIELD_NAMES:
+            assert name in table_v11.schema.names
         for n in snapshot:
             assert table_v11.column(n).to_pylist() == snapshot[n], f"drift em {n}"
 

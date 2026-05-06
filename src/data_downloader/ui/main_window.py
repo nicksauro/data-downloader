@@ -162,6 +162,11 @@ class MainWindow(QMainWindow):
         # StatusBar reflete DLL status quando Settings testa conexão.
         with contextlib.suppress(Exception):
             settings_screen.dll_status_changed.connect(self._on_dll_status_changed)
+        # Story 4.6 — empty state CTA do Catalog navega para Download.
+        with contextlib.suppress(Exception):
+            catalog_screen.request_navigate_to_download.connect(
+                lambda: self.set_active_screen(SCREEN_DOWNLOAD)
+            )
 
     def _add_screen(self, screen_id: str, widget: QWidget) -> None:
         idx = self._stack.addWidget(widget)

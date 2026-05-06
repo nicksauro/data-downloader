@@ -66,6 +66,7 @@ __all__ = ["DEFAULT_DLL_PATH", "ProfitDLL"]
 # Logger structlog canônico (ADR-010). NÃO usar em hot path (R21).
 log: structlog.stdlib.BoundLogger = structlog.get_logger("data_downloader.dll")
 
+
 # Default path relativo ao repo root (resolvido via Path manipulation).
 # Override via env ``PROFITDLL_PATH`` ou arg ``dll_path`` (AC9).
 # parents[3] = src/data_downloader/dll/wrapper.py → src → data_downloader → dll → wrapper
@@ -74,9 +75,28 @@ log: structlog.stdlib.BoundLogger = structlog.get_logger("data_downloader.dll")
 #       .parents[1] = data_downloader/
 #       .parents[2] = src/
 #       .parents[3] = repo root
-DEFAULT_DLL_PATH: Path = (
-    Path(__file__).resolve().parents[3] / "profitdll" / "DLLs" / "Win64" / "ProfitDLL.dll"
-)
+def _resolve_default_dll_path() -> Path:
+    """Resolve caminho da DLL — frozen-aware (Story v1.0.2 fix).
+
+    Em modo frozen (PyInstaller `--onedir`), as DLLs e companions ficam em
+    ``sys._MEIPASS`` (que aponta para ``dist/data_downloader/_internal/`` em
+    PyI 6.x default). Em dev/test, ficam em ``<repo>/profitdll/DLLs/Win64/``.
+
+    Sem este branch, o wrapper procurava companions em
+    ``dist/data_downloader/profitdll/DLLs/Win64/`` (não existe) → erro
+    "DLL companions ausentes (missing=[])" — o algoritmo não achava o
+    diretório base, mascarando como missing list vazia.
+    """
+    if getattr(sys, "frozen", False):
+        meipass_str = getattr(sys, "_MEIPASS", "")
+        if meipass_str:
+            candidate = Path(meipass_str) / "ProfitDLL.dll"
+            if candidate.is_file():
+                return candidate
+    return Path(__file__).resolve().parents[3] / "profitdll" / "DLLs" / "Win64" / "ProfitDLL.dll"
+
+
+DEFAULT_DLL_PATH: Path = _resolve_default_dll_path()
 
 
 def _load_verify_dll_companions() -> Any:
@@ -95,8 +115,26 @@ def _load_verify_dll_companions() -> Any:
     if module_name in sys.modules:
         return sys.modules[module_name].verify
 
-    repo_root = Path(__file__).resolve().parents[3]
-    script_path = repo_root / "scripts" / "verify-dll-companions.py"
+    # Story v1.0.2 fix B-Frozen #2 (Nelo+Aria 2026-05-05): detectar frozen mode
+    # (PyInstaller). Em bundle ``--onedir`` o script vive em
+    # ``sys._MEIPASS/scripts/verify-dll-companions.py`` (datas tuple no spec
+    # template). Em dev/test o script vive em ``<repo>/scripts/``.
+    # Sem este branch, o wrapper crashava com ``VERIFY_SCRIPT_MISSING`` na
+    # primeira execução em modo frozen porque ``parents[3]`` aponta para
+    # ``sys._MEIPASS/data_downloader/dll`` (estrutura --onedir) — sem
+    # ``scripts/`` ali.
+    if getattr(sys, "frozen", False):
+        meipass = Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "_MEIPASS", "") else None
+        if meipass is not None:
+            script_path = meipass / "scripts" / "verify-dll-companions.py"
+        else:
+            # Defensivo: frozen sem _MEIPASS (raro — ex.: --onefile não-extracted).
+            # Fallback para dir do executável (--onedir layout).
+            script_path = Path(sys.executable).parent / "scripts" / "verify-dll-companions.py"
+    else:
+        repo_root = Path(__file__).resolve().parents[3]
+        script_path = repo_root / "scripts" / "verify-dll-companions.py"
+
     if not script_path.exists():
         # Fallback defensivo — se script foi removido, falha cedo com mensagem
         # clara em vez de stacktrace ctypes críptico mais à frente.
@@ -155,11 +193,24 @@ class ProfitDLL:
         # Precedência: arg > env > default. Path é resolvido para absoluto
         # antes do ``WinDLL()`` (Windows loader é sensível a relative paths
         # em alguns contextos — defensivo).
+        #
+        # Story v1.0.2 fix B-Frozen-Path (Aria H3 / Pichau smoke 2026-05-06):
+        # ``.env`` distribuído pode conter ``PROFITDLL_PATH`` relativo
+        # (e.g. ``profitdll/DLLs/Win64/ProfitDLL.dll``) que dev usa
+        # confortavelmente do repo root. Em frozen mode (.exe), o cwd
+        # do usuário é arbitrário — resolver relativo daria caminho
+        # inexistente. Quando frozen + env relativo: ignorar env e usar
+        # ``DEFAULT_DLL_PATH`` (já frozen-aware via ``_resolve_default_dll_path``).
         chosen: str | Path
         if dll_path is not None:
             chosen = dll_path
         elif env_path:
-            chosen = env_path
+            env_path_obj = Path(env_path)
+            if getattr(sys, "frozen", False) and not env_path_obj.is_absolute():
+                # Em bundle, ignora override relativo — DEFAULT é confiável.
+                chosen = DEFAULT_DLL_PATH
+            else:
+                chosen = env_path
         else:
             chosen = DEFAULT_DLL_PATH
         self._dll_path: Path = Path(chosen).resolve()

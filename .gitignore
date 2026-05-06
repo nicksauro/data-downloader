@@ -32,6 +32,8 @@ MANIFEST
 # Build / dist artifacts
 # -----------------------------------------------------------------------------
 build/
+!build/data_downloader.spec.template
+!build/BUILD_PROTOCOL.md
 dist/
 *.spec.bak
 
@@ -123,6 +125,13 @@ logs/
 # Helpers transitórios de smoke/qa runs (path-of-day txt holders)
 .smoke-*-log-path.txt
 .qa-*-log-path.txt
+.v*-validation-log.txt
+
+# dist-test/ — extracted ZIP de release validation (não fonte)
+dist-test/
+
+# build-v*.log — log de PyInstaller build
+build-v*.log
 
 # Bench results gerados com working tree dirty (não-reprodutíveis — não auditáveis)
 benchmarks/results/*-dirty.json

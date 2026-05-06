@@ -28,10 +28,32 @@ __all__ = ["SymbolPicker"]
 _CACHE_DIR = Path.home() / ".data_downloader" / "cache"
 _CACHE_FILE = _CACHE_DIR / "last_symbol.txt"
 
-# Lista mínima de símbolos sugeridos por default (não exaustiva — apenas
-# UX hint enquanto DLL não responde). Estes não são "vigentes" (data-bound);
-# são candidatos comuns que o usuário pode editar.
-_DEFAULT_SUGGESTIONS: tuple[str, ...] = ("WDOJ26", "WINJ26", "WDO", "WIN")
+# Story 4.6 (UX simplification, Pichau directive 2026-05-05):
+# Sugestões alinhadas a Q-DRIFT-32 ("SEMPRE usar continuous futures").
+# Equities populares B3 (top liquid) + futures principais.
+
+_FUTURES_SUGGESTIONS: tuple[str, ...] = (
+    "WDOFUT",  # Mini-dólar continuous
+    "WINFUT",  # Mini-Ibovespa continuous
+    "INDFUT",  # Indice futuro continuous
+    "DOLFUT",  # Dólar futuro continuous
+)
+
+_EQUITIES_SUGGESTIONS: tuple[str, ...] = (
+    "PETR4",  # Petrobras PN
+    "VALE3",  # Vale ON
+    "ITUB4",  # Itaú PN
+    "BBDC4",  # Bradesco PN
+    "BBAS3",  # Banco do Brasil ON
+    "ABEV3",  # Ambev ON
+    "B3SA3",  # B3 ON
+    "MGLU3",  # Magalu ON
+)
+
+# Backwards-compat: ainda aceita WDOJ26/WINJ26 etc se digitado, mas
+# não sugere (resolver no CLI/orchestrator emite warning recomendando
+# WDOFUT — ver `data_downloader.orchestrator.symbol_alias`).
+_DEFAULT_SUGGESTIONS: tuple[str, ...] = _FUTURES_SUGGESTIONS + _EQUITIES_SUGGESTIONS
 
 
 class SymbolPicker(QWidget):
@@ -59,15 +81,20 @@ class SymbolPicker(QWidget):
         if line_edit is not None:
             line_edit.setPlaceholderText(format_msg("PLH_SYMBOL"))
 
-        # Popula sugestões + cache.
-        for sym in _DEFAULT_SUGGESTIONS:
+        # Popula sugestões agrupadas: futures (continuous) + separator + equities.
+        # Story 4.6 — Pichau directive: futures continuous PRIMEIRO (Q-DRIFT-32).
+        for sym in _FUTURES_SUGGESTIONS:
             self._combo.addItem(sym)
+        self._combo.insertSeparator(self._combo.count())
+        for sym in _EQUITIES_SUGGESTIONS:
+            self._combo.addItem(sym)
+
         cached = self._load_from_cache()
         if cached:
             self.set_value(cached)
         else:
-            # Default = 1ª sugestão.
-            self.set_value(_DEFAULT_SUGGESTIONS[0])
+            # Default = 1ª sugestão (WDOFUT — futures continuous).
+            self.set_value(_FUTURES_SUGGESTIONS[0])
 
         # Hint do contrato vigente (atualizado quando vigent_contract roda).
         self._hint = QLabel("", self)

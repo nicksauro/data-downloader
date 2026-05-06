@@ -270,6 +270,21 @@ def _run_download_worker(
         else:
             db_path = data_dir / "history" / "catalog.db"
             catalog = Catalog(db_path=db_path, data_dir=data_dir)
+            # Story v1.0.2 (Pichau smoke 2026-05-06): first-run auto-populate
+            # do seed YAML embutido em ``CONTRACTS.md``. Sem isso, .exe
+            # distribuído com data_dir vazio falha em ``vigent_contract``
+            # mesmo com seed bundled (`_MEIPASS/docs/storage/CONTRACTS.md`).
+            # Idempotente — se contracts já populados, populate retorna 0.
+            try:
+                from data_downloader.orchestrator.contracts import (
+                    list_contracts,
+                    populate_contracts_from_seed,
+                )
+
+                if not list_contracts(catalog):
+                    populate_contracts_from_seed(catalog)
+            except Exception:  # defensivo — falha em populate não bloqueia
+                pass
 
         # 2. Writer.
         if writer_factory is not None:
@@ -507,12 +522,36 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     Returns:
         Instância de :class:`ProfitDLL` já conectada.
     """
+    # Story v1.0.2 B2 (Nelo+Aria 2026-05-05): backwards-compat para naming
+    # legado ``PROFIT_USER`` / ``PROFIT_PASS``. Canônico é ``PROFITDLL_*``
+    # alinhado com .env.example. Emite DeprecationWarning quando legado
+    # é usado para que o usuário migre.
+    import warnings as _warnings
+
     from data_downloader.dll.wrapper import ProfitDLL
     from data_downloader.public_api.exceptions import DLLInitError
 
     key = os.getenv("PROFITDLL_KEY")
     user = os.getenv("PROFITDLL_USER")
+    if not user:
+        legacy_user = os.getenv("PROFIT_USER")
+        if legacy_user:
+            _warnings.warn(
+                "PROFIT_USER is deprecated; use PROFITDLL_USER (Story v1.0.2 B2).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            user = legacy_user
     password = os.getenv("PROFITDLL_PASS")
+    if not password:
+        legacy_pass = os.getenv("PROFIT_PASS")
+        if legacy_pass:
+            _warnings.warn(
+                "PROFIT_PASS is deprecated; use PROFITDLL_PASS (Story v1.0.2 B2).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            password = legacy_pass
     if not (key and user and password):
         raise DLLInitError(
             -1,
