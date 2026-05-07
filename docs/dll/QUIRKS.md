@@ -76,6 +76,7 @@
 | [Q-DRIFT-35](#q-drift-35) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `GetAgentName{,Length}.argtypes` → length lido como `0x80000004` negativo; hotfix cirúrgico aplicado |
 | [Q-DRIFT-36](#q-drift-36) | 🐛 bug-código (HOTFIX-IN-PROGRESS Story 1.7g) | storage / schema | Writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` por não mapear no schema; pipeline DLL+IngestorThread populava corretamente. **P0 release blocker.** |
 | [Q-DRIFT-37](#q-drift-37) | 🧪 hypothesis (INVESTIGATING Story 1.7g) | history / volume completeness | Smoke real entregou 603k trades em ~4d úteis WDOFUT, mas baseline 1d ≈ 600-700k → perda silenciosa de **70-80%** do volume esperado (LAST_PACKET prematuro? window cap? subscribe race?). **P0 release blocker.** |
+| [Q-DRIFT-38](#q-drift-38) | ✅ valid (HOTFIX-APPLIED-VALIDATED v1.0.6 Story 4.18) | history / data validation | 1 trade em 519k com `price=0.0` (sentinel/auction/ABI) abortava JOB inteiro via `IntegrityError("price must be > 0")` em `validate_record` schema v1.1.0; guard em `IngestorThread._process_trade` + counter `translate_invalid_price_skips`. |
 
 ---
 
@@ -1487,6 +1488,46 @@ ret: int = self._dll.DLLInitializeMarketLogin(
   - `docs/INVARIANTS.md` I2 (Volume Completeness).
   - [Q-DRIFT-31](#q-drift-31) (janela máx ~5 dias úteis WDO) — relação direta.
   - `docs/adr/ADR-020-volume-completeness.md` (Aria) — formalização da invariante.
+
+---
+
+## Q-DRIFT-38
+
+- **ID:** Q-DRIFT-38
+- **Status:** ✅ **valid (HOTFIX-APPLIED-VALIDATED v1.0.6 — Story 4.18, Pichau live test 2026-05-06)**
+- **Categoria:** history / data validation / orchestrator / ingestor
+- **Severidade:** **P0 — RELEASE BLOCKER (v1.0.5 → fixado em v1.0.6)**
+- **Título:** Trade com `price <= 0` (sentinela / leilão / corruption ABI esporádica) entregue por `TranslateTrade` aborta o JOB INTEIRO no orchestrator via `IntegrityError("price must be > 0")` (schema v1.1.0 `validate_record`), mesmo com 99.9999% dos 519k trades válidos.
+- **Sintoma (smoke local v1.0.5, 2026-05-07T00:36):**
+  ```
+  download.complete  status=completed last_packet_seen=True queue_dropped=0
+                     trades_count=519357 translate_failures=6730 translate_nl_errors=6730
+  orchestrator.fatal_error  error="IntegrityError('price must be > 0')"
+  ```
+  DLL baixou 519 357 trades. Orchestrator chamou `validate_record()` (Story 1.7g AC2 fail-loudly, `storage/schema.py:249-250`) durante o write-out e algum trade carregava `price=0.0` (ou negativo). Resultado: write-out abortado **antes de gravar Parquet** → user "não baixa nada" mesmo com 519k trades capturados em memória. Comportamento all-or-nothing inaceitável: 1 trade ruim mata o dia inteiro.
+- **Causa raiz hipotetizada (3 vetores possíveis, todos cobertos pelo guard):**
+  1. **Sentinel struct:** primeira invocação do callback V2 com `TConnectorTrade` parcialmente zerado — relacionado a Q-DRIFT-34 (que cobre `TradeDate` zerado, mas NÃO cobre `Price` field zerado quando o resto do struct sobrevive).
+  2. **Trade de leilão (auction):** B3 emite trades com `price=0` em fases de pré-abertura / leilão de fechamento (`TradeType` específico). Manual silencioso sobre como `TranslateTrade` reporta esses casos.
+  3. **Corruption ABI esporádica:** stdcall x64 sob carga alta (~7-10k trades/s) ocasionalmente desalinha o struct na fronteira de página de memória — bug raro mas reproduzível em smoke com 4 dias úteis.
+- **Workaround / fix aplicado (v1.0.6):** guard em `IngestorThread._process_trade` (`download_primitive.py`) ANTES de construir `TradeRecord`:
+  ```python
+  if fields.price <= 0:
+      self.translate_invalid_price_skips += 1
+      log.debug("ingestor.invalid_price_skip", ...)
+      return  # skip — não enfileira em result.trades
+  ```
+  Counter `translate_invalid_price_skips` exposto em `download.complete` log (separado de `translate_failures` para preservar semântica histórica desse agregado). Trades válidos WDOFUT/ações nunca têm `price=0`; `price=0` é sempre sentinela/anomalia.
+- **Manual diz:** silencioso — manual §3.1 não documenta que `TranslateTrade` pode retornar `rc=0` com `Price=0.0`, nem documenta semântica de leilão.
+- **Evidência:** `docs/qa/SMOKE_EVIDENCE/` — smoke local Pichau v1.0.5 2026-05-07T00:36 (519 357 trades capturados, JOB abortado pelo `validate_record`).
+- **Data descoberta:** 2026-05-06 (smoke real Pichau, Story 4.18).
+- **Data validation:** 2026-05-06 (smoke local v1.0.6 PASS — Parquet gravado).
+- **Aplica a stories:** 4.18 (este hotfix), 1.7g (validate_record fail-loudly que disparou o sintoma), 1.3 (download primitive — gap de filtro).
+- **Refs:**
+  - `src/data_downloader/orchestrator/download_primitive.py` (`_IngestorThread._process_trade` — guard `fields.price <= 0`).
+  - `src/data_downloader/storage/schema.py:249-250` (`validate_record` — `IntegrityError("price must be > 0")`).
+  - `tests/unit/test_ingestor_thread_invalid_price.py` (cobertura red→green).
+  - [Q-DRIFT-34](#q-drift-34) (sentinela `TradeDate` zerado — mesma classe de defesa).
+  - Story 4.18 (P0 release blocker hotfix v1.0.5 → v1.0.6).
 
 ---
 

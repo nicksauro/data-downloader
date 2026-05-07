@@ -301,6 +301,15 @@ class _IngestorThread(threading.Thread):
         self.translate_sentinel_skips: int = 0
         self.translate_nl_errors: int = 0
         self.translate_exceptions: int = 0
+        # Q-DRIFT-38 (Story 4.18, Pichau live test 2026-05-06): contador de
+        # trades descartados por ``price <= 0`` (sentinela / leilão / corruption
+        # ABI esporádica). Schema v1.1.0 ``validate_record`` exige ``price > 0``
+        # — sem este guard, 1 trade ruim em 519k abortava o JOB inteiro com
+        # ``IntegrityError("price must be > 0")``. NÃO somado em
+        # ``translate_failures`` para preservar a semântica histórica desse
+        # agregado (failures = sentinel + nl_errors + exceptions); este
+        # contador é exposto separadamente em ``download.complete``.
+        self.translate_invalid_price_skips: int = 0
 
         # Sequência por (timestamp_ns) para preencher
         # ``sequence_within_ns`` (Sol — SCHEMA.md §2.1).
@@ -408,6 +417,21 @@ class _IngestorThread(threading.Thread):
             self.translate_sentinel_skips += 1
             self.translate_failures += 1
             return
+        # Q-DRIFT-38 (Story 4.18, Pichau live test 2026-05-06):
+        # Filter trades com price <= 0 — sentinela / leilão / corruption ABI.
+        # Schema v1.1.0 (validate_record) exige price > 0 — sem guard, 1 trade
+        # ruim em 519k abortava JOB inteiro com IntegrityError. Trades válidos
+        # WDOFUT/ações nunca têm price=0; price=0 é sentinel.
+        if fields.price <= 0:
+            self.translate_invalid_price_skips += 1
+            log.debug(
+                "ingestor.invalid_price_skip",
+                symbol=self._symbol,
+                price=fields.price,
+                timestamp_ns=timestamp_ns,
+                quirk="Q-DRIFT-38",
+            )
+            return  # skip — não enfileira em result.trades
         timestamp_str = format_brt_timestamp(timestamp_ns)
         trade_number = fields.trade_number
         # trade_id=0 da DLL → tratar como ausente (cai em chave longa de
@@ -818,6 +842,10 @@ def download_chunk(
         translate_sentinel_skips=ingestor.translate_sentinel_skips,
         translate_nl_errors=ingestor.translate_nl_errors,
         translate_exceptions=ingestor.translate_exceptions,
+        # Q-DRIFT-38 (Story 4.18): trades com price<=0 descartados antes do
+        # validate_record (schema v1.1.0). 1-5 hits típicos por dia — > 0 não
+        # é erro, é defesa. Se subir muito (>0.1% do volume), investigar ABI.
+        translate_invalid_price_skips=ingestor.translate_invalid_price_skips,
         trade_edits=ingestor.trade_edits,
         # Story 1.7g (Q-DRIFT-37 / ADR-020 Nível 4): drops silenciosos da
         # ``trade_queue`` no callback ConnectorThread. > 0 = volume incompleto
