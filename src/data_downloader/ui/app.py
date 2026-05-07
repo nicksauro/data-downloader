@@ -61,6 +61,21 @@ def main() -> int:
     except Exception:
         pass
 
+    # Story v1.0.7 fix (Pichau live test 2026-05-06): em windowed mode
+    # (``data_downloader.exe`` com ``console=False``), ``sys.stderr`` é
+    # detached → structlog escreve no void → usuário não vê NENHUM log
+    # do download. Bug Pichau: "nem aparece que começou a baixar nos
+    # logs do aplicativo". Fix: instala :class:`QtLogHandler` no root
+    # logger que captura todos os records e re-emite via Qt signal —
+    # widgets (ProgressCard._log_view) consomem via QueuedConnection.
+    # Idempotente, best-effort.
+    try:
+        from data_downloader.ui.qt_log_handler import install_qt_log_handler
+
+        install_qt_log_handler(level="INFO")
+    except Exception:
+        pass
+
     # HiDPI: setAttribute ANTES de criar QApplication (QT_PATTERNS §3).
     # PySide6 6.0+ habilita por default mas mantemos o set explícito para
     # documentar intenção e proteger contra futuros downgrades.

@@ -99,15 +99,23 @@ class ProgressCard(QGroupBox):
         self._reconnect_banner.setVisible(False)
 
         # Log expansível (toggled).
-        self._log_toggle = QPushButton("▸ " + format_msg("BTN_DETAILS"), self)
+        # Story v1.0.7 fix (Pichau live test 2026-05-06 — bug "nem aparece
+        # que começou a baixar nos logs do aplicativo"): log view agora
+        # inicia VISÍVEL e marcado como checked. Em windowed mode (.exe
+        # com console=False) o stderr é detached → structlog não tem onde
+        # escrever. O log view do ProgressCard é a única superfície de
+        # log que o usuário vê. Usuário pode ocultar via botão "▾
+        # Detalhes" se quiser.
+        self._log_toggle = QPushButton("▾ " + format_msg("BTN_DETAILS_HIDE"), self)
         self._log_toggle.setProperty("variant", "link")
         self._log_toggle.setCheckable(True)
+        self._log_toggle.setChecked(True)
         self._log_toggle.setCursor(self._log_toggle.cursor())
         self._log_toggle.clicked.connect(self._on_log_toggled)
 
         self._log_view = QTextEdit(self)
         self._log_view.setReadOnly(True)
-        self._log_view.setVisible(False)
+        self._log_view.setVisible(True)
         self._log_view.setMaximumHeight(140)
         self._log_view.setProperty("role", "code")
 
@@ -161,9 +169,16 @@ class ProgressCard(QGroupBox):
                 self._bar.setRange(0, 100)
             pct = max(0, min(100, int(done / total * 100)))
             self._bar.setValue(pct)
+            # Story v1.0.7 fix (Pichau live test 2026-05-06): força repaint
+            # imediato. Em alguns cenários cross-thread o setValue marca
+            # dirty mas o evento de repaint pode ser coalescido — chamar
+            # ``update()`` explicitamente garante invalidate. R21 OK
+            # (cool path: 1x por chunk).
+            self._bar.update()
         elif done > 0:
             # Total desconhecido (-1) — modo indeterminado.
             self._bar.setRange(0, 0)
+            self._bar.update()
         # State (sub-state).
         if is_99:
             self.set_state("reconnecting")
@@ -214,20 +229,56 @@ class ProgressCard(QGroupBox):
     def set_cancel_enabled(self, enabled: bool) -> None:
         self._cancel_btn.setEnabled(enabled)
 
-    def append_log(self, line: str) -> None:
+    def append_log_line(self, line: str) -> None:
+        """Adiciona linha já formatada ao log (Story v1.0.7).
+
+        Diferente de :meth:`append_log` (que humaniza microcopy IDs),
+        esta variante recebe linha **já formatada** — usada pelo slot
+        conectado ao :class:`QtLogBridge.message_logged` que envia
+        ``[HH:MM:SS] LEVEL event=...`` pronto.
+        """
         if not line:
             return
         self._log_view.append(line)
+
+    def append_log(self, line: str) -> None:
+        """Adiciona linha ao log com timestamp + humanização de microcopy.
+
+        Story v1.0.7 fix (Pichau live test 2026-05-06 — bug "nem aparece
+        que começou a baixar nos logs"): se ``line`` é um microcopy ID
+        conhecido, exibe o ``title`` em vez do ID cru — usuário vê
+        "Iniciando download..." em vez de "INF_STARTING_DOWNLOAD".
+        """
+        if not line:
+            return
+        from datetime import datetime as _dt
+
+        from data_downloader.ui.microcopy_loader import MSG
+
+        # Humaniza microcopy ID se conhecido — caso contrário mantém raw.
+        humanized = line
+        entry = MSG.get(line)
+        if entry is not None and entry.title:
+            humanized = entry.title
+        ts = _dt.now().strftime("%H:%M:%S")
+        self._log_view.append(f"[{ts}] {humanized}")
 
     def reset(self) -> None:
         """Reseta para estado inicial."""
         self._contract_value.setText("—")
         self._bar.setRange(0, 100)
         self._bar.setValue(0)
+        self._bar.update()
         self.set_state("normal")
         self._cancel_btn.setEnabled(True)
         self._cancel_btn.setText(format_msg("BTN_CANCEL"))
         self._log_view.clear()
+        # Story v1.0.7 — log view sempre visível em loading state (Pichau
+        # bug: usuário não via logs do download). Restaura toggle para
+        # "Ocultar" para refletir estado atual.
+        self._log_view.setVisible(True)
+        self._log_toggle.setChecked(True)
+        self._log_toggle.setText("▾ " + format_msg("BTN_DETAILS_HIDE"))
 
     # ------------------------------------------------------------------
     # Internals

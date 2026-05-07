@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -115,6 +115,24 @@ class DownloadScreen(QWidget):
         # ProgressCard (state=loading).
         self._progress_card = ProgressCard(self)
         self._progress_card.cancel_requested.connect(self._on_cancel_clicked)
+
+        # Story v1.0.7 fix (Pichau live test 2026-05-06): conecta o
+        # :class:`QtLogBridge` global (instalado em ``ui/app.py::main``)
+        # ao log view do ProgressCard. Cross-thread safe via
+        # ``QueuedConnection`` — worker threads (download, orchestrator)
+        # emitem records que aparecem no UI panel. Best-effort: se o
+        # handler não foi instalado (e.g. testes sem app.main), fallback
+        # silencioso preserva comportamento histórico.
+        try:
+            from data_downloader.ui.qt_log_handler import install_qt_log_handler
+
+            bridge = install_qt_log_handler(level="INFO")
+            bridge.message_logged.connect(
+                self._progress_card.append_log_line,
+                Qt.ConnectionType.QueuedConnection,
+            )
+        except Exception:
+            pass
 
         # Footer.
         self._footer = QLabel(format_msg("LBL_FOOTER_SHORTCUTS"), self)
@@ -402,11 +420,43 @@ class DownloadScreen(QWidget):
     # ------------------------------------------------------------------
     # Slots — sinais do adapter (Qt.QueuedConnection — MainThread)
     # ------------------------------------------------------------------
+    #
+    # Story v1.0.7 fix (Pichau live test 2026-05-06): @Slot(object) é
+    # OBRIGATÓRIO em PySide6 quando a conexão é cross-thread via
+    # ``Qt.QueuedConnection`` carregando um payload Python (``object``).
+    # Sem o decorator, o meta-call em frozen builds (PyInstaller windowed)
+    # pode falhar silenciosamente — o test rodando em dev passa porque
+    # introspect resolve o slot, mas o .exe não atualiza a UI.
+    # Bugs Pichau v1.0.6: "barrinha nao anda, fica sempre em 0".
 
+    @Slot(object)
     def _on_progress(self, progress: object) -> None:
-        # Encaminha para ProgressCard.
+        # Encaminha para ProgressCard. Story v1.0.7: também loga via
+        # logging stdlib (que vai pro QtLogHandler → log panel) para
+        # confirmar que o sinal está sendo recebido em MainThread —
+        # diagnóstico de runtime + visibilidade ao usuário em windowed
+        # mode (Pichau bug: "nem aparece que começou a baixar nos logs").
+        import logging as _logging
+
+        _ui_log = _logging.getLogger("data_downloader.ui.download_screen")
+        try:
+            done = int(getattr(progress, "done", 0) or 0)
+            total = int(getattr(progress, "total", 0) or 0)
+            msg = str(getattr(progress, "message", "") or "")
+            trades = int(getattr(progress, "trades_received", 0) or 0)
+            _ui_log.info(
+                "ui.progress msg=%s done=%d total=%d trades=%d",
+                msg,
+                done,
+                total,
+                trades,
+            )
+        except Exception:
+            # Defensive — log NUNCA derruba UI.
+            pass
         self._progress_card.set_progress(progress)
 
+    @Slot(object)
     def _on_error(self, exc: object) -> None:
         self._download_active = False
         # Mensagem humanizada via humanized_message se possível.
@@ -436,6 +486,7 @@ class DownloadScreen(QWidget):
         self._set_state(STATE_ERROR)
         self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
 
+    @Slot(object)
     def _on_cancelled(self, exc: object) -> None:
         self._download_active = False
         # Toast info "Download cancelado".
@@ -443,6 +494,7 @@ class DownloadScreen(QWidget):
         self._set_state(STATE_NORMAL)
         self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
 
+    @Slot(object)
     def _on_finished(self, result: object) -> None:
         self._download_active = False
         # Extrai stats com duck-typing (DownloadResult).

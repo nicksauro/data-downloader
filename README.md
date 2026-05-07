@@ -240,4 +240,4 @@ A definir.
 
 *— Squad data-downloader, 2026-05-03 — fundação para o que vem*
 
-<!-- LATEST-RELEASE --> Latest release: [v1.0.5](https://github.com/nicksauro/data-downloader/releases/tag/v1.0.5)
+<!-- LATEST-RELEASE --> Latest release: [v1.0.6](https://github.com/nicksauro/data-downloader/releases/tag/v1.0.6)
