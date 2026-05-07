@@ -27,6 +27,7 @@ Microcopy (R17 — Uma): TODAS as strings vêm de ``microcopy_loader``.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -380,13 +381,20 @@ class DownloadScreen(QWidget):
         self._set_state(STATE_NORMAL)
 
     def _on_browse_folder(self) -> None:
-        # QFileDialog DontUseNativeDialog (QT_PATTERNS §1, finding M9).
+        # Story v1.0.5 fix (Pichau live test 2026-05-06): nativo Win32 em
+        # frozen (cores corretas, integração com shell), DontUseNativeDialog
+        # em dev/tests (compatível com mocks ``QFileDialog`` e CI sem GUI).
         current = self._folder_edit.text().strip() or str(Path.cwd())
+        options: QFileDialog.Option = (
+            QFileDialog.Option(0)
+            if getattr(sys, "frozen", False)
+            else QFileDialog.Option.DontUseNativeDialog
+        )
         folder = QFileDialog.getExistingDirectory(
             self,
             "Selecionar pasta de destino",
             current,
-            QFileDialog.Option.DontUseNativeDialog,
+            options,
         )
         if folder:
             self._folder_edit.setText(folder)

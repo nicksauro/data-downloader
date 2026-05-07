@@ -105,6 +105,8 @@ SPEC_FINAL: Final[Path] = BUILD_DIR / "data_downloader.spec"
 DIST_DIR: Final[Path] = REPO_ROOT / "dist"
 PYPROJECT_TOML: Final[Path] = REPO_ROOT / "pyproject.toml"
 ICON_PATH_REL: Final[str] = "../src/data_downloader/ui/assets/icon.ico"
+INSTALLER_DIR: Final[Path] = REPO_ROOT / "installer"
+INSTALLER_ISS: Final[Path] = INSTALLER_DIR / "data_downloader.iss"
 
 # Output directory name produced by spec (matches spec.coll.name).
 ONEDIR_NAME: Final[str] = "data_downloader"
@@ -394,12 +396,99 @@ def create_deterministic_zip(onedir: Path, version: str, source_date_epoch: int)
     return zip_path
 
 
+# =====================================================================
+# Installer (Story 4.17 — Pichau directive 2026-05-06, integrate v1.0.5)
+# =====================================================================
+
+
+def _resolve_iscc_path() -> Path:
+    """Resolve caminho de ``ISCC.exe`` (InnoSetup compiler).
+
+    Preferência:
+    1. Variável de ambiente ``ISCC_PATH``.
+    2. ``iscc`` no PATH (``shutil.which``).
+    3. Caminhos típicos de instalação Windows (Program Files / x86).
+
+    Raises:
+        FileNotFoundError: se nenhum caminho válido for encontrado.
+    """
+    env_path = os.environ.get("ISCC_PATH")
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.is_file():
+            return candidate
+
+    on_path = shutil.which("iscc") or shutil.which("ISCC")
+    if on_path:
+        return Path(on_path)
+
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+        / "Inno Setup 6"
+        / "ISCC.exe",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Inno Setup 6" / "ISCC.exe",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+
+    raise FileNotFoundError(
+        "InnoSetup compiler (ISCC.exe) não encontrado. Instale via "
+        "'winget install JRSoftware.InnoSetup' ou setar ISCC_PATH."
+    )
+
+
+def compile_installer(version: str, repo_root: Path) -> Path:
+    """Compila ``installer/data_downloader.iss`` via ISCC e retorna o Setup.exe.
+
+    Pré-condição: ``dist/data_downloader/`` (PyInstaller onedir output) já
+    existe — script .iss bundla a pasta. Versão é injetada via flag ``/D``.
+
+    Args:
+        version: SemVer (ex. "1.0.5"). Token ``AppVersion`` no .iss.
+        repo_root: Raiz do repo (para resolver caminhos relativos).
+
+    Returns:
+        Path absoluto do ``data-downloader-Setup-vX.Y.Z.exe`` gerado.
+
+    Raises:
+        FileNotFoundError: ISCC ou .iss script ausente, ou Setup.exe não gerado.
+        RuntimeError: ISCC retornou rc != 0.
+    """
+    iscc = _resolve_iscc_path()
+    iss_path = repo_root / "installer" / "data_downloader.iss"
+    if not iss_path.is_file():
+        raise FileNotFoundError(f"InnoSetup script ausente: {iss_path}")
+
+    cmd = [str(iscc), f"/DAppVersion={version}", str(iss_path)]
+    result = subprocess.run(
+        cmd,
+        cwd=str(iss_path.parent),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"InnoSetup compile failed (rc={result.returncode}):\n"
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+
+    setup_exe = repo_root / "dist" / f"data-downloader-Setup-v{version}.exe"
+    if not setup_exe.is_file():
+        raise FileNotFoundError(
+            f"Output Setup.exe não foi gerado: {setup_exe} " f"(stdout: {result.stdout[:500]})"
+        )
+    return setup_exe
+
+
 def write_build_manifest(
     ctx: BuildContext,
     file_manifest: dict[str, dict[str, object]],
     zip_path: Path | None,
     spec_template_sha256: str,
     warnings: list[str],
+    installer_path: Path | None = None,
 ) -> Path:
     """Escreve ``dist/build-manifest-v{version}.json`` e retorna o path."""
     manifest_path = DIST_DIR / f"build-manifest-v{ctx.version}.json"
@@ -416,6 +505,14 @@ def write_build_manifest(
             "size_bytes": zip_size,
             "sha256": zip_sha,
         }
+    installer_section: dict[str, object] | None = None
+    if installer_path is not None and installer_path.exists():
+        ins_size, ins_sha = _hash_file(installer_path)
+        installer_section = {
+            "path": installer_path.name,
+            "size_bytes": ins_size,
+            "sha256": ins_sha,
+        }
     payload = {
         "version": ctx.version,
         "git_sha": ctx.git_sha,
@@ -427,6 +524,7 @@ def write_build_manifest(
         "dry_run": ctx.dry_run,
         "files": file_manifest,
         "zip": zip_section,
+        "installer": installer_section,
         "total_size_bytes": total_size,
         "warnings": warnings,
     }
@@ -454,6 +552,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--version",
         default=None,
         help="Força versão (default: lê pyproject.toml).",
+    )
+    parser.add_argument(
+        "--with-installer",
+        action="store_true",
+        help=(
+            "Após gerar zip determinístico, compila Setup.exe via InnoSetup "
+            "(Story 4.17). Requer ISCC.exe no PATH ou ISCC_PATH env. "
+            "Sem flag: build atual permanece intacto (backward compat AC2)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -505,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
     if ctx.dry_run:
         # Dry-run: skip PyInstaller, emit stub manifest.
         warnings.append("dry_run=True; PyInstaller não invocado")
+        if args.with_installer:
+            warnings.append("dry_run=True; --with-installer ignorado (sem onedir input)")
         DIST_DIR.mkdir(parents=True, exist_ok=True)
         manifest_path = write_build_manifest(
             ctx,
@@ -512,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
             zip_path=None,
             spec_template_sha256=spec_template_sha,
             warnings=warnings,
+            installer_path=None,
         )
         print(f"[build_release] DRY-RUN ok — manifest: {manifest_path}")
         return 0
@@ -541,17 +651,32 @@ def main(argv: list[str] | None = None) -> int:
     file_manifest = compute_file_manifest(onedir)
     zip_path = create_deterministic_zip(onedir, ctx.version, ctx.source_date_epoch)
 
+    # Story 4.17 — compilar Setup.exe via InnoSetup quando --with-installer.
+    installer_path: Path | None = None
+    if args.with_installer:
+        try:
+            installer_path = compile_installer(ctx.version, REPO_ROOT)
+            print(f"[build_release] OK — installer: {installer_path}")
+        except (FileNotFoundError, RuntimeError) as exc:
+            warnings.append(f"installer_compile_failed: {exc}")
+            print(f"[build_release] INSTALLER FAILED: {exc}", file=sys.stderr)
+            # Não retornamos rc != 0 aqui: zip + manifest base já existem.
+            # Fail loud no log + warning no manifest (operador decide).
+
     manifest_path = write_build_manifest(
         ctx,
         file_manifest=file_manifest,
         zip_path=zip_path,
         spec_template_sha256=spec_template_sha,
         warnings=warnings,
+        installer_path=installer_path,
     )
 
     print(f"[build_release] OK — onedir: {onedir}")
     print(f"[build_release] OK — zip: {zip_path}")
     print(f"[build_release] OK — manifest: {manifest_path}")
+    if installer_path is not None:
+        print(f"[build_release] OK — installer: {installer_path}")
     return 0
 
 

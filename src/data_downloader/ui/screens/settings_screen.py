@@ -36,7 +36,8 @@ Atalhos (THEME.md §6 — SettingsScreen):
 QFileDialog para "MUDAR PASTA" usa ``DontUseNativeDialog`` (ADR-003 amendment,
 finding M9, QT_PATTERNS §1).
 
-Persistência: ``~/.data_downloader/config.toml`` (ADR-012 alinhamento).
+Persistência: ``~/.data-downloader/config.toml`` (ADR-012 alinhamento;
+canonizado em hífen na Story v1.0.5 — antes underscore).
 
 Microcopy (R17 — Uma): TODAS as strings vêm de ``microcopy_loader``.
 
@@ -87,8 +88,23 @@ STATE_SUCCESS = "success"
 
 
 # Path para persistência (ADR-012).
+#
+# Story v1.0.5 fix (Pichau live test 2026-05-06): canoniza
+# ``~/.data-downloader/`` (hífen) — antes da v1.0.5, ``config.toml`` ia para
+# ``.data_downloader/`` (underscore) e ``.env`` para ``.data-downloader/``
+# (hífen). Essa divergência era confusa para o usuário e fonte latente de
+# bugs (e.g. cleanup ferramentas viam dois diretórios "diferentes"). Single
+# source of truth via :func:`data_downloader._env_loader.user_env_path`.
+#
+# Migration nota: usuários pré-v1.0.5 com ``~/.data_downloader/config.toml``
+# perdem a configuração (re-Save no novo path resolve). Migration
+# automática postergada para v1.0.6 (caso de uso raro — Save é trivial).
 def _config_path() -> Path:
-    return Path.home() / ".data_downloader" / "config.toml"
+    from data_downloader._env_loader import user_env_path
+
+    # ``user_env_path()`` retorna ``~/.data-downloader/.env`` — pegamos o
+    # parent para ter o diretório canônico e adicionamos ``config.toml``.
+    return user_env_path().parent / "config.toml"
 
 
 def _auto_detect_dll_path() -> Path | None:
@@ -735,18 +751,44 @@ class SettingsScreen(QWidget):
         QTimer.singleShot(50, self._do_test_connection)
 
     def _do_test_connection(self) -> None:
+        """Tenta conectar à DLL com credenciais atuais.
+
+        Story v1.0.5 fix (Pichau live test 2026-05-06): a versão pré-v1.0.5
+        importava ``data_downloader.dll.session.open_session`` — módulo que
+        NUNCA EXISTIU no código real. Resultado: o try/except sempre caía
+        no ``ImportError`` e o botão "Test Connection" reportava falha
+        independente das credenciais — bug 100% reprodutível.
+
+        Substituído por uso direto do ``ProfitDLL`` wrapper (módulo correto):
+        valida credenciais runtime via ``os.environ`` (Save deve ter
+        propagado), inicializa em modo market-only com ``minimal_handshake``
+        (handshake rápido espelhando probe canônico) e aguarda
+        MARKET_CONNECTED com timeout curto (30s — UX: feedback rápido,
+        teste real é "smoke" não download).
+        """
         ok = False
         version: str | None = None
         error_msg = ""
         try:
-            # Tenta importar e inicializar — encapsula tudo em try.
-            from data_downloader.dll.session import open_session  # type: ignore[import-not-found]
+            # ler credenciais runtime — Save deve ter aplicado em os.environ.
+            key = os.environ.get("PROFITDLL_KEY", "").strip()
+            user = os.environ.get("PROFITDLL_USER", "").strip()
+            pwd = os.environ.get("PROFITDLL_PASS", "").strip()
+            if not all((key, user, pwd)):
+                error_msg = "Credenciais ausentes (PROFITDLL_KEY/USER/PASS)"
+            else:
+                from data_downloader.dll.wrapper import ProfitDLL
 
-            with open_session() as session:
-                version = getattr(session, "version", None) or "?"
-                ok = True
+                with ProfitDLL() as dll:
+                    dll.initialize_market_only(key, user, pwd, minimal_handshake=True)
+                    connected = dll.wait_market_connected(timeout=30, retry_attempts=1)
+                    if connected:
+                        version = getattr(dll, "dll_version", None) or "?"
+                        ok = True
+                    else:
+                        error_msg = "Timeout aguardando MARKET_CONNECTED"
         except Exception as exc:
-            error_msg = str(exc)
+            error_msg = f"{type(exc).__name__}: {exc}"
             ok = False
 
         self._test_conn_btn.setEnabled(True)
@@ -799,13 +841,24 @@ class SettingsScreen(QWidget):
         if not start_dir and sys.platform == "win32":
             start_dir = r"C:\Program Files"
 
+        # Story v1.0.5 fix (Pichau live test 2026-05-06): em frozen mode
+        # (PyInstaller .exe) ``DontUseNativeDialog`` causa cores bugadas e
+        # widget Qt-default sem integração com Windows shell. UX correta no
+        # .exe é o diálogo nativo Win32. Em dev/tests mantemos
+        # ``DontUseNativeDialog`` para que mocks de ``QFileDialog`` sigam
+        # funcionando e para evitar dependência de Win32 shell em CI.
+        options: QFileDialog.Option = (
+            QFileDialog.Option(0)  # nativo Windows (frozen / .exe)
+            if getattr(sys, "frozen", False)
+            else QFileDialog.Option.DontUseNativeDialog  # dev / tests
+        )
         file_path, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "Selecionar ProfitDLL.dll",
             start_dir,
             "ProfitDLL (ProfitDLL.dll);;DLL Files (*.dll);;All Files (*)",
             "",
-            QFileDialog.Option.DontUseNativeDialog,  # ADR-003 amendment M9
+            options,
         )
         if file_path:
             self._dll_path_edit.setText(file_path)
@@ -847,13 +900,20 @@ class SettingsScreen(QWidget):
             self._dll_path_status.setStyleSheet("color: #F25656;")  # error red
 
     def _on_change_data_dir_clicked(self) -> None:
-        # QFileDialog DontUseNativeDialog (QT_PATTERNS §1, finding M9).
+        # Story v1.0.5 fix (Pichau live test 2026-05-06): nativo Win32 em
+        # frozen, ``DontUseNativeDialog`` em dev/tests (vide
+        # ``_on_dll_browse_clicked`` para racional completo).
         current = self._data_dir_edit.text().strip() or str(Path.cwd())
+        options: QFileDialog.Option = (
+            QFileDialog.Option(0)
+            if getattr(sys, "frozen", False)
+            else QFileDialog.Option.DontUseNativeDialog
+        )
         folder = QFileDialog.getExistingDirectory(
             self,
             "Selecionar pasta de dados",
             current,
-            QFileDialog.Option.DontUseNativeDialog,
+            options,
         )
         if folder:
             self._data_dir_edit.setText(folder)

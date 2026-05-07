@@ -36,6 +36,22 @@ def main() -> int:
     Returns:
         Exit code (``0`` = sucesso). Repassa retorno de ``QApplication.exec()``.
     """
+    # Story v1.0.5 fix (Pichau live test 2026-05-06): em UI mode, o ``.env``
+    # user-global (escrito por SettingsScreen Save em
+    # ``~/.data-downloader/.env``) precisa ser carregado ANTES de qualquer
+    # leitura ``os.getenv``. CLI já chama via ``_bootstrap_env`` no
+    # module-level de ``cli.py``; o entry point UI direto (double-click do
+    # ``data_downloader.exe`` sem subcommand) NÃO importava ``cli.py``,
+    # então o ``.env`` era ignorado e o usuário via "campos vazios" mesmo
+    # após salvar credenciais via UI. Graceful degrade: se algo falhar, UI
+    # ainda abre (usuário pode digitar valores manualmente).
+    try:
+        from data_downloader._env_loader import bootstrap_env
+
+        bootstrap_env()
+    except Exception:
+        pass
+
     # Configurar logging (Story 2.9). Best-effort — UI não falha se logging
     # config falhar (caller pode estar em ambiente sem stderr).
     try:

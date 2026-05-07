@@ -99,33 +99,19 @@ app = typer.Typer(
 def _bootstrap_env() -> None:
     """Carrega ``.env`` do primeiro candidato existente (cwd > exe > user-home).
 
-    Idempotent — chamada múltipla é segura (load_dotenv não sobrescreve por
-    default). Best-effort: qualquer erro é silenciado (CLI ainda funciona
-    sem .env quando vars já estão no ambiente).
-    """
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        # python-dotenv não instalado — graceful degrade. Usuário precisa
-        # exportar PROFITDLL_* no shell ou via launcher dedicado.
-        return
+    Story v1.0.5 (Pichau live test 2026-05-06): delega para módulo
+    :mod:`data_downloader._env_loader` — single source of truth compartilhado
+    com ``ui/app.py::main()`` para que UI mode também carregue o ``.env``
+    user-global no boot. Antes da v1.0.5, o double-click do .exe abria UI
+    sem nunca importar este módulo, então credenciais salvas via
+    SettingsScreen ficavam órfãs.
 
-    candidates: list[Path | None] = [
-        Path.cwd() / ".env",
-        # PyInstaller --onedir: .env junto do .exe é o caminho natural para
-        # usuário final que não conhece cwd.
-        Path(sys.executable).parent / ".env" if getattr(sys, "frozen", False) else None,
-        Path.home() / ".data-downloader" / ".env",
-    ]
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            if candidate.is_file():
-                load_dotenv(candidate)
-                return
-        except OSError:  # pragma: no cover defensive
-            continue
+    Idempotent — chamada múltipla é segura. Best-effort: qualquer erro é
+    silenciado (CLI ainda funciona sem .env quando vars já estão no ambiente).
+    """
+    from data_downloader._env_loader import bootstrap_env
+
+    bootstrap_env()
 
 
 def _get_credential(canonical: str, deprecated: str | None = None) -> str | None:

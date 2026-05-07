@@ -133,6 +133,22 @@ def _compose_release_body(
     )
     git_short = manifest.get("git_short_sha", "N/A")
 
+    # Story 4.17 — installer section (opcional, presente se --with-installer foi
+    # usado em build_release.py). Manifest schema: installer = {path, size_bytes,
+    # sha256} ou None.
+    installer_section = manifest.get("installer")
+    installer_sha = (
+        installer_section["sha256"]
+        if isinstance(installer_section, dict) and isinstance(installer_section.get("sha256"), str)
+        else None
+    )
+    installer_size = (
+        installer_section["size_bytes"]
+        if isinstance(installer_section, dict)
+        and isinstance(installer_section.get("size_bytes"), int)
+        else 0
+    )
+
     body_lines: list[str] = []
     body_lines.append(f"# Data Downloader v{version}")
     body_lines.append("")
@@ -143,10 +159,18 @@ def _compose_release_body(
         body_lines.append("")
     body_lines.append("## Artifacts")
     body_lines.append("")
+    if installer_sha is not None:
+        body_lines.append(
+            f"- **`data-downloader-Setup-v{version}.exe`** "
+            f"({installer_size / (1024 * 1024):.1f} MB) — "
+            "**recomendado** (1-clique, Start Menu, Add/Remove Programs)"
+        )
+        body_lines.append(f"  - SHA256: `{installer_sha}`")
     body_lines.append(
-        f"- `data-downloader-v{version}-win64.zip` " f"({zip_size / (1024 * 1024):.1f} MB)"
+        f"- `data-downloader-v{version}-win64.zip` "
+        f"({zip_size / (1024 * 1024):.1f} MB) — portable / advanced users"
     )
-    body_lines.append(f"- SHA256: `{zip_sha}`")
+    body_lines.append(f"  - SHA256: `{zip_sha}`")
     body_lines.append(f"- Git SHA: `{git_short}`")
     body_lines.append(f"- `build-manifest-v{version}.json` (full audit trail)")
     body_lines.append("")
@@ -299,6 +323,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[github_release] manifest ausente: {manifest_path}", file=sys.stderr)
         return 1
 
+    # Story 4.17 — detectar installer (opcional). Se manifest tem section
+    # ``installer`` E o arquivo Setup.exe existe em disco, anexamos como
+    # artifact da release. Sem installer, fluxo legado intacto (AC2).
+    installer_path = DIST_DIR / f"data-downloader-Setup-v{version}.exe"
+    has_installer = installer_path.is_file() and bool(manifest.get("installer"))
+    if has_installer:
+        print(f"[github_release] installer detectado: {installer_path.name}")
+    else:
+        print("[github_release] installer ausente (fluxo zip-only)")
+
     if not args.dry_run:
         try:
             _ensure_gh_available()
@@ -321,13 +355,16 @@ def main(argv: list[str] | None = None) -> int:
     body_path.write_text(body, encoding="utf-8")
     print(f"[github_release] body composed → {body_path}")
 
-    # 4. Invoke gh.
+    # 4. Invoke gh — anexa Setup.exe se disponível.
+    artifacts = [zip_path, manifest_path]
+    if has_installer:
+        artifacts.append(installer_path)
     try:
         _invoke_gh_release(
             version=version,
             title=f"Data Downloader v{version}",
             body_path=body_path,
-            artifacts=[zip_path, manifest_path],
+            artifacts=artifacts,
             prerelease=bool(args.prerelease),
             dry_run=bool(args.dry_run),
         )

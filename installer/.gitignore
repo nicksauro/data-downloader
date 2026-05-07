@@ -1,0 +1,4 @@
+# InnoSetup compiler outputs (script já emite OutputDir=..\dist; isto é
+# defensa para ``Output/`` default caso developer compile manual).
+Output/
+*.log

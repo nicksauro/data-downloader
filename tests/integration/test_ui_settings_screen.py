@@ -111,14 +111,19 @@ def test_toggle_secret_changes_echo_mode(settings_screen, qtbot):
 
 
 def test_save_writes_config_toml(settings_screen, qtbot, tmp_path):
-    """Click salvar → arquivo TOML criado em ~/.data_downloader/config.toml."""
+    """Click salvar → arquivo TOML criado em ~/.data-downloader/config.toml.
+
+    Story v1.0.5 (canonização): path agora usa hífen (``.data-downloader/``)
+    para alinhar com ``.env``. Antes da v1.0.5 era ``.data_downloader/``
+    (underscore) — divergência arrumada.
+    """
     settings_screen._dll_path_edit.setText("C:/test/ProfitDLL.dll")
     settings_screen._data_dir_edit.setText(str(tmp_path / "mydata"))
 
     settings_screen._on_save_clicked()
     qtbot.wait(100)
 
-    config_path = tmp_path / ".data_downloader" / "config.toml"
+    config_path = tmp_path / ".data-downloader" / "config.toml"
     assert config_path.exists()
     content = config_path.read_text(encoding="utf-8")
     assert "dll_path" in content

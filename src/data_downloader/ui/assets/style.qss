@@ -936,7 +936,144 @@ QPlainTextEdit:focus {
 }
 
 /* ----------------------------------------------------------------------------
- * 19. Notas para Felix — manutenção do tema
+ * 19. QFileDialog / nested dialog widgets — defense-in-depth (Story v1.0.5)
+ *
+ * Em frozen builds usamos dialog nativo Windows (Fix 4 — Dex), que ignora
+ * QSS por design. Em dev/tests, porém, `DontUseNativeDialog` aciona o
+ * QFileDialog estilizado pelo Qt — sem regras dedicadas, herda paleta
+ * default do Fusion e quebra a continuidade visual do app.
+ *
+ * Estas regras blindam dialogs Qt nested widgets (QListView/QTreeView/
+ * QHeaderView/QToolButton/QSplitter/QComboBox/QLineEdit dentro do dialog).
+ * Reaproveitam tokens canônicos da paleta (THEME §2) — nada inventado.
+ *
+ * Nota: dialog nativo Windows não é afetado (filtragem do SO).
+ * -------------------------------------------------------------------------- */
+
+QFileDialog {
+    background: #0E0E10;            /* bg.primary — alinhado com QDialog base */
+    color: #E8E8EA;
+}
+
+/* Lista/tree/table de arquivos dentro de QFileDialog/QDialog */
+QDialog QListView,
+QDialog QTreeView,
+QDialog QTableView,
+QFileDialog QListView,
+QFileDialog QTreeView,
+QFileDialog QTableView {
+    background: #0E0E10;            /* bg.primary */
+    color: #E8E8EA;
+    border: 1px solid #2D2D33;      /* border.subtle */
+    selection-background-color: rgba(61, 208, 225, 0.20);
+    selection-color: #E8E8EA;
+    alternate-background-color: #131316;
+    outline: none;
+}
+
+QDialog QListView::item:hover,
+QDialog QTreeView::item:hover,
+QDialog QTableView::item:hover,
+QFileDialog QListView::item:hover,
+QFileDialog QTreeView::item:hover,
+QFileDialog QTableView::item:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* Header (Name / Size / Date Modified) — herda QHeaderView §9 mas
+ * reforça nested cases onde a especificidade do parent QFileDialog
+ * sobrescreve a regra global. */
+QDialog QHeaderView::section,
+QFileDialog QHeaderView::section {
+    background: #17171A;            /* bg.surface */
+    color: #A8A8AC;                 /* text.secondary */
+    padding: 6px 10px;
+    border: none;
+    border-bottom: 1px solid #2D2D33;
+    border-right: 1px solid #2D2D33;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+QDialog QHeaderView::section:hover,
+QFileDialog QHeaderView::section:hover {
+    background: #1F1F23;            /* bg.elevated */
+    color: #E8E8EA;
+}
+
+/* Back/forward navigation buttons + parent-dir toolbutton */
+QDialog QToolButton,
+QFileDialog QToolButton {
+    background: #26262B;            /* bg.input */
+    color: #E8E8EA;
+    border: 1px solid #2D2D33;
+    border-radius: 4px;
+    padding: 4px 6px;
+    min-height: 18px;
+}
+
+QDialog QToolButton:hover,
+QFileDialog QToolButton:hover {
+    background: #2D2D33;
+    border-color: #3D3D45;          /* border.strong */
+}
+
+QDialog QToolButton:pressed,
+QFileDialog QToolButton:pressed {
+    background: #1F1F23;
+}
+
+QDialog QToolButton:disabled,
+QFileDialog QToolButton:disabled {
+    color: #4A4A50;                 /* text.disabled */
+    background: #1F1F23;
+    border-color: #2D2D33;
+}
+
+/* Splitter sidebar (lista de Quick Access ↔ painel de arquivos) */
+QDialog QSplitter::handle,
+QFileDialog QSplitter::handle {
+    background: #2D2D33;
+}
+
+QDialog QSplitter::handle:hover,
+QFileDialog QSplitter::handle:hover {
+    background: #3DD0E1;            /* accent.cyan */
+}
+
+/* File-type filter / lookin combobox + file name input dentro do dialog.
+ * Reforça paleta para evitar widgets brancos default em subclasses do Qt. */
+QDialog QComboBox,
+QDialog QLineEdit,
+QFileDialog QComboBox,
+QFileDialog QLineEdit {
+    background: #26262B;            /* bg.input */
+    color: #E8E8EA;
+    border: 1px solid #2D2D33;
+    border-radius: 4px;
+    padding: 4px 8px;
+    selection-background-color: #3DD0E1;
+    selection-color: #0E0E10;
+}
+
+QDialog QComboBox:focus,
+QDialog QLineEdit:focus,
+QFileDialog QComboBox:focus,
+QFileDialog QLineEdit:focus {
+    border-color: #3DD0E1;          /* state.focus accent */
+}
+
+QDialog QComboBox QAbstractItemView,
+QFileDialog QComboBox QAbstractItemView {
+    background: #1F1F23;            /* bg.elevated — popover */
+    color: #E8E8EA;
+    border: 1px solid #2D2D33;
+    selection-background-color: rgba(61, 208, 225, 0.16);
+    selection-color: #E8E8EA;
+}
+
+/* ----------------------------------------------------------------------------
+ * 20. Notas para Felix — manutenção do tema
  *
  * - QSS é cosmético: app deve funcionar 100% sem este arquivo (best-effort
  *   load em app.py via contextlib.suppress).
@@ -944,4 +1081,6 @@ QPlainTextEdit:focus {
  *   mudança de estado.
  * - Light mode V2 (placeholder; não bloquear MVP).
  * - Re-validar contraste WCAG AA quando mudar paleta (THEME §10).
+ * - QFileDialog nativo (frozen Windows) ignora QSS — regras §19 só
+ *   aplicam quando DontUseNativeDialog (dev/tests). Defense-in-depth.
  * ========================================================================== */
