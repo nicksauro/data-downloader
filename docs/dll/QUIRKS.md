@@ -105,6 +105,7 @@
 | [Q-DRIFT-36](#q-drift-36) | 🐛 bug-código (HOTFIX-IN-PROGRESS Story 1.7g) | storage / schema | Writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` por não mapear no schema; pipeline DLL+IngestorThread populava corretamente. **P0 release blocker.** |
 | [Q-DRIFT-37](#q-drift-37) | ✅ **CLOSED-FULLY-MITIGATED 2026-05-07** (uniform 1d policy ALL symbols, ADR-023; supersede Story 4.16 per-symbol) | history / queue overflow / volume completeness | Risco de queue overflow em chunks 5d para símbolos voláteis (WINFUT) — DLL callback sem backpressure satura `queue.Queue(maxsize=2_000_000)` → trade descartado silenciosamente. **Fully mitigated via uniform policy 1d/chunk para TODOS os ativos** (ADR-023, hotfix Pichau live v1.1.0 2026-05-07). Sem símbolo passa de ~400-600k trades/dia worst case, longe dos 2M maxsize — risk zero por design. Smoke 5d real Pichau 2026-05-04 (per-symbol predecessor) → 1.574M trades, `queue_dropped=0`. |
 | [Q-DRIFT-38](#q-drift-38) | ✅ **CLOSED-FILTERED 2026-05-06** (v1.0.6 Story 4.18) | history / data validation | 1 trade em 519k com `price=0.0` (sentinel/auction/ABI) abortava JOB inteiro via `IntegrityError("price must be > 0")` em `validate_record` schema v1.1.0; guard em `_IngestorThread._process_trade` + counter `translate_invalid_price_skips`. |
+| [Q-DRIFT-39](#q-drift-39) | ✅ **CLOSED-MITIGATED 2026-05-12** (task #21, RCA-B) | wrapper / frozen / process environment | Frozen **windowed** (`console=False`) → `sys.std*` `None` + fds 0/1/2 OS inválidos → ProfitDLL Delphi crasha na ConnectorThread (`CreateDataLoader` access violation). CLI EXE (`console=True`) funciona. Fix: `_ensure_valid_stdio()` reabre os 3 fds para `os.devnull` no startup de `ui/app.py::main()`. Coexiste com [Q08-E](#q08-e) (2 RCAs do mesmo crash). |
 
 ---
 
@@ -246,20 +247,23 @@
 ## Q08-E
 
 - **ID:** Q08-E
-- **Status:** 🔬 empirical
+- **Status:** ✅ **VALIDATED 2026-05-12** (crash reproduzido em prod — fix singleton aplicado, task #21)
 - **Categoria:** lifecycle
 - **Sintoma:** Sequência `init → finalize → init` na **mesma** sessão Python:
   - 2º init pode crashar com access violation, OU
   - 2º init retorna sucesso mas callbacks nunca disparam, OU
   - 2º init retorna NL_INTERNAL_ERROR.
-- **Causa raiz:** ConnectorThread provavelmente não é re-inicializável; estado interno da DLL não é zerado por `Finalize`.
-- **Evidência:** observado em testes whale-detector durante desenvolvimento. Não documentado em manual.
-- **Workaround:**
+- **Causa raiz:** ConnectorThread não é re-inicializável; estado interno da DLL **não** é zerado por `Finalize`/`DLLFinalize`. A `ConnectorThread` da 1ª sessão morre, mas o 2º init posta mensagens para essa thread morta (`SysLastError=1444 ERROR_INVALID_THREAD_ID` / `1400 ERROR_INVALID_WINDOW_HANDLE`) e `CreateDataLoader` pega um ponteiro de interface morto.
+- **Evidência:**
+  - Observado em testes whale-detector durante desenvolvimento (não documentado em manual).
+  - **Reproduzido em produção 2026-05-12 (Pichau live test, app GUI v1.1.0):** `_internal/Erro.log` da DLL → `CreateDataLoader Failed | Access violation ... Read of address FFFFFFFFFFFFFFFF` em `System.@IntfCopy` ← `BaseDataLoaderU.CreateBaseDataLoader` ← `InitializationManagerU.TInitializationManager.InitializeAfterLogin` ← `ConnectorThreadU.TConnectorThread.LoginResult`. `_internal/PostMessageError.log` → `WM_VALID_LICENSE`/`WM_REPLAY_SYNC_CLOCK`/`WM_LOGIN_RESULT` perdidos com `SysLastError=1444`/`1400`. Windows Event Log: `data_downloader.exe` crash em `Qt6Core.dll 0xc0000409` (`__fastfail`). Trigger: usuário clicou "Testar Conexão" (1º init + finalize via `__exit__`) e depois "Baixar" (2º init via `_build_real_dll`). O CLI (`data_downloader-cli.exe download`) NÃO crasha — 1 init/processo. **Não é regressão da v1.1.0** — existe desde v1.0.5 (quando "Test Connection" foi adicionado).
+- **Fix (task #21, 2026-05-12 — Dex):** **DLL singleton process-global** em `src/data_downloader/dll/session.py` (`get_dll()`/`shutdown_dll()`). `get_dll()` inicializa a `ProfitDLL` UMA vez por processo e devolve a mesma instância nas chamadas seguintes (NÃO re-inicializa, NÃO finaliza). `SettingsScreen._TestConnectionWorker.run` e `public_api.download._build_real_dll` agora usam `get_dll()` em vez de `with ProfitDLL()`. `finalize` roda 1x no shutdown: `atexit.register(shutdown_dll)` + `MainWindow.closeEvent`. Ver `docs/adr/ADR-022-single-session-sequential-policy.md`.
+- **Workaround (histórico, pré-fix):**
   - **Em testes:** fixture `pytest` **session-scoped** (init exatamente UMA vez por invocation). Story 1.2 AC14.
   - **Em produção:** 1 init por processo Python (R3 expandida). Para re-init, **respawn do processo** (multi-symbol via subprocess).
 - **Manual diz:** silencioso.
-- **Data descoberta:** ~2026-02.
-- **Aplica a stories:** 1.2 (fixture), 1.7a (orchestrator decisão por subprocess), MANIFEST R3.
+- **Data descoberta:** ~2026-02. **Reproduzido em prod:** 2026-05-12.
+- **Aplica a stories:** 1.2 (fixture), 1.7a (orchestrator decisão por subprocess), MANIFEST R3, task #21 (fix singleton).
 
 ---
 
@@ -1640,6 +1644,28 @@ ret: int = self._dll.DLLInitializeMarketLogin(
   - `tests/unit/test_ingestor_thread_invalid_price.py` (cobertura red→green).
   - [Q-DRIFT-34](#q-drift-34) (sentinela `TradeDate` zerado — mesma classe de defesa).
   - Story 4.18 (P0 release blocker hotfix v1.0.5 → v1.0.6).
+
+---
+
+## Q-DRIFT-39
+
+- **ID:** Q-DRIFT-39
+- **Status:** ✅ **CLOSED-MITIGATED (2026-05-12)** — HOTFIX-APPLIED task #21 (RCA-B Felix/Dex). `_ensure_valid_stdio()` reabre os 3 std fds no startup de `ui/app.py::main()` antes de qualquer uso da DLL.
+- **Categoria:** wrapper / frozen / process environment
+- **Severidade:** **P0 — RELEASE BLOCKER (app GUI v1.1.0 crasha ao baixar)**
+- **Título:** Em PyInstaller frozen **windowed** (`console=False`), o processo não tem console → `sys.stdout`/`sys.stderr`/`sys.stdin` são `None` e os handles OS-level (`STD_OUTPUT_HANDLE`/`STD_ERROR_HANDLE`, fds 0/1/2) ficam **inválidos**. A ProfitDLL Delphi, na `ConnectorThread` durante `InitializeAfterLogin`/`CreateDataLoader`, faz operações que dependem desses handles válidos → access violation.
+- **Sintoma (Pichau live test 2026-05-12, app GUI instalado):** `data_downloader.exe` crasha ao clicar "Baixar". Mesmo `Erro.log`/`PostMessageError.log`/Event Log de Q08-E (os dois RCAs coexistem). O **CLI EXE** (`data_downloader-cli.exe`) é `console=True` → fds válidos → funciona (791k trades baixados, `dll.finalized code=0`). O UI EXE é `console=False` (`build/data_downloader.spec.template` — UI ~linha 374, CLI ~linha 397).
+- **Causa raiz:** Delphi RTL e/ou a ConnectorThread tocam os std handles do processo (escrita de diagnóstico, `SetStdHandle`, etc.) assumindo que são válidos — premissa quebrada quando o EXE é windowed e foi lançado sem console (double-click / atalho do instalador). Python já reflete isso (`sys.std* is None`); o nível OS fica com handles `INVALID_HANDLE_VALUE`.
+- **Fix aplicado (task #21):** `_ensure_valid_stdio()` em `src/data_downloader/ui/app.py`, chamada como **PRIMEIRA** coisa em `main()` (antes de `bootstrap_env`, `setup_logging`, criação de `QApplication`, ou qualquer import/uso da DLL). Para cada fd 0/1/2: `os.fstat(fd)` → se `OSError`, `os.open(os.devnull, ...)` + `os.dup2`. Também garante `sys.stdout/stderr/stdin` não-`None` (abre `os.devnull`). No-op se já válidos — seguro em dev/CLL/tests.
+- **Manual diz:** silencioso (premissa de ambiente, não documentada).
+- **Evidência:** Pichau live test 2026-05-12 (crash UI vs CLI funcional, mesmos artefatos de erro DLL).
+- **Data descoberta:** 2026-05-12.
+- **Aplica a stories:** task #21, Story 4.4 (PyInstaller spec — `console=False` UI EXE), Story 3.1 (`ui/app.py::main`).
+- **Refs:**
+  - `src/data_downloader/ui/app.py` (`_ensure_valid_stdio`).
+  - `build/data_downloader.spec.template` (UI EXE `console=False`).
+  - `tests/unit/test_app_stdio.py` (cobertura).
+  - [Q08-E](#q08-e) (segundo RCA do mesmo crash — DLL singleton; os dois fixes são complementares).
 
 ---
 

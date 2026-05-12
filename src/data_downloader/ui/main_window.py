@@ -568,4 +568,13 @@ class MainWindow(QMainWindow):
             if screen_adapter is not None and hasattr(screen_adapter, "shutdown"):
                 with contextlib.suppress(Exception):
                     screen_adapter.shutdown()
+        # task #21 (Q08-E): finaliza o singleton ProfitDLL process-global
+        # UMA vez no encerramento da UI. ``shutdown_dll`` é idempotente e
+        # best-effort (também registrado via ``atexit``). A ProfitDLL
+        # Classic não tolera init→finalize→init, então o finalize só pode
+        # rodar no teardown do processo.
+        with contextlib.suppress(Exception):
+            from data_downloader.dll.session import shutdown_dll
+
+            shutdown_dll()
         super().closeEvent(event)

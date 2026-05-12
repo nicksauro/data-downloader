@@ -213,18 +213,29 @@ class _TestConnectionWorker(QObject):
                 error_msg = "Credenciais ausentes (PROFITDLL_KEY/USER/PASS)"
             else:
                 # Import lazy — evita custo se worker nunca rodar.
-                from data_downloader.dll.wrapper import ProfitDLL
+                # task #21 (Nelo Q08-E): a ProfitDLL Classic NÃO é
+                # re-inicializável no mesmo processo (init→finalize→init
+                # crasha em ``CreateDataLoader`` — ``Erro.log`` Pichau
+                # 2026-05-12). Usamos o singleton process-global de
+                # ``dll.session`` — SEM ``finalize()`` aqui. Se o usuário
+                # clicar "Baixar" depois, ``_build_real_dll`` reusa esta
+                # mesma instância já conectada. O finalize roda 1x no
+                # encerramento (atexit + MainWindow.closeEvent).
+                from data_downloader.dll.session import get_dll
 
-                with ProfitDLL() as dll:
-                    dll.initialize_market_only(
-                        self._key, self._user, self._password, minimal_handshake=True
-                    )
-                    connected = dll.wait_market_connected(timeout=30, retry_attempts=1)
-                    if connected:
-                        version = str(getattr(dll, "dll_version", None) or "?")
-                        ok = True
-                    else:
-                        error_msg = "Timeout aguardando MARKET_CONNECTED"
+                dll = get_dll(
+                    market_only=True,
+                    key=self._key,
+                    user=self._user,
+                    password=self._password,
+                    minimal_handshake=True,
+                )
+                connected = dll.wait_market_connected(timeout=30, retry_attempts=1)
+                if connected:
+                    version = str(getattr(dll, "dll_version", None) or "?")
+                    ok = True
+                else:
+                    error_msg = "Timeout aguardando MARKET_CONNECTED"
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             ok = False

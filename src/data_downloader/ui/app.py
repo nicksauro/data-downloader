@@ -24,10 +24,48 @@ Referências:
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 from pathlib import Path
 
-__all__ = ["_cli_or_ui_dispatch", "_first_non_flag_token", "main"]
+__all__ = ["_cli_or_ui_dispatch", "_ensure_valid_stdio", "_first_non_flag_token", "main"]
+
+
+def _ensure_valid_stdio() -> None:
+    """Garante que os 3 std fds e ``sys.stdout/err/in`` sejam válidos.
+
+    task #21 (RCA-B Felix/Dex): o EXE da UI é ``console=False`` (windowed —
+    ``build/data_downloader.spec.template``). Em modo windowed o processo
+    NÃO tem console: ``sys.stdout``/``sys.stderr`` são ``None`` e os handles
+    OS-level (``STD_OUTPUT_HANDLE``/``STD_ERROR_HANDLE``, fds 0/1/2) ficam
+    inválidos. A ProfitDLL Delphi, na ``ConnectorThread`` durante
+    ``InitializeAfterLogin``/``CreateDataLoader``, faz operações que
+    dependem desses handles → access violation (o CLI EXE é ``console=True``
+    e por isso funciona). Fix: reabrir os 3 std fds para ``os.devnull`` a
+    nível de OS e garantir ``sys.std*`` não-``None``. No-op se já válidos —
+    seguro chamar em dev/CLI também.
+    """
+    for fd, mode in ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY)):
+        try:
+            os.fstat(fd)  # fd válido? não faz nada
+        except OSError:
+            try:
+                devnull = os.open(os.devnull, mode)
+                if devnull != fd:
+                    os.dup2(devnull, fd)
+                    os.close(devnull)
+            except OSError:
+                pass
+    # Também garante sys.stdout/stderr/stdin não-None (Python-level).
+    if sys.stdout is None:
+        with contextlib.suppress(OSError):
+            sys.stdout = open(os.devnull, "w")  # noqa: SIM115
+    if sys.stderr is None:
+        with contextlib.suppress(OSError):
+            sys.stderr = open(os.devnull, "w")  # noqa: SIM115
+    if sys.stdin is None:
+        with contextlib.suppress(OSError):
+            sys.stdin = open(os.devnull)  # noqa: SIM115
 
 
 def main() -> int:
@@ -36,6 +74,11 @@ def main() -> int:
     Returns:
         Exit code (``0`` = sucesso). Repassa retorno de ``QApplication.exec()``.
     """
+    # task #21 (RCA-B): em frozen windowed (``console=False``) os std fds /
+    # ``sys.std*`` ficam inválidos → ProfitDLL crasha ao tocá-los na
+    # ConnectorThread. Reabrir ANTES de qualquer import/uso da DLL ou
+    # criação de QApplication. No-op se já válidos.
+    _ensure_valid_stdio()
     # Story v1.0.5 fix (Pichau live test 2026-05-06): em UI mode, o ``.env``
     # user-global (escrito por SettingsScreen Save em
     # ``~/.data-downloader/.env``) precisa ser carregado ANTES de qualquer

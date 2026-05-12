@@ -261,7 +261,10 @@ def _run_download_worker(
     dll: object | None = None
     catalog: Catalog | None = None
     writer: ParquetWriter | None = None
-    own_dll = False  # Se criamos a DLL aqui, finalizamos no fim.
+    # task #21: a DLL real é um singleton process-global (``dll.session``).
+    # NÃO finalizamos aqui — finalize só roda 1x no shutdown do processo
+    # (atexit + MainWindow.closeEvent / fim do `cli download`). A ProfitDLL
+    # Classic não tolera init→finalize→init no mesmo processo (Q08-E).
 
     try:
         # 1. Catalog.
@@ -292,12 +295,8 @@ def _run_download_worker(
         else:
             writer = ParquetWriter(data_dir=data_dir)
 
-        # 3. DLL — caller pode passar mock; senão init real.
-        if dll_factory is not None:
-            dll = dll_factory()
-        else:
-            dll = _build_real_dll(events_queue)
-            own_dll = True
+        # 3. DLL — caller pode passar mock; senão singleton process-global.
+        dll = dll_factory() if dll_factory is not None else _build_real_dll(events_queue)
 
         # 4. Cancel check antes de qualquer trabalho pesado.
         if cancel_event.is_set():
@@ -477,11 +476,9 @@ def _run_download_worker(
         )
     finally:
         # Cleanup determinístico — ordem reversa de criação.
-        if own_dll and dll is not None:
-            finalize_fn = getattr(dll, "finalize", None)
-            if callable(finalize_fn):
-                with contextlib.suppress(Exception):
-                    finalize_fn()
+        # NOTA task #21: a DLL real NÃO é finalizada aqui (singleton
+        # process-global — ver ``dll.session.shutdown_dll``). Só fechamos
+        # o catalog, que é instanciado por download.
         if catalog is not None:
             with contextlib.suppress(Exception):
                 catalog.close()
@@ -561,7 +558,7 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     # é usado para que o usuário migre.
     import warnings as _warnings
 
-    from data_downloader.dll.wrapper import ProfitDLL
+    from data_downloader.dll.session import get_dll, has_active_dll
     from data_downloader.public_api.exceptions import DLLInitError
 
     key = os.getenv("PROFITDLL_KEY")
@@ -601,7 +598,6 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
             trades_received=0,
         ),
     )
-    dll = ProfitDLL()
     # Story 1.7d — espelho ESTRITO do probe (testa Q-DRIFT-12). Quando
     # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` está definida como ``1``,
     # ``true`` ou ``yes`` (case-insensitive), o init usa o caminho que
@@ -616,7 +612,32 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
         "true",
         "yes",
     }
-    dll.initialize_market_only(key, user, password, minimal_handshake=minimal_handshake)
+    # task #21 (Nelo Q08-E): singleton process-global. A ProfitDLL Classic
+    # NÃO é re-inicializável (init→finalize→init crasha em
+    # ``CreateDataLoader`` — ``Erro.log`` Pichau 2026-05-12). Se a UI já
+    # inicializou via "Testar Conexão", reusamos a MESMA instância e NÃO
+    # repetimos ``wait_market_connected`` (a 1ª sessão já drenou o estado
+    # MARKET_CONNECTED do queue). Se for fresh, init + wait normalmente.
+    is_fresh = not has_active_dll()
+    dll = get_dll(
+        market_only=True,
+        key=key,
+        user=user,
+        password=password,
+        minimal_handshake=minimal_handshake,
+    )
+    if not is_fresh:
+        # Reuso de instância já conectada (Test Connection). Pula o wait.
+        _emit(
+            events_queue,
+            DownloadProgress(
+                total=-1,
+                done=0,
+                message="INF_DLL_READY",
+                trades_received=0,
+            ),
+        )
+        return dll
     # Story 2.12 — retry policy mitiga flakiness Q-DRIFT-02 revisado.
     # Defaults: 300s/tentativa, 3 tentativas, 30s cooldown — cap superior
     # 990s no pior caso (3*300 + 2*30). Operador ajusta via env vars se
