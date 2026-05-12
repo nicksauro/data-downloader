@@ -22,7 +22,7 @@ implicam bumps de API, e vice-versa.
 
 ---
 
-## [1.1.0] — TBD
+## [1.1.0] — 2026-05-12
 
 > Esta release está em validação round 2 — ver
 > [`docs/qa/V1.1.0-FIX-PLAN.md`](docs/qa/V1.1.0-FIX-PLAN.md). Data e

@@ -304,4 +304,4 @@ A definir.
 
 *— Squad data-downloader, 2026-05-03 — fundação para o que vem*
 
-<!-- LATEST-RELEASE --> Latest release: [v1.0.7](https://github.com/nicksauro/data-downloader/releases/tag/v1.0.7) — v1.1.0 em validação round 2 (ver [`docs/qa/V1.1.0-FIX-PLAN.md`](docs/qa/V1.1.0-FIX-PLAN.md)). Badge será atualizado para v1.1.0 após tag real.
+<!-- LATEST-RELEASE --> Latest release: [v1.1.0](https://github.com/nicksauro/data-downloader/releases/tag/v1.1.0) — single solid release (consolidação v1.0.0 → v1.0.7 + BIG COUNCIL round 2). Smoke real WDOFUT 5d PASS (2.878.062 trades, 6 chunks 1d — ADR-023).

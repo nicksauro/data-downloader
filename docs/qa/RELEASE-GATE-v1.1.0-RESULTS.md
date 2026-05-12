@@ -27,8 +27,8 @@ Todos os gates automatizáveis verde. O download path foi validado end-to-end co
 | 6 | build_release.py --with-installer | ✅ PASS | bundle + zip + manifest + **Setup.exe** OK (ISCC.exe achado em `~/AppData/Local/Programs/Inno Setup 6/`) |
 | 7 | data_downloader-cli.exe --healthcheck | ✅ PASS | rc=0, `data_downloader 1.1.0\nhealthcheck OK`, structlog probe emitido |
 | 8 | Bundle size | ✅ PASS | **387.6 MB** uncompressed (-56.3% vs v1.0.7 baseline 886MB) |
-| 9 | Portable zip | ✅ PASS | `data-downloader-v1.1.0-win64.zip` **157.6 MB** — SHA256 a recomputar no build final (último: `630E7BAC54449057556CC7FE9B36054220CC00D5BDEA5D50BFD1A251C3ECF5DC`) ⚠ ver nota reprodutibilidade abaixo |
-| 10 | Setup.exe (InnoSetup) | ✅ PASS | `data-downloader-Setup-v1.1.0.exe` **105.7 MB** — SHA256 `24C6A46AE7AC0DF7F5654F06A3135A8ADBD40180FB9380B667A9D1216D84656C` (recomputar no build final pós-commit) |
+| 9 | Portable zip | ✅ PASS | `data-downloader-v1.1.0-win64.zip` **157.6 MB** — SHA256 `D9654208493029BD227D0134D83A26A1052832C9F76C2A16781124F104ED43AF` (build final `3a9fd83`, 2026-05-12T04:26:38Z) |
+| 10 | Setup.exe (InnoSetup) | ✅ PASS | `data-downloader-Setup-v1.1.0.exe` **105.7 MB** — SHA256 `774850493E4A0FC80808FED8CFB86EF910C0BDAFD3917E99556AEE7899345DD5` (build final `3a9fd83`) |
 | 11 | Build manifest | ✅ PASS | `dist/build-manifest-v1.1.0.json` — version=1.1.0, lean-filter binaries 464→257 / datas 3943→1348 |
 | 12 | **Smoke real CLI (item 16 bloqueante)** | ✅ **PASS** | `run_smoke_real.ps1 -Symbol WDOFUT -Days 5` contra o `.exe` frozen + DLL real: `download rc=0`, **rows=2.878.062, chunks=6, dias=6**, range 2026-05-04..2026-05-11. ADR-023 confirmado: 6 chunks de 1 dia útil cada, sequencial (`orchestrator.complete chunks_completed=6 chunks_failed=0`, `queue_dropped=0`). Parquets em `data/smoke-real/history/F/WDOFUT/2026/05.parquet` (lugar correto pós-fix #18). DuckDB lê OK. Log: `docs/qa/smoke-real-v1.1.0-r2-fix18b.log`. |
 | 13 | Manual UI checklist itens 1-15 (Pichau) | ⏳ PENDENTE | `docs/qa/MANUAL_SMOKE_v1.1.0.md` — só interação visual humana (onboarding banner, toggles, QFileDialog, cheat sheet, etc.) |

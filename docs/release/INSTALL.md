@@ -122,9 +122,9 @@ recomendado):
 
 | Arquivo | Descrição |
 |---------|-----------|
-| `data-downloader-Setup-v1.1.0.exe` | **Instalador InnoSetup** (SHA256: `[TBD pós-rebuild Wave D]`, ~250 MB compactado, ~450 MB instalado) |
-| `data-downloader-v1.1.0-win64.zip` | App portable completo (SHA256: `[TBD pós-rebuild Wave D]`, ~157.6 MB compactado, ~387.5 MB extraído) — alternativa ao Setup |
-| `build-manifest-v1.1.0.json` | Audit trail com SHA256 de cada arquivo (regenerado a cada build — confira que o `setup.sha256` / `zip.sha256` do manifest bate com o `[TBD]` desta tabela após Wave D) |
+| `data-downloader-Setup-v1.1.0.exe` | **Instalador InnoSetup** (105.7 MB; SHA256 `774850493E4A0FC80808FED8CFB86EF910C0BDAFD3917E99556AEE7899345DD5`) |
+| `data-downloader-v1.1.0-win64.zip` | App portable completo (157.6 MB compactado, ~387.6 MB extraído; SHA256 `D9654208493029BD227D0134D83A26A1052832C9F76C2A16781124F104ED43AF`) — alternativa ao Setup |
+| `build-manifest-v1.1.0.json` | Audit trail com SHA256 de cada arquivo do bundle (git_sha=`3a9fd83`, build_timestamp=`2026-05-12T04:26:38Z`) |
 
 ### 3.2 Verificar SHA256 (recomendado)
 
