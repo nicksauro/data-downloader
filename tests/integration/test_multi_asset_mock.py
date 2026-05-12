@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -23,14 +23,23 @@ import pytest
 from data_downloader.dll import callbacks as cb_module
 from data_downloader.dll.types import (
     TC_LAST_PACKET,
-    SystemTime,
+    TAssetID,
     TConnectorAssetIdentifier,
-    TConnectorTrade,
+    TradeFields,
 )
 from data_downloader.orchestrator.download_primitive import (
     ChunkResult,
     download_chunk,
 )
+
+
+def _dt_to_brt_naive_ns(dt: datetime) -> int:
+    """datetime naive (BRT, lei R7) → ns desde 1970-01-01 — espelha
+    ``download_primitive._system_time_to_ns_local``."""
+    aware = dt.replace(tzinfo=UTC)
+    delta = aware - datetime(1970, 1, 1, tzinfo=UTC)
+    total_seconds = delta.days * 86_400 + delta.seconds
+    return total_seconds * 1_000_000_000 + delta.microseconds * 1_000
 
 
 @pytest.fixture(autouse=True)
@@ -109,29 +118,27 @@ class _MultiAssetFakeDLL:
         self._emit_thread.start()
         return 0  # NL_OK
 
-    def translate_trade(self, handle: int, struct: TConnectorTrade) -> int:
+    def translate_trade(self, handle: int) -> TradeFields | None:
+        """API V2 (Story 1.7b-followup): ``(handle) -> TradeFields | None``.
+
+        Antes (drift): ``(handle, struct) -> int`` mutando struct in-place
+        — incompatível com ``download_chunk`` atual (v1.1.0 task #10).
+        """
         if handle >= len(self.trade_specs):
-            return -1
+            return None
         spec = self.trade_specs[handle]
-        st = SystemTime()
         ts: datetime = spec["timestamp"]
-        st.wYear = ts.year
-        st.wMonth = ts.month
-        st.wDayOfWeek = 0
-        st.wDay = ts.day
-        st.wHour = ts.hour
-        st.wMinute = ts.minute
-        st.wSecond = ts.second
-        st.wMilliseconds = ts.microsecond // 1000
-        struct.TradeDate = st
-        struct.TradeNumber = spec.get("trade_number", handle + 1)
-        struct.Price = spec["price"]
-        struct.Quantity = spec["quantity"]
-        struct.Volume = spec["price"] * spec["quantity"]
-        struct.BuyAgent = 0
-        struct.SellAgent = 0
-        struct.TradeType = 1
-        return 0
+        return TradeFields(
+            version=0,
+            timestamp_ns=_dt_to_brt_naive_ns(ts),
+            trade_number=spec.get("trade_number", handle + 1),
+            price=spec["price"],
+            quantity=spec["quantity"],
+            volume=spec["price"] * spec["quantity"],
+            buy_agent_id=0,
+            sell_agent_id=0,
+            trade_type=1,
+        )
 
     def _emit_loop(self, ticker: str, exchange: str) -> None:
         time.sleep(0.01)
@@ -145,10 +152,14 @@ class _MultiAssetFakeDLL:
                 flags |= TC_LAST_PACKET
             self._history_cb(asset, i, flags)
             time.sleep(self.emit_delay)
+        # TProgressCallback V2 (Q-DRIFT-05): 2 args (TAssetID, c_int) — note
+        # que progress usa TAssetID (struct V1, 3 fields), distinto do
+        # TConnectorAssetIdentifier do history callback.
+        progress_asset = TAssetID(ticker=ticker, bolsa=exchange, feed=0)
         for p in self.progress_sequence:
             if self._progress_cb is None:
                 break
-            self._progress_cb(ticker, exchange, 0, p)
+            self._progress_cb(progress_asset, p)
             time.sleep(self.emit_delay)
 
 

@@ -23,9 +23,9 @@ import pytest
 from data_downloader.dll import callbacks as cb_module
 from data_downloader.dll.types import (
     TC_LAST_PACKET,
-    SystemTime,
+    TAssetID,
     TConnectorAssetIdentifier,
-    TConnectorTrade,
+    TradeFields,
 )
 from data_downloader.orchestrator.circuit_breaker import (
     DEFAULT_FAILURE_THRESHOLD,
@@ -107,29 +107,28 @@ class _NLInjectingDLL:
         thread.start()
         return 0
 
-    def translate_trade(self, handle: int, struct: TConnectorTrade) -> int:
+    def translate_trade(self, handle: int) -> TradeFields | None:
+        """API V2 (Story 1.7b-followup) — ``(handle) -> TradeFields | None``."""
+        from datetime import UTC
+
         if handle >= len(self._current_specs):
-            return -1
+            return None
         spec = self._current_specs[handle]
-        st = SystemTime()
         ts: datetime = spec["timestamp"]
-        st.wYear = ts.year
-        st.wMonth = ts.month
-        st.wDay = ts.day
-        st.wDayOfWeek = 0
-        st.wHour = ts.hour
-        st.wMinute = ts.minute
-        st.wSecond = ts.second
-        st.wMilliseconds = ts.microsecond // 1000
-        struct.TradeDate = st
-        struct.TradeNumber = spec.get("trade_number", handle + 1)
-        struct.Price = spec["price"]
-        struct.Quantity = spec["quantity"]
-        struct.Volume = spec["price"] * spec["quantity"]
-        struct.BuyAgent = 0
-        struct.SellAgent = 0
-        struct.TradeType = 1
-        return 0
+        aware = ts.replace(tzinfo=UTC)
+        delta = aware - datetime(1970, 1, 1, tzinfo=UTC)
+        ns = (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+        return TradeFields(
+            version=0,
+            timestamp_ns=ns,
+            trade_number=spec.get("trade_number", handle + 1),
+            price=spec["price"],
+            quantity=spec["quantity"],
+            volume=spec["price"] * spec["quantity"],
+            buy_agent_id=0,
+            sell_agent_id=0,
+            trade_type=1,
+        )
 
     def _emit(self, ticker: str, specs: list[dict[str, Any]]) -> None:
         time.sleep(0.005)
@@ -141,9 +140,9 @@ class _NLInjectingDLL:
             flags = TC_LAST_PACKET if i == n - 1 else 0
             self._history_cb(asset, i, flags)
             time.sleep(0.001)
-        # Progress 100 ao fim
+        # Progress 100 ao fim — TProgressCallback V2 (Q-DRIFT-05): (TAssetID, c_int).
         if self._progress_cb is not None:
-            self._progress_cb(ticker, "F", 0, 100)
+            self._progress_cb(TAssetID(ticker=ticker, bolsa="F", feed=0), 100)
 
 
 def _spec(timestamp: datetime, trade_number: int = 1) -> dict[str, Any]:

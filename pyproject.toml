@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data_downloader"
-version = "1.0.7"
+version = "1.1.0"
 description = "Downloader de histórico de ativos via ProfitDLL — fundação para projetos futuros"
 requires-python = ">=3.12"
 authors = [{name = "Squad data-downloader"}]
@@ -50,6 +50,10 @@ test = [
     "hypothesis>=6.99",
     # Story 3.1+ — UI tests headless (Felix + Quinn).
     "pytest-qt>=4.4",
+    # v1.1.0 task #10 (Quinn QA 2026-05-11): timeout global por teste para
+    # impedir deadlock da suite (broker pool / mp.Queue.get sem deadline
+    # realista). timeout_method="thread" pois signal não funciona em Windows.
+    "pytest-timeout>=2.3",
 ]
 dev = [
     "ruff>=0.3.0",
@@ -121,6 +125,15 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 addopts = "-v --strict-markers"
 pythonpath = ["src"]
+# v1.1.0 task #10 (Quinn QA 2026-05-11): timeout global de 120s por teste.
+# Causa: tests/integration/test_multi_symbol_mock.py + test_multi_asset_mock.py
+# usam o WorkerPool real cujo submit_jobs() tem deadline = n_jobs*3600s; quando
+# um worker falha silenciosamente (mock DLL com signature drift), submit_jobs
+# bloqueia por horas → suite "pendura". timeout_method="thread" porque SIGALRM
+# não existe em Windows. Testes com subprocess de .exe (test_binary_exe) ou
+# multiprocessing real de spawn lento usam @pytest.mark.timeout(300) localmente.
+timeout = 120
+timeout_method = "thread"
 markers = [
     "smoke: smoke tests (rápidos, sem dependências externas)",
     "unit: unit tests",

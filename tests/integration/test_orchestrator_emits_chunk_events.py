@@ -1,13 +1,15 @@
 """Integration tests — Orchestrator emits ChunkCompletedEvent (Story 4.16).
 
-Owner: Dex (impl) | Pichau directive 2026-05-06.
+Owner: Dex (impl) | Pichau directive 2026-05-07 (supersede 2026-05-06).
+
+V1.1.0 política unificada: SEMPRE 1d/chunk para todos os ativos.
 
 Cobertura:
     - Listener recebe 1 ChunkCompletedEvent por chunk processado.
     - chunk_index é 0-based e cresce monotonicamente.
     - total_chunks reflete o plano (len(chunks)).
     - progress_pct cobre 0..100 (último chunk = 100%).
-    - chunk_strategy aplicado: WDOFUT → 5d/chunk, WINFUT → 1d/chunk.
+    - chunk_strategy aplicado: TODOS os ativos → 1d/chunk (V1.1.0+).
     - Listener exception NÃO derruba orchestrator (best-effort).
 
 Estratégia: monkey-patch ``Orchestrator._process_chunk`` para retornar
@@ -101,8 +103,9 @@ def test_chunk_listener_receives_one_event_per_chunk(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """2 semanas WDO → 2 chunks → listener recebe 2 events com indices 0,1."""
-    # 2026-03-02 (seg) a 2026-03-13 (sex) = 10 dias úteis = 2 chunks de 5d.
+    """V1.1.0+: 2 semanas WDO → 10 chunks (1d cada) → 10 events 0..9."""
+    # 2026-03-02 (seg) a 2026-03-13 (sex) = 10 dias úteis = 10 chunks de 1d
+    # (Pichau directive 2026-05-07 — política unificada).
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 13, 17, 0, 0)
     config = JobConfig(
@@ -120,15 +123,15 @@ def test_chunk_listener_receives_one_event_per_chunk(
     result = orch.run(config, chunk_listener=events.append)
 
     assert result.status == "completed"
-    assert len(events) == 2, f"expected 2 chunk events, got {len(events)}"
-    assert events[0].chunk_index == 0
-    assert events[1].chunk_index == 1
-    assert events[0].total_chunks == 2
-    assert events[1].total_chunks == 2
-    assert events[0].status == "success"
-    assert events[1].status == "success"
-    assert events[0].progress_pct == pytest.approx(50.0)
-    assert events[1].progress_pct == pytest.approx(100.0)
+    assert len(events) == 10, f"expected 10 chunk events, got {len(events)}"
+    # chunk_index 0-based monotonic.
+    for i, ev in enumerate(events):
+        assert ev.chunk_index == i
+        assert ev.total_chunks == 10
+        assert ev.status == "success"
+    assert events[0].progress_pct == pytest.approx(10.0)
+    assert events[4].progress_pct == pytest.approx(50.0)
+    assert events[-1].progress_pct == pytest.approx(100.0)
 
 
 @pytest.mark.integration
@@ -166,12 +169,13 @@ def test_chunk_listener_winfut_emits_per_day_chunk(
 
 
 @pytest.mark.integration
-def test_chunk_listener_wdofut_uses_5d_chunk(
+def test_chunk_listener_wdofut_uses_1d_chunk(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """Story 4.16: WDOFUT (chunk_days=5) → 1 evento para 5 dias úteis."""
-    # 5 dias úteis (1 semana cheia) = 1 chunk WDO.
+    """V1.1.0+ Pichau 2026-05-07: WDOFUT (chunk_days=1) → 5 events para
+    5 dias úteis (política unificada — supersede directive 2026-05-06)."""
+    # 5 dias úteis (1 semana cheia) = 5 chunks WDO de 1d cada.
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 6, 17, 0, 0)
     config = JobConfig(
@@ -188,12 +192,13 @@ def test_chunk_listener_wdofut_uses_5d_chunk(
     events: list[ChunkCompletedEvent] = []
     orch.run(config, chunk_listener=events.append)
 
-    # 5 dias / 5d-chunk = 1 chunk.
-    assert len(events) == 1
-    assert events[0].chunk_index == 0
-    assert events[0].total_chunks == 1
-    assert events[0].progress_pct == pytest.approx(100.0)
-    assert events[0].trades_count == 3  # patch retorna 3 em "success"
+    # 5 dias / 1d-chunk = 5 chunks (V1.1.0+ política unificada).
+    assert len(events) == 5
+    for i, ev in enumerate(events):
+        assert ev.chunk_index == i
+        assert ev.total_chunks == 5
+        assert ev.trades_count == 3  # patch retorna 3 em "success"
+    assert events[-1].progress_pct == pytest.approx(100.0)
 
 
 @pytest.mark.integration
@@ -222,6 +227,7 @@ def test_chunk_listener_exception_does_not_break_orchestrator(
         raise RuntimeError("listener boom")
 
     # Não deve levantar — orchestrator suprime exception do listener.
+    # V1.1.0+ política unificada: 5 dias úteis = 5 chunks de 1d.
     result = orch.run(config, chunk_listener=_broken_listener)
     assert result.status == "completed"
-    assert result.chunks_completed == 1
+    assert result.chunks_completed == 5

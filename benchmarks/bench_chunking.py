@@ -15,7 +15,11 @@ Target V1:
 Hipoteses (mock-based v1):
     H1: Tempo dominante é IO de Parquet write (ParquetWriter overhead
         confirmado em COUNCIL-02 / 1.4.5).
-    H2: Chunking de 5 dias úteis (WDO* via chunker.CHUNK_DAYS) é Pareto-otimo.
+    H2: Chunking de 1 dia útil uniforme (chunker.CHUNK_DAYS pós-ADR-023) é
+        Pareto-otimo. Histórico: este bench foi originalmente desenhado com
+        4 chunks * 5d uteis (legacy COUNCIL-05 §D4); valores numéricos abaixo
+        são preservados como baseline comparativo, mas a política runtime
+        atual é 1d uniform.
     H3: Reconnect ratio nao afeta tempo (mock = 0 reconnects).
 
 Output:
@@ -56,7 +60,9 @@ from data_downloader.storage.parquet_writer import ParquetWriter
 TARGET_TOTAL_MIN = 5.0
 SYMBOL = "WDOJ26"
 TRADES_PER_CHUNK = 50_000  # reduzido vs 500k/dia para manter bench sob alguns min em mock
-N_CHUNKS = 4  # 4 chunks de 5d uteis = ~20 dias = ~1 mes WDO
+N_CHUNKS = 4
+# 4 chunks — histórico/comparativo: originalmente 4x5d úteis (~1 mês WDO).
+# Runtime pós-ADR-023 usa 1d uniform; estrutura preservada como baseline.
 RUNS_PER_CONFIG = 3
 
 

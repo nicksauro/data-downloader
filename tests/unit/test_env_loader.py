@@ -164,7 +164,14 @@ def test_bootstrap_env_graceful_degrade_no_dotenv(
 
 
 def test_bootstrap_env_frozen_uses_exe_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Em frozen mode, ``<exe-dir>/.env`` é candidato (entre cwd e home)."""
+    """Em frozen mode, ``<exe-dir>/.env`` é candidato (entre cwd e home).
+
+    Wave 1 v1.1.0 (Aria — ADR-018): a detecção de frozen mode foi tightened
+    para exigir AMBOS ``sys.frozen=True`` E ``sys._MEIPASS`` setado (ver
+    :func:`data_downloader._internal.bundle_paths.is_frozen`). Test atualizado
+    para refletir o contrato real do PyInstaller (``--onedir``/``--onefile``
+    sempre setam os dois).
+    """
     cwd_dir = tmp_path / "cwd_no_env"
     cwd_dir.mkdir()
     exe_dir = tmp_path / "exe_dir"
@@ -184,6 +191,9 @@ def test_bootstrap_env_frozen_uses_exe_dir(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: cwd_dir))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home_dir))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    # ADR-021: frozen mode contract exige BOTH sys.frozen E sys._MEIPASS
+    # setados — espelha PyInstaller real.
+    monkeypatch.setattr(sys, "_MEIPASS", str(exe_dir), raising=False)
     fake_exe = exe_dir / "data_downloader.exe"
     monkeypatch.setattr(sys, "executable", str(fake_exe))
 

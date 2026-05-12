@@ -209,9 +209,7 @@ def render_human(result: VerificationResult) -> str:
         lines.append(" RESULTADO: OK — todos os companions presentes.")
     else:
         total_missing = (
-            len(result.missing_dlls)
-            + len(result.missing_dats)
-            + len(result.missing_dirs)
+            len(result.missing_dlls) + len(result.missing_dats) + len(result.missing_dirs)
         )
         lines.append(f" RESULTADO: FALHA — {total_missing} artefato(s) ausente(s).")
         lines.append("")
@@ -249,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = verify(args.path.resolve())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[ERRO INESPERADO] {exc}", file=sys.stderr)
         return 2
 

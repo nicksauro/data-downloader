@@ -225,16 +225,38 @@ def pyarrow_schema() -> pa.Schema:
 def validate_record(record: TradeRecord) -> None:
     """Valida invariantes simples de um trade antes de persistir.
 
-    Cobre:
+    Cobre IN-PYTHON (defesa em profundidade — primeira linha):
 
     - INT-4: ``price > 0`` e ``quantity > 0``.
+      Q-DRIFT-38 já filtra ``price <= 0`` upstream em ``IngestorThread``;
+      manter o check aqui é redundância barata + defesa contra rotas que
+      contornam a thread de ingestão.
     - INT-5: ``exchange in {'F', 'B'}``.
     - INT-3 (parcial): ``timestamp_ns > 0``.
 
-    Validações estruturais mais ricas (dedup, monotonicidade,
-    cross-partition) ficam em ``INTEGRITY.md`` §2 (queries DuckDB) e na
-    Story 2.1 (validators executáveis). Aqui é o filtro de "registro
-    obviamente quebrado" antes do writer.
+    Invariantes DELEGADOS ao schema SQLite + writer Parquet (intencionalmente
+    NÃO duplicados aqui — single source of truth):
+
+    - **I1 (Schema-as-Contract — INVARIANTS.md):** writer Parquet falha
+      LOUDLY com ``SchemaIntegrityError`` se ``TradeRecord`` traz chaves
+      fora do schema declarado. Implementado em ``parquet_writer.py``;
+      duplicar aqui exigiria conhecer o schema runtime e abriria drift.
+    - **UNIQUE / CHECK constraints do catálogo SQLite:** as tabelas
+      ``downloads`` (CHECK em ``status``), ``partitions`` (CHECK em
+      ``row_count >= 0`` e ``file_size_bytes > 0``), ``gaps`` (CHECK em
+      ``reason`` + PRIMARY KEY ``(symbol, gap_start, gap_end)``) e
+      ``contracts`` (CHECK em ``validation_source``) levantam
+      ``sqlite3.IntegrityError`` no commit. Validar essas regras em
+      Python (a) duplicaria o schema, (b) exigiria SELECT por record
+      para checagem de unicidade — caro e fonte de drift.
+    - **INT-1 / INT-2 (dedup, monotonicidade cross-partition):** ficam
+      em ``INTEGRITY.md`` §2 (queries DuckDB pos-write) e Story 2.1
+      (validators executáveis). Não são checados aqui porque exigem
+      visão multi-record / multi-partition.
+
+    Aqui é o filtro de "registro obviamente quebrado" antes do writer —
+    rejeita o que o schema/writer rejeitariam adiante de qualquer forma,
+    mas o faz cedo + com mensagem rica em ``IntegrityError.details``.
 
     Args:
         record: Trade candidato (``TradeRecord``).

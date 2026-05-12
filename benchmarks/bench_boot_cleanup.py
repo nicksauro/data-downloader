@@ -40,8 +40,8 @@ JSON schema:
 
 from __future__ import annotations
 
-import os  # noqa: F401  # used by commented-out skeleton body
 import json  # noqa: F401  # used by commented-out skeleton body
+import os  # noqa: F401  # used by commented-out skeleton body
 import statistics
 import time  # noqa: F401  # used by commented-out skeleton body
 from pathlib import Path

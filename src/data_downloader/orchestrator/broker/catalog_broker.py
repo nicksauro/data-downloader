@@ -161,7 +161,10 @@ class CatalogBroker:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
         self._thread.start()
-        _LOG.info("catalog_broker.started", extra={"name": self._name})
+        # NB: ``name`` é atributo reservado de ``logging.LogRecord`` — usar
+        # ``broker_name`` evita ``KeyError("Attempt to overwrite 'name' ...")``
+        # quando há handler stdlib configurado (v1.1.0 task #10 — Quinn QA).
+        _LOG.info("catalog_broker.started", extra={"broker_name": self._name})
 
     def stop(self, *, timeout: float = _DEFAULT_STOP_TIMEOUT_S) -> None:
         """Sinaliza graceful shutdown e aguarda thread terminar (AC1).
@@ -183,13 +186,13 @@ class CatalogBroker:
         if self._thread.is_alive():
             _LOG.warning(
                 "catalog_broker.stop_timeout",
-                extra={"name": self._name, "timeout": timeout},
+                extra={"broker_name": self._name, "timeout": timeout},
             )
         else:
             _LOG.info(
                 "catalog_broker.stopped",
                 extra={
-                    "name": self._name,
+                    "broker_name": self._name,
                     "applied": self._mutations_applied,
                     "rejected": self._mutations_rejected,
                     "errored": self._mutations_errored,

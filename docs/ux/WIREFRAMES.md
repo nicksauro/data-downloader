@@ -127,7 +127,7 @@ Implementação: Felix Story 3.2.
 │  │                                                          (Ctrl+D)        │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
-│  Atalhos: Ctrl+D iniciar  •  Ctrl+R repetir último  •  Ctrl+/ todos          │ ← footer dim
+│  Atalhos: Ctrl+D iniciar  •  Ctrl+C cancelar  •  Ctrl+/ todos                │ ← footer dim
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 

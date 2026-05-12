@@ -1,10 +1,12 @@
 """Unit tests — chunker equity detection (Story 4.2 AC1 + COUNCIL-29 D2).
 
+V1.1.0 Pichau directive (2026-05-07, supersede 2026-05-06):
+política unificada 1d/chunk para WDO/WIN/IND/DOL e equities.
+
 Cobertura:
 
 - ``is_equity_ticker`` regex ``^[A-Z]{4}\\d$`` casa tickers B3 canônicos.
-- ``chunk_days_for_symbol`` retorna 1 para equities, 5 para WDO/WIN/IND/DOL.
-- WDO/WIN/IND/DOL inalterados (regression check vs Story 1.7a).
+- ``chunk_days_for_symbol`` retorna 1 para todos os ativos (V1.1.0+).
 - Equity chunks têm 1 dia útil cada (regression vs `test_chunker.py`).
 """
 
@@ -77,19 +79,19 @@ def test_equity_ticker_regex_export() -> None:
 @pytest.mark.parametrize(
     ("symbol", "expected_days"),
     [
-        # WDO (Story 1.7a — preserved)
-        ("WDOJ26", 5),
-        ("WDOK26", 5),
-        ("WDOFUT", 5),
-        # WIN (Story 4.2 — trimestral; chunk=5 já em CHUNK_DAYS)
-        ("WINH26", 5),
-        ("WINM26", 5),
-        ("WINU26", 5),
-        ("WINZ26", 5),
-        ("WINZ27", 5),
-        # IND/DOL (Story 1.7a — preserved)
-        ("INDV26", 5),
-        ("DOLF26", 5),
+        # WDO (V1.1.0+ política unificada Pichau 2026-05-07)
+        ("WDOJ26", 1),
+        ("WDOK26", 1),
+        ("WDOFUT", 1),
+        # WIN (V1.1.0+ política unificada)
+        ("WINH26", 1),
+        ("WINM26", 1),
+        ("WINU26", 1),
+        ("WINZ26", 1),
+        ("WINZ27", 1),
+        # IND/DOL (V1.1.0+ política unificada)
+        ("INDV26", 1),
+        ("DOLF26", 1),
         # Equities (Story 4.2 — regex match → default_equity=1)
         ("PETR4", 1),
         ("VALE3", 1),
@@ -103,7 +105,7 @@ def test_equity_ticker_regex_export() -> None:
     ],
 )
 def test_chunk_days_for_symbol_full_matrix(symbol: str, expected_days: int) -> None:
-    """Matrix completa: futuros mini = 5, equity = 1, unknown = 1 (fallback)."""
+    """Matrix completa V1.1.0+: TODOS os ativos = 1d/chunk (Pichau 2026-05-07)."""
     assert chunk_days_for_symbol(symbol) == expected_days
 
 
@@ -114,10 +116,10 @@ def test_chunk_days_default_equity_constant() -> None:
 
 
 @pytest.mark.unit
-def test_chunk_days_table_has_win_5() -> None:
-    """Story 4.2 confirma: CHUNK_DAYS["WIN"] == 5."""
-    assert CHUNK_DAYS["WIN"] == 5
-    assert CHUNK_DAYS["WDO"] == 5
+def test_chunk_days_table_has_win_1() -> None:
+    """V1.1.0+ Pichau 2026-05-07: CHUNK_DAYS["WIN"] == CHUNK_DAYS["WDO"] == 1."""
+    assert CHUNK_DAYS["WIN"] == 1
+    assert CHUNK_DAYS["WDO"] == 1
 
 
 # =====================================================================
@@ -143,22 +145,29 @@ def test_chunk_date_range_equity_1_chunk_per_day(ticker: str) -> None:
 
 @pytest.mark.unit
 def test_chunk_date_range_winh26_5_business_days() -> None:
-    """Story 4.2 AC1 — WIN em 1 semana = 1 chunk de 5 dias úteis (Q12-E)."""
+    """V1.1.0+ Pichau 2026-05-07: WIN em 1 semana = 5 chunks de 1 dia útil."""
     chunks = chunk_date_range("WINH26", "F", date(2026, 3, 2), date(2026, 3, 6))
-    assert len(chunks) == 1
+    assert len(chunks) == 5
     assert chunks[0].start.date() == date(2026, 3, 2)
-    assert chunks[0].end.date() == date(2026, 3, 6)
+    assert chunks[-1].end.date() == date(2026, 3, 6)
     assert chunks[0].symbol == "WINH26"
     assert chunks[0].exchange == "F"
+    for c in chunks:
+        assert c.start.date() == c.end.date()
 
 
 @pytest.mark.unit
 def test_chunk_date_range_winz27_buffer_year() -> None:
-    """Story 4.2 — buffer 2027 funciona (sanity sobre seed completa)."""
+    """Story 4.2 — buffer 2027 funciona (sanity sobre seed completa).
+
+    V1.1.0+ política unificada: 5 dias úteis = 5 chunks de 1d.
+    """
     # 2027-09-15 (quarta) a 2027-09-21 (terça) = 5 dias úteis.
     chunks = chunk_date_range("WINZ27", "F", date(2027, 9, 15), date(2027, 9, 21))
-    assert len(chunks) == 1
+    assert len(chunks) == 5
     assert chunks[0].symbol == "WINZ27"
+    for c in chunks:
+        assert c.start.date() == c.end.date()
 
 
 @pytest.mark.unit

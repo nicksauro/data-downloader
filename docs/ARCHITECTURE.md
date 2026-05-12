@@ -45,7 +45,7 @@
                           ┌──────────────────────────┐
                           │ FILESYSTEM               │
                           │ data/history/{...}.parquet
-                          │ data/history/catalog.db  │
+                          │ data/_internal/catalog.db│
                           └──────────────────────────┘
 ```
 

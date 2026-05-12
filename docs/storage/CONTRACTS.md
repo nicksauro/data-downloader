@@ -84,7 +84,7 @@ Não escopados em V1 do seed. Adicionar via `*contract-add` quando necessário.
 ```yaml
 # docs/storage/CONTRACTS.md — seed inicial v1.0.0
 # Formato consumido por: storage/contracts/seed_loader.py::populate_contracts_from_seed()
-# Schema target: tabela `contracts` em data/history/catalog.db (ver SCHEMA.md §5.5)
+# Schema target: tabela `contracts` em data/_internal/catalog.db (ver SCHEMA.md §5.5)
 
 contracts:
 

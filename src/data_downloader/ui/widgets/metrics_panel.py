@@ -30,9 +30,10 @@ Padrões aplicados (D1/D2 COUNCIL-23):
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -131,33 +132,55 @@ class MetricsAdapter(QObject):
         if self._thread is not None:
             return
         self._thread = QThread()
+        self._thread.setObjectName("metrics-adapter")
         self.moveToThread(self._thread)
         self._thread.started.connect(self._on_thread_started)
         self._thread.start()
 
     def shutdown(self) -> None:
-        """Encerra worker thread limpo (D3 COUNCIL-23)."""
-        if self._thread is None:
+        """Encerra worker thread limpo (D3 COUNCIL-23).
+
+        O ``QTimer`` interno é criado em :meth:`_on_thread_started` e portanto
+        "pertence" à worker thread (parent = ``self``, que também vive lá após
+        ``moveToThread``). Se o adapter / timer forem destruídos a partir do
+        MainThread (GC no ``atexit`` quando o teste larga a referência sem
+        chamar ``shutdown()`` no caminho certo), o Qt no Windows emite
+        ``QObject::killTimer / ~QObject: Timers cannot be stopped from another
+        thread`` em loop e o processo aborta com exit code 9 — quebrando o
+        gating de CI por exit-code (task #14 v1.1.0).
+
+        Estratégia: pedimos à worker thread (síncrono, ``BlockingQueued``) que
+        pare o timer **e** mova o adapter de volta para a thread do
+        ``QCoreApplication`` — ``moveToThread`` precisa ser chamado a partir da
+        thread que possui o objeto, então isso só funciona de dentro da worker
+        thread. Depois disso o adapter (e o QTimer-filho) têm afinidade com o
+        MainThread e qualquer destruição posterior é limpa.
+        """
+        from PySide6.QtCore import QMetaObject
+
+        thread = self._thread
+        if thread is None:
             return
-        # Para timer no thread alvo via invokeMethod / direct stop.
-        try:
-            if self._timer is not None:
-                self._timer.stop()
-        except Exception:
-            pass
-        try:
-            self._thread.quit()
-            self._thread.wait(1500)
-        except Exception:
-            pass
-        finally:
-            self._thread = None
-            self._timer = None
+        # Roda o teardown (stop timer + moveToThread de volta) DENTRO da worker
+        # thread, síncrono. ``started`` cria o timer ANTES do ``exec()``, então
+        # quando este evento for processado o timer já existe — sem race.
+        with contextlib.suppress(Exception):
+            QMetaObject.invokeMethod(
+                self,
+                "_teardown_in_worker",
+                Qt.ConnectionType.BlockingQueuedConnection,
+            )
+        with contextlib.suppress(Exception):
+            thread.quit()
+            thread.wait(1500)
+        self._thread = None
+        self._timer = None
 
     # ------------------------------------------------------------------
     # Thread internals
     # ------------------------------------------------------------------
 
+    @Slot()
     def _on_thread_started(self) -> None:
         """Inicializa QTimer DENTRO da worker thread (parent = self)."""
         self._timer = QTimer(self)
@@ -166,6 +189,28 @@ class MetricsAdapter(QObject):
         self._timer.start()
         # Tick imediato para render inicial.
         self._poll_once()
+
+    @Slot()
+    def _teardown_in_worker(self) -> None:
+        """Para o QTimer e devolve o adapter ao MainThread — roda NA worker.
+
+        Chamado por :meth:`shutdown` via ``invokeMethod`` síncrono. Como esta
+        thread possui ``self`` (e o ``QTimer``-filho), aqui é seguro: parar o
+        timer e chamar ``self.moveToThread`` para a thread do
+        ``QCoreApplication``. Após isso o adapter e o timer têm afinidade com o
+        MainThread → destruição posterior (mesmo no ``atexit``) não dispara o
+        warning de cross-thread timer.
+        """
+        from PySide6.QtCore import QCoreApplication
+
+        timer = self._timer
+        if timer is not None:
+            with contextlib.suppress(Exception):
+                timer.stop()
+        with contextlib.suppress(Exception):
+            app = QCoreApplication.instance()
+            if app is not None:
+                self.moveToThread(app.thread())
 
     def _poll_once(self) -> None:
         """Coleta snapshot atual do exporter e emite signal."""
@@ -317,6 +362,7 @@ class MetricsPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    @Slot(object)
     def set_snapshot(self, snapshot: MetricsSnapshot) -> None:
         """Atualiza display com novo snapshot. Slot público (signal target)."""
         self._snapshot = snapshot

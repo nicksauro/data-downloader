@@ -164,11 +164,32 @@ a = Analysis(
     hiddenimports=[
         'pyarrow',
         'pyarrow.parquet',
+        'pyarrow.compute',  # storage/_vectorized.py + migrations parquet usam pc
         'duckdb',
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
-    ] + pyside6_hiddenimports,
+    ] + [
+        # Filtra hiddenimports do collect_all('PySide6') removendo módulos
+        # WebEngine/Multimedia/3D/etc que NÃO são importados pelo nosso UI.
+        # Pyro lean council 2026-05-06: BIG COUNCIL bundle audit identificou
+        # Qt6WebEngineCore.dll (195MB) + qtwebengine_devtools_resources (83MB)
+        # como top offenders num bundle 886MB. App usa apenas QtCore/Gui/Widgets
+        # (grep confirmado em src/ — zero referências a QtWebEngine/QtSql/QtCharts/
+        # QtMultimedia/Qt3D/QtQuick/QtQml/etc). Essa filtragem complementa o
+        # excludes= abaixo (pegamos hidden imports inflated pelo collect_all).
+        h for h in pyside6_hiddenimports
+        if not any(blk in h for blk in (
+            'QtWebEngine', 'QtWebChannel', 'QtWebView', 'QtWebSockets',
+            'QtMultimedia', 'QtPositioning', 'QtLocation',
+            'Qt3D', 'QtCharts', 'QtDataVisualization',
+            'QtBluetooth', 'QtNfc', 'QtSerialPort', 'QtSensors', 'QtSpeech',
+            'QtScxml', 'QtRemoteObjects', 'QtNetworkAuth',
+            'QtPdf', 'QtSql', 'QtTest', 'QtDesigner', 'QtHelp', 'QtUiTools',
+            'QtQuick', 'QtQml', 'QtQuickWidgets', 'QtQuickControls2',
+            'QtOpenGL', 'QtOpenGLWidgets',
+        ))
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -178,11 +199,151 @@ a = Analysis(
         'matplotlib',
         'scipy',
         'pandas',
+        # Pyro lean council 2026-05-06: PySide6 modules NOT used by UI.
+        # `collect_all('PySide6')` pulls every submodule by default. We grep'd
+        # src/ — UI usa SOMENTE QtCore/QtGui/QtWidgets. Excluir os pesados:
+        'PySide6.QtWebEngineCore',     # 195MB (Chromium)
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebEngineQuick',
+        'PySide6.QtWebChannel',
+        'PySide6.QtWebView',
+        'PySide6.QtWebSockets',
+        'PySide6.QtPositioning',
+        'PySide6.QtLocation',
+        'PySide6.QtMultimedia',
+        'PySide6.QtMultimediaWidgets',
+        'PySide6.Qt3DCore',
+        'PySide6.Qt3DRender',
+        'PySide6.Qt3DInput',
+        'PySide6.Qt3DLogic',
+        'PySide6.Qt3DAnimation',
+        'PySide6.Qt3DExtras',
+        'PySide6.QtCharts',
+        'PySide6.QtDataVisualization',
+        'PySide6.QtBluetooth',
+        'PySide6.QtNfc',
+        'PySide6.QtSerialPort',
+        'PySide6.QtSensors',
+        'PySide6.QtSpeech',
+        'PySide6.QtScxml',
+        'PySide6.QtRemoteObjects',
+        'PySide6.QtNetworkAuth',
+        'PySide6.QtPdf',
+        'PySide6.QtPdfWidgets',
+        # Catalog usa sqlite3 stdlib direto (não QSqlDatabase) — grep confirmado
+        'PySide6.QtSql',
+        'PySide6.QtTest',
+        'PySide6.QtDesigner',
+        'PySide6.QtHelp',
+        'PySide6.QtUiTools',
+        # QtQuick/QtQml: framework declarativo QML — UI é puramente QtWidgets
+        'PySide6.QtQuick',
+        'PySide6.QtQuickWidgets',
+        'PySide6.QtQuickControls2',
+        'PySide6.QtQml',
+        'PySide6.QtQmlModels',
+        'PySide6.QtQmlWorkerScript',
+        # OpenGL: nenhum widget custom de GPU — QPainter padrão é suficiente
+        'PySide6.QtOpenGL',
+        'PySide6.QtOpenGLWidgets',
+        # Stdlib não usada (legacy build artifacts)
+        # NOTA: 'distutils' NÃO pode entrar aqui — PyInstaller tem
+        # pre_safe_import hook (hook-distutils.py) que faz alias_module e
+        # falha se o target estiver excluído (ValueError "already imported as
+        # ExcludedModule"). Pyro 2026-05-06 confirmou empiricamente.
+        'unittest',
+        'pydoc_data',
+        'lib2to3',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+)
+
+# -----------------------------------------------------------------------------
+# Post-Analysis filter — strip Qt modules NOT in the lean allow-list
+# -----------------------------------------------------------------------------
+# Pyro lean council 2026-05-06: `excludes=` em Analysis() ataca *imports*
+# Python (módulos .py/.pyd), mas `collect_all('PySide6')` já populou
+# `pyside6_binaries` e `pyside6_datas` com TODAS as DLLs/recursos Qt — incluindo
+# WebEngine (195MB), QtQuick, QtMultimedia, etc. PyInstaller não revisita
+# essa lista após excludes; precisamos filtrar manualmente as listas resolvidas
+# em `a.binaries` e `a.datas`.
+#
+# Estratégia: substring match case-insensitive contra os patterns abaixo.
+# Lista derivada do bundle audit (top offenders 886MB → target <600MB):
+#   - Qt6WebEngineCore.dll, qtwebengine_devtools_resources.pak: 278MB
+#   - Qt6Quick.dll, Qt6Qml.dll, Qt6QuickControls2.dll: ~12MB
+#   - Qt6Multimedia*.dll, avcodec/avformat/avutil/swresample/swscale: ~15-30MB
+#   - Qt6Designer.dll: ~5MB
+#   - QtOpenGL.pyd, opengl32sw.dll: ~28MB (NB: opengl32sw é fallback genérico —
+#     QtWidgets ainda funciona com OpenGL nativo do Windows. Removível.)
+#   - icudtl.dat (~10MB): ICU é DEPENDÊNCIA do QtCore — NÃO REMOVER. Não está
+#     na lista abaixo intencionalmente.
+#
+# DROPS são case-insensitive substring matches contra o nome do destino
+# (primeiro elemento da tupla). Só batem em arquivos sob `PySide6/`.
+_LEAN_DROP_PATTERNS = (
+    # WebEngine — top offender (~278MB combined)
+    'qtwebengine', 'webengine', 'qt6webengine',
+    'qtwebchannel', 'qtwebview', 'qtwebsockets',
+    # Multimedia + codec stack (avcodec/avformat/avutil/swresample/swscale)
+    'qt6multimedia', 'qtmultimedia',
+    'avcodec-', 'avformat-', 'avutil-', 'swresample-', 'swscale-',
+    # 3D / Charts / DataVis (não usados)
+    'qt63dcore', 'qt63drender', 'qt63dinput', 'qt63dlogic',
+    'qt63danimation', 'qt63dextras', 'qt63dquick',
+    'qt6charts', 'qt6datavisualization',
+    # Bluetooth / Nfc / Serial / Sensors / Speech / Positioning / Location
+    'qt6bluetooth', 'qt6nfc', 'qt6serialport', 'qt6sensors',
+    'qt6texttospeech', 'qt6positioning', 'qt6location',
+    # Scxml / RemoteObjects / NetworkAuth / Pdf
+    'qt6scxml', 'qt6remoteobjects', 'qt6networkauth',
+    'qt6pdf', 'qtpdf',
+    # Sql / Test / Designer / Help / UiTools — none used (sqlite3 stdlib direct)
+    'qt6sql', 'qt6test', 'qt6designer', 'qt6help', 'qt6uitools',
+    # Quick / Qml stack — Widgets-only UI, no QML
+    'qt6quick', 'qt6qml', 'qt6qmlmodels', 'qt6qmlworkerscript',
+    'qt6quickcontrols2', 'qt6quickwidgets', 'qt6quicktemplates2',
+    'qt6quickdialogs', 'qt6quicklayouts', 'qt6quickshapes',
+    'qt6quickparticles', 'qt6quicktest',
+    # OpenGL software renderer — fallback only; Win nativo OpenGL é suficiente
+    'opengl32sw',
+    # Translations e qml folder do collect_all
+    'pyside6/qml/', 'pyside6\\qml\\',
+    'pyside6/translations/qtwebengine',
+)
+
+
+def _is_pyside_path(name):
+    n = name.lower().replace('\\', '/')
+    return n.startswith('pyside6/') or '/pyside6/' in n
+
+
+def _drop_lean(items):
+    """Filter out Qt modules not used by the app. Returns same shape (TOC)."""
+    filtered = []
+    for item in items:
+        # PyInstaller TOCs are 3-tuples (name, src, kind) but some hooks
+        # produce 2-tuples. Normalize for safety.
+        name = item[0]
+        nl = name.lower()
+        # Only filter under PySide6/ to avoid false positives in other deps
+        if _is_pyside_path(name) and any(p in nl for p in _LEAN_DROP_PATTERNS):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+_b_before = len(a.binaries)
+_d_before = len(a.datas)
+a.binaries = _drop_lean(a.binaries)
+a.datas = _drop_lean(a.datas)
+print(
+    f"[lean-filter] binaries: {_b_before} -> {len(a.binaries)} "
+    f"({_b_before - len(a.binaries)} dropped); "
+    f"datas: {_d_before} -> {len(a.datas)} ({_d_before - len(a.datas)} dropped)"
 )
 
 # -----------------------------------------------------------------------------

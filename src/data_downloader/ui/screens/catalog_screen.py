@@ -61,6 +61,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -361,6 +362,11 @@ class CatalogScreen(QWidget):
         self._toast = self._build_toast()
         self._toast.setParent(self)
         self._toast.hide()
+        # Timer parented em self que esconde o toast (não órfão — evita
+        # ``QTimer.singleShot`` disparando após destruição da screen).
+        self._toast_hide_timer = QTimer(self)
+        self._toast_hide_timer.setSingleShot(True)
+        self._toast_hide_timer.timeout.connect(self._toast.hide)
 
         # Atalhos.
         self._register_shortcuts()
@@ -691,6 +697,7 @@ class CatalogScreen(QWidget):
     # Slots — sinais do adapter (Qt.QueuedConnection — MainThread)
     # ------------------------------------------------------------------
 
+    @Slot(object)
     def _on_partitions_loaded(self, partitions: object) -> None:
         partitions_list = list(partitions or ())  # type: ignore[arg-type]
         self._model.set_partitions(partitions_list)
@@ -712,6 +719,7 @@ class CatalogScreen(QWidget):
             self._set_state(STATE_NORMAL)
             self._update_post_filter_state()
 
+    @Slot(str)
     def _on_deleted(self, rel_path: str) -> None:
         # Encontra symbol pelo path para microcopy do toast.
         symbol = ""
@@ -728,6 +736,7 @@ class CatalogScreen(QWidget):
         )
         self.refresh()
 
+    @Slot(str, bool)
     def _on_validated(self, rel_path: str, ok: bool) -> None:
         if ok:
             self._show_toast(
@@ -742,6 +751,7 @@ class CatalogScreen(QWidget):
                 duration_ms=6000,
             )
 
+    @Slot(object)
     def _on_reconciled(self, report: object) -> None:
         n_added = len(getattr(report, "auto_corrected_paths", ()) or ())
         n_removed = 0  # reconcile não remove (drift B só reporta).
@@ -752,6 +762,7 @@ class CatalogScreen(QWidget):
         )
         self.refresh()
 
+    @Slot(object)
     def _on_error(self, exc: object) -> None:
         title = ""
         detail = str(exc)
@@ -828,7 +839,7 @@ class CatalogScreen(QWidget):
         self._toast.move(max(margin, x), y)
         self._toast.show()
         self._toast.raise_()
-        QTimer.singleShot(duration_ms, self._toast.hide)
+        self._toast_hide_timer.start(duration_ms)
 
     # ------------------------------------------------------------------
     # Lifecycle

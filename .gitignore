@@ -127,6 +127,28 @@ logs/
 .qa-*-log-path.txt
 .v*-validation-log.txt
 
+# Runtime artifacts dos smoke scripts (run_smoke_q-drift-*.ps1)
+tests/smoke/.last_*.json
+tests/smoke/.last_*.log
+
+# Debug pytest stdout captures — não release artifacts
+# (integ_out.txt, prop_out.txt, pytest-out.txt e variantes geradas
+# ad-hoc por desenvolvedores rodando `pytest > foo_out.txt`)
+integ_out.txt
+prop_out.txt
+pytest-out.txt
+*_out.txt
+
+# QA gate artifacts transientes (junit-xml + stdout captures de pytest/ruff/mypy).
+# Regeneráveis; o estado é documentado nos .md de docs/qa/ (V1.1.0-FIX-PLAN,
+# KNOWN-TEST-FAILURES, RELEASE-GATE-*). Os junit-xml às vezes contêm strings de
+# teste com alta entropia que disparam detect-secrets — não vale versionar.
+docs/qa/junit-*.xml
+docs/qa/pytest-*.txt
+docs/qa/mypy-*.txt
+docs/qa/ruff-*.txt
+docs/qa/task[0-9]*-*.txt
+
 # dist-test/ — extracted ZIP de release validation (não fonte)
 dist-test/
 

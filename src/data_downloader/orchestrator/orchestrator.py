@@ -721,7 +721,7 @@ class Orchestrator:
         1. ``config.chunk_days_map`` explícito → usado direto (testes/avançado).
         2. Caso contrário → constrói ``{contract_code: get_chunk_days(contract_code)}``,
            o que garante que o chunker use exatamente o N do strategy
-           (Pichau directive: WINFUT=1, demais=5).
+           (Política unificada V1.1.0+ — ADR-023: TODOS=1).
 
         O map de 1 entrada funciona porque ``chunker.chunk_days_for_symbol``
         faz match por ``startswith`` — ``contract_code.startswith(contract_code)``
@@ -740,9 +740,9 @@ class Orchestrator:
         """Calcula sub-chunks (granularidade dias úteis) para o run.
 
         Caminho **fresh:** chunker quebra ``[config.start, config.end]`` em
-        sub-intervalos. Story 4.16 (Pichau directive 2026-05-06):
-        ``chunk_days_map`` é derivado de :func:`get_chunk_days` — WINFUT=1,
-        demais=5 — sobrescrevendo o legacy 1d/equity. Se o caller passou
+        sub-intervalos. Story 4.16 + ADR-023 (V1.1.0+):
+        ``chunk_days_map`` é derivado de :func:`get_chunk_days` — política
+        unificada TODOS=1 dia útil. Se o caller passou
         ``config.chunk_days_map`` explicitamente, este override do caller
         prevalece (utilizado em testes que precisam isolar a estratégia).
 

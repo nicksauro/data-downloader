@@ -3,10 +3,74 @@
 > Downloader de histórico de ativos via **ProfitDLL** (Nelogica).
 > Fundação para todos os projetos de quant/backtest/research que vierem.
 
-**Versão:** 0.1.0 (em construção — Epic 1: Foundation)
-**Status:** planejamento concluído; implementação a iniciar
+**Versão:** 1.1.0 (single solid release — consolidação v1.0.0 → v1.0.7)
+**Status:** Em validação BIG COUNCIL round 2 — ver [`docs/qa/V1.1.0-FIX-PLAN.md`](docs/qa/V1.1.0-FIX-PLAN.md)
 **Plataforma:** Windows x64 (a DLL é Windows-only)
 **Squad:** 10 agentes — vide `agents/`
+
+---
+
+## ✨ What's new in v1.1.0
+
+- 🎯 **Single solid release** — 8 hotfixes (v1.0.0 → v1.0.7) consolidados em um único v1.1.0 estável + sweep BIG COUNCIL.
+- 📦 **Bundle 55,6% menor** (886MB → 387.5MB) sem perder funcionalidade — PySide6 lean spec drop Qt6WebEngineCore + companions.
+- ✅ **Primeira release com testes subprocess do `.exe` real** — flag `--healthcheck` + `tests/integration/test_binary_exe.py`.
+- 🔧 **Q-DRIFT-37 mitigated** — `chunk_strategy=1d` para WINFUT previne queue overflow no callback DLL.
+- 🎨 **UI polish** — `CheatSheetDialog` (Ctrl+/), onboarding banner, deep-link "Abrir Settings", `@Slot` cross-thread em `CatalogScreen` + `MetricsAdapter`.
+- 🏛️ **Architecture** — ADR-018 (frozen-mode boundary) e ADR-021 (sys.frozen contract) ratificados; `bundle_paths.py` central.
+
+Detalhes completos: [`CHANGELOG.md`](CHANGELOG.md) e [`docs/release-notes/v1.1.0-draft.md`](docs/release-notes/v1.1.0-draft.md).
+
+---
+
+## 📥 Install (v1.1.0)
+
+A v1.1.0 é distribuída via **Setup.exe** (InnoSetup, não-assinado na v1.1.0 — code signing planejado para v1.2.0). Baixe da release page:
+
+```
+https://github.com/nicksauro/data-downloader/releases/latest
+```
+
+Execute `Setup.exe` e siga o wizard. Caminho default de instalação:
+
+```
+%LOCALAPPDATA%\Programs\data-downloader\
+```
+
+Após instalação, a `ProfitDLL.dll` companion fica em
+`%LOCALAPPDATA%\Programs\data-downloader\profitdll\DLLs\Win64\` e os
+secrets de credenciais Nelogica em `~\.data-downloader\.env` (perfil de
+usuário, fora da pasta de instalação — preservado em upgrades).
+
+Detalhes (SmartScreen workaround, exclusão Defender, troubleshooting):
+[`docs/release/INSTALL.md`](docs/release/INSTALL.md).
+
+---
+
+## 🚀 Quick start (v1.1.0)
+
+```powershell
+# 1. Healthcheck — confirma que a instalação está saudável (imports + structlog OK)
+data_downloader-cli.exe --healthcheck
+# exit 0 = OK; exit 1 = ver mensagem de erro
+
+# 2. Abrir UI
+data_downloader.exe
+
+# 3. Smoke download (CLI) — 5 dias úteis WDOFUT, 1-3 minutos
+data_downloader-cli.exe download --symbol WDOFUT --start 2026-04-28 --end 2026-05-02
+
+# 4. Verificar versão
+data_downloader-cli.exe --version
+```
+
+Configure credenciais Nelogica antes do primeiro download — abra a UI e siga o onboarding banner ("Configurar Credenciais"), ou edite `~\.data-downloader\.env` manualmente. O arquivo tem três entradas no formato `NOME=valor` (uma por linha, sem aspas):
+
+- `PROFITDLL_KEY` — sua chave de licença Nelogica
+- `PROFITDLL_USER` — seu usuário ProfitChart
+- `PROFITDLL_PASS` — sua senha ProfitChart
+
+> **Nunca** commite o `.env` — ele fica fora do repositório por padrão (`.gitignore`).
 
 ---
 
@@ -240,4 +304,4 @@ A definir.
 
 *— Squad data-downloader, 2026-05-03 — fundação para o que vem*
 
-<!-- LATEST-RELEASE --> Latest release: [v1.0.7](https://github.com/nicksauro/data-downloader/releases/tag/v1.0.7)
+<!-- LATEST-RELEASE --> Latest release: [v1.0.7](https://github.com/nicksauro/data-downloader/releases/tag/v1.0.7) — v1.1.0 em validação round 2 (ver [`docs/qa/V1.1.0-FIX-PLAN.md`](docs/qa/V1.1.0-FIX-PLAN.md)). Badge será atualizado para v1.1.0 após tag real.

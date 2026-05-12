@@ -8,14 +8,22 @@ Contrato pre-commit:
 
 Bloqueia (exit 1) quando:
     - Qualquer arquivo passado contém `print(` (Python) ou `console.log` (JS/TS)
-      em linhas NÃO comentadas e NÃO marcadas com `# noqa: print` / `// noqa: print`.
+      em linhas NÃO comentadas e NÃO marcadas com `# print-allowed: <reason>` /
+      `// print-allowed: <reason>` (ou o legado `# noqa: print`).
 
 Justificativa:
     Hot path performance (R21) + ADR-010 (structlog obrigatório). `print()` em
     src/ ignora structured logging, perde contexto e quebra benchmarks.
 
+Wave 1 P0 (2026-05-06): preferimos ``# print-allowed: <reason>`` ao invés de
+``# noqa: print`` porque ``print`` não é um código ruff válido — quando T20x
+está habilitado no select de ruff, marcadores ``# noqa: print`` viram warnings
+"invalid noqa directive". O pragma ``# print-allowed`` é semanticamente claro
+e ignorado por ruff.
+
 Owner: Gage (devops). Story 0.2.
 """
+
 from __future__ import annotations
 
 import re
@@ -24,7 +32,12 @@ from pathlib import Path
 
 PY_PATTERN = re.compile(r"(?<![\w.])print\s*\(")
 JS_PATTERN = re.compile(r"console\s*\.\s*log\s*\(")
-NOQA_MARKER = re.compile(r"#\s*noqa:\s*print|//\s*noqa:\s*print", re.IGNORECASE)
+# Reconhece tanto o pragma novo ("# print-allowed: <reason>") quanto o legado
+# (`#` + `noqa:` + `print`). Mantemos compat para não quebrar outras call sites.
+NOQA_MARKER = re.compile(
+    r"#\s*print-allowed\b|//\s*print-allowed\b|#\s*noqa:\s*print|//\s*noqa:\s*print",
+    re.IGNORECASE,
+)
 
 
 def scan_file(path: Path) -> list[tuple[int, str]]:
@@ -59,11 +72,18 @@ def main(argv: list[str]) -> int:
         findings = scan_file(f)
         if findings:
             total_violations += len(findings)
-            print(f"BLOCKED: {f} has print()/console.log (R21 / ADR-010 structlog):", file=sys.stderr)
+            print(
+                f"BLOCKED: {f} has print()/console.log (R21 / ADR-010 structlog):",
+                file=sys.stderr,
+            )
             for lineno, line in findings:
                 print(f"  L{lineno}: {line}", file=sys.stderr)
     if total_violations:
-        print(f"  Total violations: {total_violations}. Use structlog or add `# noqa: print`.", file=sys.stderr)
+        print(
+            f"  Total violations: {total_violations}. "
+            "Use structlog or add `# print-allowed: <reason>`.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

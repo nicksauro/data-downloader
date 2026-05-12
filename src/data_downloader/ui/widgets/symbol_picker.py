@@ -3,9 +3,10 @@
 Owner: Felix (frontend-dev) | Design: Uma (ux-design-expert).
 
 ``QComboBox`` editável com autocomplete e cache do último símbolo usado em
-``~/.data_downloader/cache/last_symbol.txt``. Resolução do contrato vigente
-(via :func:`vigent_contract`) é oportunística — fica em modo "stub" se a
-DLL/catálogo não estiver disponível, sem bloquear a UI.
+``~/.data-downloader/cache/last_symbol.txt`` (path canônico — hífen, alinhado
+a :func:`data_downloader._internal.bundle_paths.user_data_dir`). Resolução
+do contrato vigente (via :func:`vigent_contract`) é oportunística — fica em
+modo "stub" se a DLL/catálogo não estiver disponível, sem bloquear a UI.
 
 Microcopy IDs (R17 — Uma):
     - ``LBL_SYMBOL`` (label)
@@ -16,17 +17,43 @@ Microcopy IDs (R17 — Uma):
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+from data_downloader._internal.bundle_paths import user_data_dir
 from data_downloader.ui.microcopy_loader import format_msg
 
 __all__ = ["SymbolPicker"]
 
+_log = logging.getLogger("data_downloader.ui.widgets.symbol_picker")
 
-_CACHE_DIR = Path.home() / ".data_downloader" / "cache"
+# Canonical path uses HYPHEN (``~/.data-downloader/``) — alinhado a
+# :func:`bundle_paths.user_data_dir`. Pré-fix este módulo usava
+# UNDERSCORE (``~/.data_downloader/``), criando diretório fantasma.
+# Migração silenciosa best-effort em ``_migrate_legacy_cache``.
+_CACHE_DIR = user_data_dir() / "cache"
 _CACHE_FILE = _CACHE_DIR / "last_symbol.txt"
+
+_LEGACY_CACHE_DIR = Path.home() / ".data_downloader" / "cache"
+_LEGACY_CACHE_FILE = _LEGACY_CACHE_DIR / "last_symbol.txt"
+
+
+def _migrate_legacy_cache() -> None:
+    """Migra ``~/.data_downloader/cache/last_symbol.txt`` (underscore legacy)
+    para o path canônico (hífen) se este último ainda não existir.
+
+    Best-effort: qualquer ``OSError`` é apenas logado em ``warning`` e
+    suprimido — UX cache é opcional, nunca pode quebrar a UI.
+    """
+    try:
+        if _LEGACY_CACHE_FILE.exists() and not _CACHE_FILE.exists():
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            _CACHE_FILE.write_bytes(_LEGACY_CACHE_FILE.read_bytes())
+    except OSError as exc:
+        _log.warning("symbol_picker cache legacy migration skipped: %s", exc)
+
 
 # Story 4.6 (UX simplification, Pichau directive 2026-05-05):
 # Sugestões alinhadas a Q-DRIFT-32 ("SEMPRE usar continuous futures").
@@ -136,7 +163,7 @@ class SymbolPicker(QWidget):
         self._hint.setText(text)
 
     def save_to_cache(self) -> None:
-        """Persiste o valor atual em ``~/.data_downloader/cache/last_symbol.txt``."""
+        """Persiste o valor atual em ``~/.data-downloader/cache/last_symbol.txt``."""
         try:
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
             _CACHE_FILE.write_text(self.value(), encoding="utf-8")
@@ -149,6 +176,7 @@ class SymbolPicker(QWidget):
     # ------------------------------------------------------------------
 
     def _load_from_cache(self) -> str:
+        _migrate_legacy_cache()
         try:
             if _CACHE_FILE.exists():
                 return _CACHE_FILE.read_text(encoding="utf-8").strip().upper()

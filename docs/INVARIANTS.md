@@ -253,6 +253,57 @@ Tooling DEVE rodar os seguintes checks em CI/CD para enforçar invariantes:
 
 ---
 
+## Tables — Catálogo SQLite (clarificação Sol Wave 2)
+
+**Origem da confusão:** v1.1.0 master plan (`docs/stories/v1.1.0-master-plan.md` L25/L53) cita "tabela `dll_companions` purpose vs `dll_session_log`" como concern Sol. Auditoria 2026-05-06 confirmou: **NENHUMA das duas é tabela SQLite.** Esta seção encerra a ambiguidade.
+
+### Tabelas reais (catálogo SQLite — `data/_internal/catalog.db`)
+
+> v1.0.x usava `data/history/catalog.db` — migração silenciosa em `Catalog.__post_init__` (ver ADR-024 e `_migrate_legacy_catalog_path` em `storage/catalog.py:288`).
+
+Fonte canônica: `src/data_downloader/storage/catalog.py` (DDL `_DDL_V1_0_0` + `_DDL_V1_1_0_DELTAS`). Se você editou o DDL, atualize esta seção.
+
+| Tabela | Purpose | Lifecycle | CHECK / UNIQUE |
+|--------|---------|-----------|----------------|
+| `_schema_meta` | KV store de metadata (`catalog_version`, `parquet_schema_min_supported`, `created_at`) | UPSERT por `key` | PK `key` |
+| `downloads` | Job tracking — uma linha por requisição de download | INSERT no register, UPDATE per progress | CHECK `status IN (pending, in_progress, completed, failed, partial, cancelled)` |
+| `partitions` | Catálogo de Parquet files mensais | UPSERT por `partition_path` | CHECK `month BETWEEN 1 AND 12`, `row_count >= 0`, `file_size_bytes > 0`; FK `job_id → downloads` |
+| `gaps` | Janelas sem trades (replay candidates) | UPSERT por triple-key | PK `(symbol, gap_start, gap_end)`; CHECK `reason IN (no_trades, holiday, weekend, failed_chunk, unknown, outside_vigency)` |
+| `contracts` | Vigência de contratos (root + code) | UPSERT por `(symbol_root, contract_code)` | PK + CHECK `validation_source IN (hypothesized, nelogica_official, dll_probe, b3_calendar, manual)` |
+| `_checksum_cache` | Cache de SHA256 indexado por `(size, mtime_ns)` (INTEGRITY.md §3) | UPSERT, CASCADE delete via `partitions` FK | PK `partition_path`; FK CASCADE |
+| `_pending_commits` | Two-phase commit emulation (AC13) — pending writes | INSERT na fase 1, DELETE na fase 3 | PK `partition_path`; FK `job_id → downloads` |
+| `_migration_log` | Checkpoint resumível do framework de migration v1.1.0 | INSERT per run/partition pair | PK `(run_id, partition_path)`; CHECK `status IN (pending, migrated, rolled_back, failed)` |
+
+### `dll_companions` — NÃO é tabela
+
+`dll_companions` é o **nome do verificador runtime de companion files do .dll** (DLLs/recursos siblings que `ProfitDLL.dll` requer no diretório):
+
+- Implementado em `scripts/verify-dll-companions.py` (carregado dinamicamente em `src/data_downloader/dll/wrapper.py::_load_verify_dll_companions`).
+- Função: `verify_dll_companions(dll_path) -> list[str]` — retorna lista de filenames esperados que estão **ausentes** no diretório do .dll.
+- Chamado **ANTES** de `WinDLL(path)` (Story 1.2 AC12) e por `aiox doctor` / `cli.py::_check_dll_companions` (`src/data_downloader/cli.py` L1704).
+- Sem persistência. Nenhum SQLite envolvido. Resultado é log/exit-code, não estado.
+
+Ref: `docs/stories/1.2.story.md` L116, `docs/dll/PROFITDLL_KNOWLEDGE.md` L374, `docs/adr/ADR-018-frozen-mode-boundary.md` L24.
+
+### `dll_session_log` — NÃO existe
+
+Exaustivamente buscado em todo o repositório (2026-05-06) — **`dll_session_log` não existe**: nem como tabela SQLite, nem como módulo Python, nem como spec em ADR/story. A única menção é o próprio brief Wave 2 que motivou esta clarificação (master plan L53). Provavelmente sintetizado por engano de "dll_companions" + alguma noção genérica de "session log".
+
+Telemetria de sessão DLL (Q-AMB-02, license_status, dll_version per init) hoje é serviço de logs estruturado (`src/data_downloader/observability/logging_config.py` + `metrics/counters.py`), não tabela SQLite.
+
+### Decisão
+
+**Não há refactor pendente** — o concern Sol Wave 2 era de documentação, não de código. Esta seção é o entregável.
+
+Se no futuro precisar persistir telemetria DLL em SQLite (Story 2.x), criar `dll_sessions` (plural, append-only) com:
+- `session_id` (PK), `started_at`, `ended_at`, `dll_version`, `license_status`, `init_args_hash`.
+- WORM (NEVER UPDATE) — append-only.
+- ADR formal + bump `CATALOG_VERSION` (atualmente 1.1.0).
+
+Não faça isso para v1.1.0.
+
+---
+
 ## Manutenção
 
 - **Adicionar invariante:** edit aqui + ADR formal Aria + atualizar CI checks recomendados.

@@ -42,6 +42,18 @@ def download_screen(qtbot, monkeypatch):
     qtbot.addWidget(screen)
     screen.show()
     yield screen
+    # Alguns testes (ex.: transition_to_loading) disparam um download real
+    # via ``adapter.start`` que entra num loop bloqueante na worker thread —
+    # se a screen for destruída com a thread ocupada, o Qt no Windows aborta
+    # com ``QThread: Destroyed while thread 'download-adapter' is still
+    # running'' (task #14 v1.1.0). Cancela explicitamente antes do shutdown
+    # e dá ao worker uma chance de drenar.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        screen._adapter.cancel()
+    with contextlib.suppress(Exception):
+        qtbot.wait(150)
     screen._adapter.shutdown()
 
 
@@ -100,8 +112,30 @@ def test_clicking_download_with_invalid_symbol_shows_error_toast(download_screen
     assert download_screen._toast.isVisible()
 
 
-def test_clicking_download_with_valid_inputs_transitions_to_loading(download_screen, qtbot):
+def test_clicking_download_with_valid_inputs_transitions_to_loading(
+    download_screen, qtbot, monkeypatch
+):
     """Form válido + click → estado=loading + signal de start emitido."""
+    # Mock ``public_api.download`` — sem isto, o worker QThread do adapter
+    # entra num download real (sem DLL/.env → loop de retry/timeout) que não
+    # respeita cancel a tempo, vazando a ``QThread`` no teardown e abortando
+    # o processo no Windows (task #14 v1.1.0). O que este teste valida é o
+    # dispatch form→adapter, não o download em si.
+    import data_downloader.public_api as _public_api
+
+    class _FakeHandle:
+        def __iter__(self):
+            return iter(())  # download "termina" imediatamente, sem progresso
+
+        def result(self):
+            return None
+
+        def cancel(self, timeout: float = 0.0) -> None:
+            _ = timeout
+            return None
+
+    monkeypatch.setattr(_public_api, "download", lambda *a, **k: _FakeHandle(), raising=False)
+
     # Spy no signal interno _request_start (emitido antes do
     # cross-thread dispatch para adapter.start).
     captured = []
@@ -239,7 +273,9 @@ def test_finished_signal_shows_success_toast(download_screen, qtbot):
     download_screen._on_finished(result)
     qtbot.wait(50)
 
-    assert download_screen.current_state() == "normal"
+    # Wave A (Felix v1.0.8): _on_finished agora vai para STATE_SUCCESS
+    # (card persistente "ta feio quando baixou" com CTA), não STATE_NORMAL.
+    assert download_screen.current_state() == "success"
     assert not download_screen.is_download_active()
     assert download_screen._toast.isVisible()
     assert "WDOJ26" in download_screen._toast_text.text()

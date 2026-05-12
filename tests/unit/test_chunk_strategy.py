@@ -1,12 +1,15 @@
-"""Unit tests — orchestrator.chunk_strategy (Story 4.16, Pichau 2026-05-06).
+"""Unit tests — orchestrator.chunk_strategy (Story 4.16, Pichau 2026-05-07).
+
+V1.1.0 Pichau directive (supersede 2026-05-06):
+"SEMPRE 1 dia útil/chunk, qualquer ativo."
 
 Cobertura:
 
-- WINFUT → 1 (override).
-- WDOFUT, INDFUT, DOLFUT → 5 (default).
-- Equity ticker (PETR4) → 5 (default — directive Pichau).
+- WINFUT → 1 (política unificada).
+- WDOFUT, INDFUT, DOLFUT → 1 (política unificada).
+- Equity ticker (PETR4) → 1 (política unificada).
 - Lowercase normalization (case-insensitive).
-- Symbol desconhecido → 5 (default).
+- Symbol desconhecido → 1 (default).
 """
 
 from __future__ import annotations
@@ -21,42 +24,41 @@ from data_downloader.orchestrator.chunk_strategy import (
 
 @pytest.mark.unit
 def test_chunk_days_winfut_returns_1() -> None:
-    """WINFUT → 1 (override Q-DRIFT-37 / COUNCIL-37 Pyro)."""
+    """WINFUT → 1 (política unificada V1.1.0+ — Pichau 2026-05-07)."""
     assert get_chunk_days("WINFUT") == 1
 
 
 @pytest.mark.unit
-def test_chunk_days_wdofut_returns_5() -> None:
-    """WDOFUT → 5 (default — Pichau directive 2026-05-06)."""
-    assert get_chunk_days("WDOFUT") == 5
+def test_chunk_days_wdofut_returns_1() -> None:
+    """WDOFUT → 1 (política unificada — Pichau directive 2026-05-07)."""
+    assert get_chunk_days("WDOFUT") == 1
 
 
 @pytest.mark.unit
-def test_chunk_days_petr4_returns_5() -> None:
-    """Equity Ibovespa (PETR4) → 5 (Pichau directive sobrescreve 1d
-    histórico)."""
-    assert get_chunk_days("PETR4") == 5
+def test_chunk_days_petr4_returns_1() -> None:
+    """Equity Ibovespa (PETR4) → 1 (política unificada V1.1.0+)."""
+    assert get_chunk_days("PETR4") == 1
 
 
 @pytest.mark.unit
-def test_chunk_days_indfut_returns_5() -> None:
-    """INDFUT → 5 (default)."""
-    assert get_chunk_days("INDFUT") == 5
+def test_chunk_days_indfut_returns_1() -> None:
+    """INDFUT → 1 (política unificada V1.1.0+)."""
+    assert get_chunk_days("INDFUT") == 1
 
 
 @pytest.mark.unit
 def test_chunk_days_lowercase_normalizes() -> None:
-    """Case-insensitive: 'winfut' resolve igual a 'WINFUT'."""
+    """Case-insensitive: 'winfut'/'wdofut' resolvem igual a uppercase."""
     assert get_chunk_days("winfut") == 1
     assert get_chunk_days("WinFut") == 1
-    assert get_chunk_days("wdofut") == 5
+    assert get_chunk_days("wdofut") == 1
 
 
 @pytest.mark.unit
-def test_chunk_days_unknown_symbol_returns_default_5() -> None:
-    """Símbolo desconhecido → DEFAULT_CHUNK_DAYS (5)."""
+def test_chunk_days_unknown_symbol_returns_default_1() -> None:
+    """Símbolo desconhecido → DEFAULT_CHUNK_DAYS (1)."""
     assert get_chunk_days("XPTO99") == DEFAULT_CHUNK_DAYS
-    assert get_chunk_days("XPTO99") == 5
+    assert get_chunk_days("XPTO99") == 1
 
 
 # =====================================================================
@@ -76,6 +78,6 @@ def test_chunk_days_always_positive(symbol: str) -> None:
 
 
 @pytest.mark.unit
-def test_default_chunk_days_is_5() -> None:
-    """Sentinela: DEFAULT_CHUNK_DAYS canonical = 5 (Pichau 2026-05-06)."""
-    assert DEFAULT_CHUNK_DAYS == 5
+def test_default_chunk_days_is_1() -> None:
+    """Sentinela: DEFAULT_CHUNK_DAYS canonical = 1 (Pichau 2026-05-07)."""
+    assert DEFAULT_CHUNK_DAYS == 1

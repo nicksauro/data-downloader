@@ -40,7 +40,7 @@ def read_history(
                 Não aceita root (use read_continuous para isso).
         start, end: Inclusivos. Datetime BRT NAIVE ou string ISO8601 sem timezone.
         columns: Subset de colunas (otimização de I/O). Default: todas.
-        catalog_path: override do catálogo (testes). Default: data/history/catalog.db.
+        catalog_path: override do catálogo (testes). Default (ADR-024): data/_internal/catalog.db.
 
     Returns:
         pa.Table ordenada por (timestamp_ns, sequence_within_ns).

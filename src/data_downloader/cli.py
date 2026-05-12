@@ -250,6 +250,21 @@ _LOG_FORMAT_OPT = typer.Option(
     ),
 )
 
+# Wave 1 P0 (Quinn BIG COUNCIL 2026-05-06): self-check minimal para validar
+# que o ``.exe`` frozen consegue importar módulos críticos + configurar
+# logging — coisa que ``pytest`` em dev mode NÃO testa (subprocess é
+# obrigatório). NÃO inicializa DLL (diferente de ``doctor``); zero
+# dependências externas.
+_HEALTHCHECK_OPT = typer.Option(
+    False,
+    "--healthcheck",
+    help=(
+        "Self-check minimal — exit 0 se imports e logging OK. "
+        "NÃO inicializa DLL (use 'doctor --with-handshake' para isso)."
+    ),
+    is_eager=True,
+)
+
 
 def _resolve_default_format() -> str:
     """Heurística TTY-aware (ADR-010 / Story 2.9 AC5):
@@ -265,10 +280,68 @@ def _resolve_default_format() -> str:
     return "json"
 
 
-@app.callback()  # type: ignore[misc,unused-ignore]
+def _run_healthcheck() -> int:
+    """Self-check minimal — Wave 1 P0 (Quinn BIG COUNCIL 2026-05-06).
+
+    Valida que o binário consegue:
+      1. Importar pacotes críticos (sem chamar Init na DLL).
+      2. Configurar structlog (setup_logging).
+      3. Emitir 1 log probe sem exceção.
+
+    Retorna 0 em sucesso, 1 em qualquer ImportError/Exception. Imprime
+    mensagem amigável em stdout — facilita pipe/grep em smoke tests.
+
+    Caso de uso: ``data_downloader.exe --healthcheck`` em subprocess test
+    do ``.exe`` frozen — exercita paths que pytest dev-mode não cobre
+    (PyInstaller boot, módulos congelados, DLL companions resolvidas).
+    """
+    try:
+        # Import sequencial dos módulos críticos. NÃO chama Init na DLL —
+        # ``dll.wrapper`` é importado mas nenhum entry point é invocado.
+        # Usamos ``importlib.import_module`` para evitar marcar imports
+        # como F401 (variáveis ficam visíveis em runtime).
+        import importlib
+
+        critical_modules = [
+            "data_downloader",
+            "data_downloader.dll.wrapper",
+            "data_downloader.observability.logging_config",
+            "data_downloader.storage.catalog",
+        ]
+        for mod_name in critical_modules:
+            importlib.import_module(mod_name)
+
+        from data_downloader.observability.logging_config import (
+            get_logger,
+            setup_logging,
+        )
+
+        # Setup logging com defaults conservadores (WARNING, sem bridge).
+        setup_logging(level="WARNING", bridge_to_stdlib=False)
+
+        # Probe — emite 1 log canônico via pipeline configurado.
+        get_logger("data_downloader.healthcheck").warning(
+            "healthcheck_probe",
+            phase="self_check",
+        )
+    except Exception as exc:  # catch-all intencional — gate de healthcheck
+        typer.echo(f"healthcheck FAIL: {type(exc).__name__}: {exc}", err=True)
+        return 1
+
+    # Print versão + status — formato esperado por subprocess test.
+    from data_downloader import __version__
+
+    typer.echo(f"data_downloader {__version__}")
+    typer.echo("healthcheck OK")
+    return 0
+
+
+@app.callback(invoke_without_command=True)  # type: ignore[misc,unused-ignore]
 def _global_callback(
+    ctx: typer.Context,
     log_level: str | None = _LOG_LEVEL_OPT,
     log_format: str | None = _LOG_FORMAT_OPT,
+    healthcheck: bool = _HEALTHCHECK_OPT,
 ) -> None:
     """Boot global do CLI — configura logging UMA vez (Story 2.9 / ADR-010).
 
@@ -276,7 +349,23 @@ def _global_callback(
 
     - ``--log-level`` > ``DATA_DOWNLOADER_LOG_LEVEL`` > ``"INFO"``
     - ``--log-format`` > ``DATA_DOWNLOADER_LOG_FORMAT`` > heurística TTY
+
+    Flag ``--healthcheck`` (Wave 1 P0 / Quinn BIG COUNCIL): se presente,
+    roda :func:`_run_healthcheck` e termina o processo (não delega para
+    sub-comando). Permite ``data_downloader.exe --healthcheck`` em
+    subprocess test do binário frozen — usa ``invoke_without_command=True``
+    para que o callback rode mesmo sem sub-comando explícito.
     """
+    if healthcheck:
+        raise typer.Exit(code=_run_healthcheck())
+
+    # Sem ``--healthcheck`` e sem sub-comando: replicamos o comportamento
+    # antigo de ``no_args_is_help=True`` (mostra help e exit 2). Mantemos
+    # backwards-compat porque outros call sites assumem isso.
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(code=2)
+
     from data_downloader.observability.logging_config import (
         configure_logging,
         resolve_format_from_env,
@@ -311,11 +400,11 @@ contracts_app = typer.Typer(
 app.add_typer(contracts_app, name="contracts")
 
 
-_DEFAULT_CATALOG_PATH = Path("data") / "history" / "catalog.db"
+_DEFAULT_CATALOG_PATH = Path("data") / "_internal" / "catalog.db"
 
 
 def _open_catalog(db_path: Path | None = None) -> Catalog:
-    """Abre o catálogo no path canônico (data/history/catalog.db).
+    """Abre o catálogo no path canônico (data/_internal/catalog.db — ADR-024).
 
     Import local evita custo de importar storage para comandos que não
     precisam (``version``).
@@ -339,11 +428,21 @@ def _open_catalog(db_path: Path | None = None) -> Catalog:
         existing = list_contracts(catalog)
         if not existing:
             populate_contracts_from_seed(catalog)
-    except Exception:
+    except Exception as exc:
         # Defensivo — falha em populate não bloqueia comandos read-only.
         # Usuário verá InvalidContract downstream com hint para
         # `contracts list`/`contracts populate`.
-        pass
+        # Wave 1 P0 (Dex #5): NÃO mais silencioso — log warning para
+        # diagnóstico via structlog (ADR-010).
+        from data_downloader.observability.logging_config import get_logger
+
+        get_logger(__name__).warning(
+            "seed_populate_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            location="_open_catalog",
+            db_path=str(path),
+        )
     return catalog
 
 
@@ -686,7 +785,7 @@ app.add_typer(integrity_app, name="integrity")
 
 
 def _open_catalog_for_validation(data_dir: Path) -> Catalog:
-    """Abre o catálogo em ``{data_dir}/history/catalog.db`` (sem reconcile auto).
+    """Abre o catálogo em ``{data_dir}/_internal/catalog.db`` (sem reconcile auto — ADR-024).
 
     Variant de :func:`_open_catalog` que respeita ``data_dir`` arbitrário
     (a versão de ``contracts`` usa o path canônico fixo).
@@ -702,14 +801,23 @@ def _open_catalog_for_validation(data_dir: Path) -> Catalog:
     )
     from data_downloader.storage.catalog import Catalog as _Catalog
 
-    db_path = data_dir / "history" / "catalog.db"
+    db_path = data_dir / "_internal" / "catalog.db"
     catalog = _Catalog(db_path=db_path, data_dir=data_dir, auto_reconcile=False)
     try:
         existing = list_contracts(catalog)
         if not existing:
             populate_contracts_from_seed(catalog)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Wave 1 P0 (Dex #5): warning audível em vez de silêncio.
+        from data_downloader.observability.logging_config import get_logger
+
+        get_logger(__name__).warning(
+            "seed_populate_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            location="_open_catalog_for_validation",
+            db_path=str(db_path),
+        )
     return catalog
 
 
@@ -920,12 +1028,42 @@ _DOWNLOAD_METRICS_PORT_OPT = typer.Option(
 
 
 # Path do cache de last_symbol (CLI_PATTERNS §10).
+#
+# Canonical path uses HYPHEN (``~/.data-downloader/``) — alinhado a
+# :func:`data_downloader._internal.bundle_paths.user_data_dir`. Pré-fix
+# este módulo usava UNDERSCORE (``~/.data_downloader/``), criando um
+# diretório fantasma divergente do resto do app. Migração silenciosa
+# best-effort em :func:`_migrate_legacy_last_symbol_cache` (sem crash).
 def _last_symbol_cache_path() -> Path:
-    return Path.home() / ".data_downloader" / "cache" / "last_symbol.txt"
+    from data_downloader._internal.bundle_paths import user_data_dir
+
+    return user_data_dir() / "cache" / "last_symbol.txt"
+
+
+def _migrate_legacy_last_symbol_cache() -> None:
+    """Migra ``~/.data_downloader/cache/last_symbol.txt`` (underscore legacy)
+    para o path canônico (hífen) se este último ainda não existir.
+
+    Best-effort: qualquer ``OSError`` é apenas logado em ``warning`` e
+    suprimido — UX cache é opcional, nunca pode quebrar a CLI.
+    """
+    import logging
+
+    legacy = Path.home() / ".data_downloader" / "cache" / "last_symbol.txt"
+    canonical = _last_symbol_cache_path()
+    try:
+        if legacy.exists() and not canonical.exists():
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.write_bytes(legacy.read_bytes())
+    except OSError as exc:
+        logging.getLogger("data_downloader.cli").warning(
+            "last_symbol cache legacy migration skipped: %s", exc
+        )
 
 
 def _load_last_symbol() -> str | None:
     """Lê último símbolo usado do cache (CLI_PATTERNS §10)."""
+    _migrate_legacy_last_symbol_cache()
     p = _last_symbol_cache_path()
     if not p.exists():
         return None
@@ -1474,8 +1612,8 @@ def _run_multi_symbol_download(
         )
     )
 
-    # Catálogo no master (broker possui write lock).
-    db_path = data_dir / "history" / "catalog.db"
+    # Catálogo no master (broker possui write lock — ADR-024 path).
+    db_path = data_dir / "_internal" / "catalog.db"
     catalog = Catalog(db_path=db_path, data_dir=data_dir)
 
     # Worker factory: V1 usa _mock_worker_factory por causa do WAIVER
@@ -1707,10 +1845,10 @@ def _check_disk(data_dir: Path) -> tuple[str, str]:
 
 
 def _check_schema(data_dir: Path) -> tuple[str, str]:
-    """Verifica catalog SQLite acessível + schema_version >= 1.1.0."""
-    db_path = data_dir / "history" / "catalog.db"
+    """Verifica catalog SQLite acessível + schema_version >= 1.1.0 (ADR-024 path)."""
+    db_path = data_dir / "_internal" / "catalog.db"
     if not db_path.exists():
-        # First-run / pre-init é WARN (não FAIL) — UI vazia é estado válido.
+        # First-run / pre-init é WARN (não FAIL) — catalog vazio é estado válido.
         return "WARN", f"catalog.db não existe ainda ({db_path})"
 
     try:
@@ -1978,7 +2116,7 @@ def _open_migration_components(
     from data_downloader.storage.catalog import Catalog as _Catalog
     from data_downloader.storage.migrations import MigrationRunner
 
-    db_path = data_dir / "history" / "catalog.db"
+    db_path = data_dir / "_internal" / "catalog.db"
     catalog = _Catalog(db_path=db_path, data_dir=data_dir, auto_reconcile=False)
     runner = MigrationRunner(catalog=catalog, data_dir=data_dir)
     return catalog, runner

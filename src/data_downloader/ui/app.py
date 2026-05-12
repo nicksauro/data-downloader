@@ -27,7 +27,7 @@ import contextlib
 import sys
 from pathlib import Path
 
-__all__ = ["main", "_cli_or_ui_dispatch", "_first_non_flag_token"]
+__all__ = ["_cli_or_ui_dispatch", "_first_non_flag_token", "main"]
 
 
 def main() -> int:
@@ -54,10 +54,23 @@ def main() -> int:
 
     # Configurar logging (Story 2.9). Best-effort — UI não falha se logging
     # config falhar (caller pode estar em ambiente sem stderr).
+    #
+    # Story v1.0.8 fix (Pichau live test 2026-05-06): em UI mode usamos
+    # ``bridge_to_stdlib=True`` para que eventos structlog
+    # (orchestrator, dll.wrapper, public_api) sejam roteados via
+    # :class:`structlog.stdlib.LoggerFactory` para o stdlib root logger
+    # — isso permite que :class:`QtLogHandler` (instalado abaixo)
+    # capture TODOS os events, incluindo emits de worker threads.
+    # Sem esse bridge, structlog escrevia direto em ``sys.stderr`` que
+    # em windowed mode (``console=False`` PyInstaller) é detached →
+    # logs caíam no void e o painel UI ficava silencioso após
+    # "Inicializando ProfitDLL..." apesar do download estar rodando.
+    # Format = ``console`` para legibilidade humana no painel
+    # (JSON renderer produziria linhas longas pouco úteis na UI).
     try:
         from data_downloader.observability import setup_logging
 
-        setup_logging()
+        setup_logging(level="INFO", format="console", bridge_to_stdlib=True)
     except Exception:
         pass
 
@@ -108,29 +121,27 @@ def main() -> int:
     # passava despercebido. Pichau reportou: "n tem nhnum lugar para
     # apertar save".
     #
-    # Fix: tenta múltiplos paths ordenados (dev > frozen-flat > frozen-MEIPASS),
-    # primeiro existente vence. Determinístico, sem fallback silencioso.
-    qss_candidates: list[Path] = [
-        # 1. Dev mode / unfrozen install: relative to module file.
-        Path(__file__).parent / "assets" / "style.qss",
-        # 2. Frozen mode (PyInstaller --onedir): spec datas put assets/ at root.
-        Path(sys.executable).parent / "_internal" / "assets" / "style.qss",
-        Path(sys.executable).parent / "assets" / "style.qss",
-    ]
-    # 3. Frozen mode (sys._MEIPASS) — onefile or runtime-extracted.
-    meipass = getattr(sys, "_MEIPASS", "")
-    if meipass:
-        qss_candidates.append(Path(meipass) / "assets" / "style.qss")
+    # Wave 1 v1.1.0 (Aria — ADR-018): resolução delegada para
+    # :func:`data_downloader._internal.bundle_paths.asset_path`, que já cobre
+    # bundle_root → exe_dir/_internal → exe_dir → source-package fallback.
+    # Tentamos dois caminhos relativos: ``assets/style.qss`` (frozen — datas
+    # tuple do spec destina ao root do bundle) e ``ui/assets/style.qss``
+    # (source — módulo bundlado dentro do pacote em dev). Determinístico,
+    # sem fallback silencioso: se nenhum match, QSS é skipped (UI funciona).
+    from data_downloader._internal.bundle_paths import asset_path
 
-    for qss_path in qss_candidates:
+    qss_path: Path | None = None
+    for rel in ("assets/style.qss", "ui/assets/style.qss"):
         try:
-            if qss_path.is_file():
-                # Best-effort — QSS é cosmético; UI funciona sem.
-                with contextlib.suppress(OSError):
-                    app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
-                break
-        except OSError:
+            qss_path = asset_path(rel)
+            break
+        except FileNotFoundError:
             continue
+
+    if qss_path is not None:
+        # Best-effort — QSS é cosmético; UI funciona sem.
+        with contextlib.suppress(OSError):
+            app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
 
     # Import deferido para evitar custo se main() não for chamado (ex.:
     # ``import data_downloader.ui.app`` em REPL para inspeção).
@@ -192,6 +203,7 @@ _CLI_GLOBAL_FLAGS_NO_VALUE: frozenset[str] = frozenset(
         "-h",
         "--version",
         "-v",
+        "--healthcheck",
     }
 )
 

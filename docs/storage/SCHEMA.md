@@ -192,8 +192,9 @@ ELSE (
 
 ```
 data/
+├── _internal/
+│   └── catalog.db                          # SQLite (fonte única de verdade — ADR-024, hidden no Windows)
 └── history/
-    ├── catalog.db                          # SQLite (fonte única de verdade)
     └── F/                                  # exchange = BMF
         ├── WDOJ26/                         # contrato
         │   ├── 2026/
@@ -205,6 +206,10 @@ data/
 ```
 
 Padrão de path: `data/history/{exchange}/{symbol}/{year:04d}/{month:02d}.parquet`.
+
+> **ADR-024 (v1.1.0+):** `catalog.db` mora em `data/_internal/` (não mais
+> em `data/history/`) para evitar UX confusa no Explorer. Migration silenciosa
+> em `Catalog.__post_init__` move o `.db` legado no primeiro boot pós-upgrade.
 
 **Particionamento é IMUTÁVEL em prod.** Mudar layout = migrar TODOS os arquivos = projeto explícito (ADR + script + janela de manutenção). Adições de campo dentro do Parquet são livres (bump minor).
 
@@ -236,7 +241,9 @@ Toda escrita popula essas chaves no metadata custom do Parquet (acessível via `
 
 ## 5. Catálogo SQLite — DDL completo
 
-Localização: `data/history/catalog.db`.
+Localização (ADR-024): `data/_internal/catalog.db`. Legacy v1.0.x:
+`data/history/catalog.db` — migrado automaticamente no primeiro boot
+pós-v1.1.0 (ver ADR-024 para regras de migração e segurança).
 
 ### PRAGMAs — 3 perfis selecionáveis (Story 2.8 / COUNCIL-21)
 

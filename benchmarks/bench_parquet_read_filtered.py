@@ -95,7 +95,7 @@ def measure_filtered_scan(parquet_files: list[Path], ts_lo: int, ts_hi: int) -> 
 
 def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    # TODO: rodar matriz row_group_size × selectivity, salvar JSON
+    # TODO: rodar matriz row_group_size x selectivity, salvar JSON
     raise NotImplementedError("bench_parquet_read_filtered é esqueleto sintético (Story 1.4.5).")
 
 

@@ -195,7 +195,7 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `PMT_RETRY_PROMPT` | prompt | Chunk falhou ({attempt}/{max_retries}). Tentar de novo? [S/n]: | S | Chunk failed ({attempt}/{max_retries}). Retry? [Y/n]: |
 | `PMT_OVERWRITE_CONFIRM` | prompt | Histórico de {symbol}/{period} já existe. Sobrescrever? [s/N]: | N | History for {symbol}/{period} already exists. Overwrite? [y/N]: |
 | `PMT_DELETE_CONFIRM` | prompt | Apagar PERMANENTEMENTE histórico de {symbol}? Digite APAGAR para confirmar: | (vazio) | Permanently DELETE history for {symbol}? Type DELETE to confirm: |
-| `PMT_LARGE_PERIOD_CONFIRM` | prompt | Período > 30 dias detectado ({n_chunks} chunks, ~{eta} estimados). Continuar? [S/n]: | S | Period > 30 days detected ({n_chunks} chunks, ~{eta} estimated). Continue? [Y/n]: |
+| `PMT_LARGE_PERIOD_CONFIRM` | prompt | Período > 180 dias detectado ({n_chunks} chunks, ~{eta} estimados). Continuar? [S/n]: | S | Period > 180 days detected ({n_chunks} chunks, ~{eta} estimated). Continue? [Y/n]: |
 | `PMT_SYMBOL_INTERACTIVE` | prompt | Símbolo [{default}]: | (default) | Symbol [{default}]: |
 
 ---
@@ -273,9 +273,9 @@ default; aparece com `--verbose` ou no log expansível da progress bar.
 | ID | Contexto | Texto pt-BR |
 |----|----------|-------------|
 | `TIP_SYMBOL` | Input símbolo | Código do ativo. Para futuros use continuous (ex: WDOFUT, WINFUT). Para ações use ticker B3 (ex: PETR4, VALE3). |
-| `TIP_PERIOD` | Dropdown período | Período de histórico para baixar. Default: mês corrente. Períodos > 30 dias são divididos em chunks. |
+| `TIP_PERIOD` | Dropdown período | Período de histórico para baixar. Dividido em chunks de 1 dia útil (política uniforme ADR-023). |
 | `TIP_OUTPUT_FOLDER` | Folder picker | Pasta onde os Parquets serão gravados. Será criada se não existir. |
-| `TIP_CHUNK_SIZE` | Drawer avançado | Tamanho de cada chunk em dias. Menor = retry mais rápido em falhas. Maior = menos overhead. Default: 30. |
+| `TIP_CHUNK_SIZE` | Drawer avançado | Tamanho de cada chunk em dias. Menor = retry mais rápido em falhas. Maior = menos overhead. Default: 1 dia útil. <!-- DEPRECATED: removido em v1.1.0 por ADR-023 (uniform 1d chunks) --> |
 | `TIP_BTN_DOWNLOAD` | Botão BAIXAR | Iniciar download (Ctrl+D). |
 | `TIP_BTN_CANCEL` | Botão CANCELAR | Cancelar download em progresso. Trades já baixados são preservados. (Ctrl+C ou Esc) |
 | `TIP_BTN_VALIDATE` | Botão VALIDAR | Verificar integridade dos dados baixados. |
@@ -357,7 +357,7 @@ default; aparece com `--verbose` ou no log expansível da progress bar.
 | `LBL_ESTIMATE_UNAVAILABLE` | label | DownloadScreen — quando Pyro baseline indisponível | Estimativa indisponível — depende do volume |
 | `LBL_ADVANCED_DRAWER` | label | DownloadScreen — header do drawer Avançado | Avançado (chunk size, retry, pasta) |
 | `LBL_NAVIGATION_HINT` | label | DownloadScreen — hint de não-bloqueio | UI não bloqueia — pode navegar para Catálogo enquanto baixa |
-| `LBL_FOOTER_SHORTCUTS` | label | DownloadScreen — footer com atalhos | Atalhos: Ctrl+D iniciar  •  Ctrl+R repetir último  •  Ctrl+/ todos |
+| `LBL_FOOTER_SHORTCUTS` | label | DownloadScreen — footer com atalhos | Atalhos: Ctrl+D iniciar  •  Ctrl+C cancelar  •  Ctrl+/ todos |
 | `PLH_SYMBOL_SUGGESTED_HINT` | placeholder | DownloadScreen — hint quando sugerido | {symbol} sugerido — contrato vigente do {asset} |
 | `TIP_CANCEL_DURING_RECONNECT` | tooltip | DownloadScreen — tooltip do CANCELAR durante quirk 99% | Reconnect normal — cancelar agora pode forçar re-baixar tudo. |
 

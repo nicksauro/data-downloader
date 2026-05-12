@@ -273,7 +273,7 @@ expertise:
                      - REGRA: callbacks só fazem queue.put_nowait()
 
     2. orchestrator/ — coordena downloads (ownership: Dex)
-                     - Chunking adaptativo (WDO=5d, WIN=1d, equity=1d)
+                     - Chunking 1d uniforme — TODOS os ativos (ADR-023)
                      - Calendário de pregão + contratos vigentes
                      - Retry policy (timeout 1800s, 99% reconnect quirk)
                      - Checkpoint após cada chunk

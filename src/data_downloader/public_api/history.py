@@ -203,7 +203,7 @@ def read_continuous(
             from data_downloader.public_api import read_continuous
             from data_downloader.storage.catalog import Catalog
 
-            catalog = Catalog(db_path="data/history/catalog.db", data_dir="data")
+            catalog = Catalog(db_path="data/_internal/catalog.db", data_dir="data")
             try:
                 table = read_continuous(
                     "WDO",
@@ -273,7 +273,7 @@ def vigent_contract(
             from data_downloader.public_api import vigent_contract, download
             from data_downloader.storage.catalog import Catalog
 
-            catalog = Catalog(db_path="data/history/catalog.db", data_dir="data")
+            catalog = Catalog(db_path="data/_internal/catalog.db", data_dir="data")
             try:
                 code = vigent_contract("WDO", on_date=date(2026, 4, 15), catalog=catalog)
                 # code == "WDOJ26"

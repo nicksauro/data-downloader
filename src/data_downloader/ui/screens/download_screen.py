@@ -31,11 +31,12 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -75,6 +76,15 @@ class DownloadScreen(QWidget):
     """
 
     state_changed = Signal(str)
+    # Wave 3 v1.1.0 (Uma): emitido quando usuário clica "Abrir Settings"
+    # no error card de DLL/credentials. MainWindow conecta a
+    # ``set_active_screen(SCREEN_SETTINGS)`` — discoverability fix.
+    open_settings_requested = Signal()
+    # Hotfix v1.1.0 2026-05-07 (Felix+Uma — Pichau directive "não aparece
+    # quando baixou, ta feio"): STATE_SUCCESS card persistente com CTA
+    # "Ver no Catálogo" emite este sinal carregando o symbol baixado para
+    # MainWindow trocar a tela ativa (e opcionalmente filtrar pelo symbol).
+    open_catalog_requested = Signal(str)
 
     # Signal interno para despachar start ao adapter cross-thread (auto
     # marshalling via QueuedConnection — mais robusto que invokeMethod
@@ -99,6 +109,12 @@ class DownloadScreen(QWidget):
 
         self._download_active = False
 
+        # Hotfix v1.1.0 2026-05-07 (Felix+Uma): cache do último download
+        # bem-sucedido para alimentar o STATE_SUCCESS card (path → "Abrir
+        # Pasta", symbol → "Ver no Catálogo").
+        self._last_success_path: Path | None = None
+        self._last_success_symbol: str = ""
+
         # Header.
         self._title = QLabel(format_msg("LBL_DOWNLOAD_SCREEN_TITLE"), self)
         self._title.setProperty("role", "title")
@@ -111,6 +127,10 @@ class DownloadScreen(QWidget):
 
         # Card error.
         self._error_card = self._build_error_card()
+
+        # Hotfix v1.1.0 2026-05-07 (Felix+Uma): success card persistente
+        # (substitui a antiga UX de toast 5s + tela vazia).
+        self._success_card = self._build_success_card()
 
         # ProgressCard (state=loading).
         self._progress_card = ProgressCard(self)
@@ -144,6 +164,7 @@ class DownloadScreen(QWidget):
         self._state_stack.addWidget(self._form_card)  # idx 0 — normal
         self._state_stack.addWidget(self._progress_card)  # idx 1 — loading
         self._state_stack.addWidget(self._error_card)  # idx 2 — error
+        self._state_stack.addWidget(self._success_card)  # idx 3 — success (hotfix v1.1.0)
 
         # Layout exterior.
         outer = QVBoxLayout(self)
@@ -158,6 +179,11 @@ class DownloadScreen(QWidget):
         self._toast = self._build_toast()
         self._toast.setParent(self)
         self._toast.hide()
+        # Timer parented em self que esconde o toast (não órfão — evita
+        # ``QTimer.singleShot`` disparando após destruição da screen).
+        self._toast_hide_timer = QTimer(self)
+        self._toast_hide_timer.setSingleShot(True)
+        self._toast_hide_timer.timeout.connect(self._toast.hide)
 
         # Atalhos por tela (Ctrl+D, Ctrl+C, Esc).
         self._register_shortcuts()
@@ -280,12 +306,126 @@ class DownloadScreen(QWidget):
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
+        # Wave 3 v1.1.0 (Uma): deep-link "Abrir Settings" para erros de
+        # DLL/credenciais — discoverability gap CONCERNS BIG COUNCIL. Hidden
+        # por default; ``_on_error`` decide quando mostrar baseado em
+        # humanized_message ID.
+        self._open_settings_btn = QPushButton("Abrir Settings", card)
+        self._open_settings_btn.setObjectName("openSettingsBtn")
+        self._open_settings_btn.setProperty("variant", "secondary")
+        self._open_settings_btn.setToolTip("Abre Configurações para revisar DLL path / credenciais")
+        self._open_settings_btn.clicked.connect(self.open_settings_requested.emit)
+        self._open_settings_btn.setVisible(False)
+        button_row.addWidget(self._open_settings_btn)
+
         retry_btn = QPushButton(format_msg("BTN_RETRY"), card)
         retry_btn.setProperty("variant", "primary")
         retry_btn.setObjectName("retryBtn")
         retry_btn.clicked.connect(self._on_retry_clicked)
         button_row.addWidget(retry_btn)
         layout.addLayout(button_row)
+
+        return card
+
+    def _build_success_card(self) -> QFrame:
+        """Card persistente após download — Hotfix v1.1.0 (Felix+Uma).
+
+        Pichau live test 2026-05-07: a UX antiga (toast 5s → tela vazia
+        sem feedback do que foi baixado nem CTA pra abrir) foi reportada
+        como "não aparece quando baixou, ta feio". Este card substitui
+        o estado pós-download: header verde + métricas (símbolo / trades /
+        arquivos / pasta) + 3 CTAs (Abrir Pasta / Ver no Catálogo /
+        Novo Download).
+        """
+        card = QFrame(self)
+        card.setObjectName("downloadSuccessCard")
+        card.setProperty("role", "success-card")
+
+        layout = QVBoxLayout(card)
+        layout.setSpacing(16)
+        layout.setContentsMargins(40, 40, 40, 40)
+
+        # Header: icon ✓ + título.
+        header = QHBoxLayout()
+        icon_label = QLabel("✓", card)
+        icon_label.setObjectName("successIcon")
+        icon_label.setStyleSheet(
+            "color:#3FCB6F; font-size:48px; font-weight:700; background:transparent;"
+        )
+        title = QLabel("Download concluído", card)
+        title.setObjectName("successTitle")
+        title.setStyleSheet(
+            "font-size:20px; font-weight:600; color:#E8E8EA; background:transparent;"
+        )
+        header.addWidget(icon_label)
+        header.addSpacing(12)
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        # Métricas (grid label ↔ valor).
+        metrics = QGridLayout()
+        metrics.setHorizontalSpacing(12)
+        metrics.setVerticalSpacing(6)
+
+        self._success_symbol_lbl = QLabel("—", card)
+        self._success_symbol_lbl.setObjectName("successSymbolValue")
+        self._success_trades_lbl = QLabel("—", card)
+        self._success_trades_lbl.setObjectName("successTradesValue")
+        self._success_files_lbl = QLabel("—", card)
+        self._success_files_lbl.setObjectName("successFilesValue")
+        self._success_duration_lbl = QLabel("—", card)
+        self._success_duration_lbl.setObjectName("successDurationValue")
+        self._success_path_lbl = QLabel("—", card)
+        self._success_path_lbl.setObjectName("successPathValue")
+        self._success_path_lbl.setStyleSheet(
+            "font-family:'Cascadia Code','Consolas',monospace; color:#A8A8AC;"
+        )
+        self._success_path_lbl.setWordWrap(True)
+        self._success_path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        rows = (
+            ("Símbolo:", self._success_symbol_lbl),
+            ("Trades:", self._success_trades_lbl),
+            ("Arquivos:", self._success_files_lbl),
+            ("Duração:", self._success_duration_lbl),
+            ("Pasta:", self._success_path_lbl),
+        )
+        for row_idx, (label_text, value_widget) in enumerate(rows):
+            label = QLabel(label_text, card)
+            label.setProperty("role", "muted")
+            label.setStyleSheet("background:transparent;")
+            metrics.addWidget(label, row_idx, 0, Qt.AlignmentFlag.AlignTop)
+            metrics.addWidget(value_widget, row_idx, 1)
+        metrics.setColumnStretch(1, 1)
+        layout.addLayout(metrics)
+
+        layout.addStretch(1)
+
+        # Ações.
+        actions = QHBoxLayout()
+        self._success_open_folder_btn = QPushButton("Abrir Pasta", card)
+        self._success_open_folder_btn.setObjectName("successOpenFolderBtn")
+        self._success_open_folder_btn.setProperty("variant", "primary")
+        self._success_open_folder_btn.setDefault(True)
+        self._success_open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._success_open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+
+        self._success_view_catalog_btn = QPushButton(format_msg("BTN_VIEW_CATALOG"), card)
+        self._success_view_catalog_btn.setObjectName("successViewCatalogBtn")
+        self._success_view_catalog_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._success_view_catalog_btn.clicked.connect(self._on_view_catalog_clicked)
+
+        self._success_new_download_btn = QPushButton("Novo Download", card)
+        self._success_new_download_btn.setObjectName("successNewDownloadBtn")
+        self._success_new_download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._success_new_download_btn.clicked.connect(self._on_new_download_clicked)
+
+        actions.addWidget(self._success_open_folder_btn)
+        actions.addWidget(self._success_view_catalog_btn)
+        actions.addStretch(1)
+        actions.addWidget(self._success_new_download_btn)
+        layout.addLayout(actions)
 
         return card
 
@@ -398,6 +538,34 @@ class DownloadScreen(QWidget):
         # Volta para o form para reconfigurar / tentar de novo.
         self._set_state(STATE_NORMAL)
 
+    # Hotfix v1.1.0 2026-05-07 (Felix+Uma) — handlers do success card.
+    @Slot()
+    def _on_open_folder_clicked(self) -> None:
+        """Abre a pasta do download no explorer nativo (best-effort)."""
+        if self._last_success_path is None:
+            return
+        # Defensive — UI nunca cai por falha de IO/shell (suppress).
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_success_path)))
+
+    @Slot()
+    def _on_view_catalog_clicked(self) -> None:
+        """Pede ao MainWindow para navegar ao CatalogScreen.
+
+        Se algum dia ``CatalogScreen`` ganhar ``set_filter_symbol(symbol)``,
+        o slot da MainWindow consome o symbol carregado pelo sinal.
+        Por enquanto basta navegar (TODO follow-up: filtro automático).
+        """
+        self.open_catalog_requested.emit(self._last_success_symbol or "")
+
+    @Slot()
+    def _on_new_download_clicked(self) -> None:
+        """Volta ao form para iniciar outro download."""
+        self._set_state(STATE_NORMAL)
+        self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
+
     def _on_browse_folder(self) -> None:
         # Story v1.0.5 fix (Pichau live test 2026-05-06): nativo Win32 em
         # frozen (cores corretas, integração com shell), DontUseNativeDialog
@@ -463,9 +631,10 @@ class DownloadScreen(QWidget):
         title = ""
         detail = str(exc)
         action = ""
+        msg_id = ""
         try:
             from data_downloader.public_api.exceptions import DataDownloaderError
-            from data_downloader.ui.microcopy_loader import MSG
+            from data_downloader.ui.microcopy_loader import MSG, humanize_nl_error
 
             if isinstance(exc, DataDownloaderError):
                 msg_id = exc.humanized_message
@@ -474,6 +643,32 @@ class DownloadScreen(QWidget):
                     title = entry.title or ""
                     detail = entry.detail or detail
                     action = entry.action or ""
+
+            # Hotfix v1.1.0 2026-05-08 (Felix+Aria — Pichau smoke real):
+            # adapter pode encaminhar strings como
+            # "ERR_DLL_MARKET_TIMEOUT: detalhes…" ou "NL_WAITING_SERVER: …"
+            # vindas de ``DownloadResult.error_message``. Tenta extrair o
+            # ID e fazer lookup direto. Se ID começa com ``NL_``, usa
+            # ``humanize_nl_error`` para resolver via tabela específica DLL.
+            if not title:
+                raw = detail or ""
+                head, sep, tail = raw.partition(":")
+                head_id = head.strip()
+                if sep and head_id:
+                    if head_id.startswith("NL_"):
+                        nl_entry = humanize_nl_error(head_id)
+                        if nl_entry.title:
+                            title = nl_entry.title or ""
+                            detail = nl_entry.detail or tail.strip() or detail
+                            action = nl_entry.action or ""
+                            msg_id = head_id
+                    else:
+                        entry = MSG.get(head_id)
+                        if entry is not None:
+                            title = entry.title or ""
+                            detail = entry.detail or tail.strip() or detail
+                            action = entry.action or ""
+                            msg_id = head_id
         except Exception:
             pass
 
@@ -483,6 +678,19 @@ class DownloadScreen(QWidget):
         self._error_title.setText(title)
         self._error_detail.setText(detail)
         self._error_action.setText(action)
+
+        # Wave 3 v1.1.0 (Uma) — deep-link "Abrir Settings" só faz sentido
+        # quando erro é de DLL ou credenciais. Heurística: msg_id começa com
+        # ``ERR_DLL_`` (todos os erros do wrapper DLL) — abrange:
+        # ERR_DLL_NOT_INITIALIZED, ERR_DLL_NO_LICENSE, ERR_DLL_GENERIC, etc.
+        # Fallback para detail string contém "DLL" ou "credenc"
+        # (case-insensitive — robusto a variantes futuras).
+        is_dll_error = bool(msg_id and msg_id.startswith("ERR_DLL_"))
+        if not is_dll_error:
+            haystack = (detail or "").lower()
+            is_dll_error = "dll" in haystack or "credenc" in haystack
+        self._open_settings_btn.setVisible(is_dll_error)
+
         self._set_state(STATE_ERROR)
         self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
 
@@ -497,18 +705,96 @@ class DownloadScreen(QWidget):
     @Slot(object)
     def _on_finished(self, result: object) -> None:
         self._download_active = False
-        # Extrai stats com duck-typing (DownloadResult).
+
+        # Hotfix v1.1.0 2026-05-08 (Felix+Aria — Pichau smoke real):
+        # defesa em profundidade contra "success card pra falha". O adapter
+        # já roteia ``status == 'failed'`` via signal ``error``; mesmo
+        # assim, se algum caminho futuro emitir ``finished`` com result
+        # vazio (0 trades + 0 partitions) sem indicar erro explícito,
+        # tratamos como erro silenciado upstream. ``status`` "completed"
+        # com 0 trades e 0 partitions é semanticamente "no_trades" — sem
+        # estado dedicado por agora, encaminhamos para STATE_ERROR com
+        # microcopy ``ERR_DOWNLOAD_EMPTY`` para que o usuário não veja
+        # "Download concluído 0 trades" como vitória.
+        status = str(getattr(result, "status", "completed") or "completed")
+        n_trades_probe = int(getattr(result, "trades_count", 0) or 0)
+        partitions_probe = tuple(getattr(result, "partitions", ()) or ())
+        if status == "failed":
+            error_message = (
+                getattr(result, "error_message", None) or "ERR_GENERIC: erro desconhecido"
+            )
+            self._on_error(error_message)
+            return
+        if status not in ("cache_hit",) and n_trades_probe == 0 and not partitions_probe:
+            import logging as _logging
+
+            _logging.getLogger("data_downloader.ui.download_screen").warning(
+                "on_finished_zero_state_treated_as_error status=%s result=%s",
+                status,
+                result,
+            )
+            self._on_error("ERR_DOWNLOAD_EMPTY: download retornou vazio sem erro")
+            return
+
+        # Extrai stats com duck-typing (DownloadResult — ver
+        # ``public_api.handle.DownloadResult``: ``partitions`` é
+        # ``tuple[Path, ...]`` de arquivos parquet escritos).
         symbol = getattr(result, "symbol", "") or self._symbol_picker.value()
-        n_trades = int(getattr(result, "trades_count", 0) or 0)
-        n_files = len(getattr(result, "partitions", ()) or ())
+        n_trades = n_trades_probe
+        partitions = partitions_probe
+        n_files = len(partitions)
+        duration = float(getattr(result, "duration_seconds", 0.0) or 0.0)
+
+        # Resolve a pasta a abrir: pai do primeiro parquet (que é
+        # ``data/history/{SYMBOL}/year=YYYY/month=MM/...parquet``).
+        # Subir um nível (year=YYYY/month=MM) é o mais útil pro usuário —
+        # mostra os arquivos do mês baixado direto.
+        target_path: Path | None = None
+        if partitions:
+            try:
+                first = partitions[0]
+                target_path = Path(first).parent if first else None
+            except Exception:
+                target_path = None
+        if target_path is None:
+            # Fallback: pasta data_dir do form (pode existir mesmo sem
+            # parquets — ex.: cache_hit sem partitions novas).
+            try:
+                target_path = Path(self._folder_edit.text().strip() or "data").resolve()
+            except Exception:
+                target_path = Path("data")
+
+        self._last_success_symbol = symbol or ""
+        self._last_success_path = target_path
+
+        # Atualiza labels do card.
+        self._success_symbol_lbl.setText(symbol or "—")
+        # Formato pt-BR: "1.574.806 trades".
+        self._success_trades_lbl.setText(f"{n_trades:,}".replace(",", ".") + " trades")
+        files_label = (
+            f"{n_files} arquivo parquet" if n_files == 1 else f"{n_files} arquivos parquet"
+        )
+        self._success_files_lbl.setText(files_label)
+        # Duração formatada (ex.: "12.3s" ou "1m 24s").
+        if duration >= 60.0:
+            mins = int(duration // 60)
+            secs = int(duration % 60)
+            self._success_duration_lbl.setText(f"{mins}m {secs:02d}s")
+        else:
+            self._success_duration_lbl.setText(f"{duration:.1f}s")
+        self._success_path_lbl.setText(str(target_path))
+
+        # Toast curto (3s) — feedback rápido enquanto o card persiste.
         toast_text = format_msg(
             "TST_DOWNLOAD_DONE",
             symbol=symbol,
             n_trades=f"{n_trades:,}".replace(",", "."),
             n_files=n_files,
         )
-        self._show_toast(toast_text, variant="success", duration_ms=5000)
-        self._set_state(STATE_NORMAL)
+        self._show_toast(toast_text, variant="success", duration_ms=3000)
+
+        # Switch para success state — card persiste até ação do usuário.
+        self._set_state(STATE_SUCCESS)
         self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
 
     # ------------------------------------------------------------------
@@ -521,6 +807,9 @@ class DownloadScreen(QWidget):
             self._state_stack.setCurrentIndex(1)
         elif state == STATE_ERROR:
             self._state_stack.setCurrentIndex(2)
+        elif state == STATE_SUCCESS:
+            # Hotfix v1.1.0 2026-05-07 — success card persistente (idx 3).
+            self._state_stack.setCurrentIndex(3)
         else:
             self._state_stack.setCurrentIndex(0)
         self.state_changed.emit(state)
@@ -549,7 +838,7 @@ class DownloadScreen(QWidget):
         self._toast.show()
         self._toast.raise_()
 
-        QTimer.singleShot(duration_ms, self._toast.hide)
+        self._toast_hide_timer.start(duration_ms)
 
     # ------------------------------------------------------------------
     # Lifecycle

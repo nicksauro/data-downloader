@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
+from data_downloader.storage._paths import hide_directory_windows
 from data_downloader.storage.catalog_models import (
     ChunkRange,
     Gap,
@@ -284,6 +285,76 @@ def _format_ts(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+def _migrate_legacy_catalog_path(data_dir: Path, new_path: Path) -> None:
+    """v1.1.0+: migra ``catalog.db`` de ``data/history/`` para ``data/_internal/``.
+
+    Background (ADR-024 — directive Pichau 2026-05-07): catalog SQLite
+    convivia com os parquets em ``data/history/``; usuário via Explorer
+    estranhava o ``.db``. Movemos para ``data/_internal/`` e aplicamos
+    Windows Hidden attribute no diretório.
+
+    Semântica (silenciosa, idempotente, segura para re-execução):
+
+    - ``old`` ausente → no-op.
+    - ``old`` existe, ``new`` ausente → move (rename atômico) + WAL/SHM.
+      Log ``catalog_migrated``.
+    - ``old`` existe, ``new`` existe → preserva ``new`` (assume já migrado);
+      log ``catalog_legacy_path_kept``.
+    - Falha de I/O → log ``catalog_migration_failed`` e retorna; ``Catalog``
+      tentará abrir ``new`` (que pode falhar de forma mais clara depois).
+
+    Args:
+        data_dir: Raiz dos dados (procura ``old`` em ``data_dir/history/``).
+        new_path: Path de destino (tipicamente ``data_dir/_internal/catalog.db``).
+    """
+    old_path = data_dir / "history" / "catalog.db"
+    if old_path.resolve() == new_path.resolve():
+        # Caller usou o path legado explicitamente — nada a migrar.
+        return
+    if not old_path.exists():
+        return
+    try:
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _LOG.error(
+            "catalog_migration_failed",
+            extra={"old": str(old_path), "new": str(new_path), "err": str(exc)},
+        )
+        return
+
+    if new_path.exists():
+        _LOG.warning(
+            "catalog_legacy_path_kept",
+            extra={
+                "old": str(old_path),
+                "new": str(new_path),
+                "reason": "both_exist_kept_new",
+            },
+        )
+        return
+
+    try:
+        # rename atômico (mesmo filesystem garantido — ambos sob ``data_dir``).
+        old_path.rename(new_path)
+        # Move WAL/SHM auxiliares se existirem (sqlite WAL mode).
+        for ext in (".db-wal", ".db-shm"):
+            old_aux = old_path.with_suffix(ext)
+            if old_aux.exists():
+                new_aux = new_path.with_suffix(ext)
+                old_aux.rename(new_aux)
+        _LOG.warning(
+            "catalog_migrated",
+            extra={"old": str(old_path), "new": str(new_path)},
+        )
+    except OSError as exc:
+        _LOG.error(
+            "catalog_migration_failed",
+            extra={"old": str(old_path), "new": str(new_path), "err": str(exc)},
+        )
+        # Não levanta — Catalog tentará abrir ``new`` (que pode estar limpo
+        # ou inexistente; modo de falha mais claro downstream).
+
+
 @dataclass
 class Catalog:
     """Catálogo SQLite — fonte única de verdade do estado de downloads.
@@ -294,10 +365,13 @@ class Catalog:
 
     Args:
         db_path: Caminho do arquivo SQLite. Diretório pai é criado se
-            não existe. Convenção: ``data/history/catalog.db``.
+            não existe. Convenção (ADR-024): ``data/_internal/catalog.db``
+            (legacy ``data/history/catalog.db`` é migrado silenciosamente
+            no primeiro boot pós-v1.1.0).
         data_dir: Raiz dos dados (``data/``). Necessária para reconcile,
-            cleanup_orphans e cálculo de paths relativos. Defaults para
-            ``db_path.parent.parent`` (assumindo ``data/history/catalog.db``).
+            cleanup_orphans, cálculo de paths relativos e migration ADR-024.
+            Defaults para ``db_path.parent.parent`` (assumindo layout
+            ``data/_internal/catalog.db`` ou legacy ``data/history/catalog.db``).
         auto_reconcile: Se ``True`` (default), executa
             ``reconcile(auto_correct=True)`` em ``__init__``. Pode ser
             desligado em testes que querem inspecionar o estado pré-reconcile.
@@ -321,13 +395,24 @@ class Catalog:
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path)
         if self.data_dir is None:
-            # Assume layout convencional: db está em data/history/catalog.db.
+            # Assume layout convencional: db está em data/_internal/catalog.db
+            # (ADR-024) ou legacy data/history/catalog.db. Em ambos os casos
             # data_dir = data/ (i.e. db_path.parent.parent).
             self.data_dir = self.db_path.parent.parent
         else:
             self.data_dir = Path(self.data_dir)
 
+        # ADR-024: migra silenciosamente catalog.db legado de
+        # ``data/history/`` para ``data/_internal/`` antes de abrir conexão.
+        # Idempotente: no-op se já migrado, se old não existe ou se caller
+        # passou o path legado explicitamente.
+        _migrate_legacy_catalog_path(self.data_dir, self.db_path)
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # ADR-024: best-effort hide do diretório do catálogo no Windows
+        # Explorer (no-op em outros OS). Não interfere com Path operations.
+        hide_directory_windows(self.db_path.parent)
 
         # Story 2.8 — resolve perfil PRAGMA (explicit > env > default).
         self._resolved_profile = resolve_profile(self.sqlite_profile)

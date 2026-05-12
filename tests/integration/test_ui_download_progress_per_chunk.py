@@ -1,6 +1,9 @@
 """Integration tests — UI progress bar per chunk (Story 4.16).
 
-Owner: Dex (impl) | Pichau directive 2026-05-06.
+Owner: Dex (impl) | Pichau directive 2026-05-07 (supersede 2026-05-06).
+
+V1.1.0 política unificada: SEMPRE 1d/chunk para todos os ativos
+(WDOFUT/WINFUT/INDFUT/DOLFUT/equities). 1 semana B3 cheia = 5 chunks.
 
 Cobertura:
     - ProgressCard.set_progress traduz DownloadProgress(total=N, done=K,
@@ -86,10 +89,11 @@ def test_progress_card_subtitle_shows_chunk_count(progress_card) -> None:
 
 @pytest.mark.integration
 def test_progress_card_handles_winfut_per_day_chunks(progress_card) -> None:
-    """WINFUT (1d/chunk) → 5 chunks/semana → barra +20% por chunk.
+    """V1.1.0+ política unificada (1d/chunk para TODOS os ativos):
+    1 semana = 5 chunks → barra +20% por chunk.
 
-    Simula uma semana WINFUT com 5 chunks (1 chunk = 1 dia útil — Story
-    4.16 chunk_strategy WINFUT override).
+    Simula uma semana com 5 chunks (1 chunk = 1 dia útil — Pichau
+    directive 2026-05-07, supersede 2026-05-06).
     """
     progress_card.set_progress(_make_progress(total=5, done=1, trades_received=10))
     assert progress_card._bar.value() == 20

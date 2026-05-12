@@ -21,7 +21,7 @@ import pytest
 from data_downloader.storage.duckdb_reader import DuckDBReader
 from data_downloader.storage.parquet_writer import ParquetWriter, WriteResult
 from data_downloader.storage.partition import PartitionKey
-from data_downloader.storage.schema import SCHEMA_VERSION, TradeRecord
+from data_downloader.storage.schema import SCHEMA_VERSION, TradeRecord, pyarrow_schema
 
 
 def _make_trades(n: int, *, base_ts: int = 1_700_000_000_000_000_000) -> list[TradeRecord]:
@@ -175,8 +175,10 @@ def test_read_empty_dir_returns_empty_table(data_dir: Path) -> None:
             end_ts_ns=2_000_000_000_000_000_000,
         )
         assert table.num_rows == 0
-        # Schema deve corresponder ao canônico.
-        assert len(table.schema) == 17
+        # Schema deve corresponder ao canônico (v1.1.0 = 20 colunas, aditivo
+        # +buy_agent_name/sell_agent_name/trade_type_name sobre as 17 de v1.0.0;
+        # derivado de ``pyarrow_schema`` para não enrijecer o número — task #10).
+        assert len(table.schema) == len(pyarrow_schema())
 
         # count também responde 0.
         assert reader.count("WDOJ26") == 0

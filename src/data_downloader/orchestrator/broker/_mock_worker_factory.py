@@ -25,9 +25,22 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+def _dt_to_brt_naive_ns(dt: datetime) -> int:
+    """datetime naive (interpretado como BRT) → ns desde 1970-01-01 BRT naive.
+
+    Mesma convenção (lei R7) de ``download_primitive._system_time_to_ns_local``:
+    trata o wall clock como UTC apenas para o cálculo aritmético, sem
+    conversão de fuso.
+    """
+    aware = dt.replace(tzinfo=UTC)
+    delta = aware - datetime(1970, 1, 1, tzinfo=UTC)
+    total_seconds = delta.days * 86_400 + delta.seconds
+    return total_seconds * 1_000_000_000 + delta.microseconds * 1_000
 
 
 def create_orchestrator(
@@ -133,35 +146,35 @@ class _FakeProfitDLL:
         t.start()
         return 0
 
-    def translate_trade(self, handle: int, struct: Any) -> int:
-        from data_downloader.dll.types import SystemTime
+    def translate_trade(self, handle: int) -> Any:
+        """API V2 (Story 1.7b-followup): retorna ``TradeFields | None``.
+
+        Antes (drift): assinatura ``(handle, struct) -> int`` mutando o
+        struct in-place. Produção migrou para ``(handle) -> TradeFields | None``;
+        este mock acompanha (v1.1.0 task #10 — Quinn QA 2026-05-11).
+        """
+        from data_downloader.dll.types import TradeFields
 
         if handle >= len(self._current_specs):
-            return -1
+            return None
         spec = self._current_specs[handle]
-        st = SystemTime()
         ts = spec["timestamp"]
-        st.wYear = ts.year
-        st.wMonth = ts.month
-        st.wDay = ts.day
-        st.wDayOfWeek = 0
-        st.wHour = ts.hour
-        st.wMinute = ts.minute
-        st.wSecond = ts.second
-        st.wMilliseconds = ts.microsecond // 1000
-        struct.TradeDate = st
-        struct.TradeNumber = spec.get("trade_number", handle + 1)
-        struct.Price = spec["price"]
-        struct.Quantity = spec["quantity"]
-        struct.Volume = spec["price"] * spec["quantity"]
-        struct.BuyAgent = 0
-        struct.SellAgent = 0
-        struct.TradeType = 1
-        return 0
+        return TradeFields(
+            version=0,
+            timestamp_ns=_dt_to_brt_naive_ns(ts),
+            trade_number=spec.get("trade_number", handle + 1),
+            price=spec["price"],
+            quantity=spec["quantity"],
+            volume=spec["price"] * spec["quantity"],
+            buy_agent_id=0,
+            sell_agent_id=0,
+            trade_type=1,
+        )
 
     def _emit(self, ticker: str) -> None:
         from data_downloader.dll.types import (
             TC_LAST_PACKET,
+            TAssetID,
             TConnectorAssetIdentifier,
         )
 
@@ -180,14 +193,19 @@ class _FakeProfitDLL:
             except Exception:
                 break
 
-        # Progress sweeping (50 → 100).
+        # Progress sweeping (50 → 100). TProgressCallback V2 (Q-DRIFT-05):
+        # assinatura ``(TAssetID, c_int)`` — 2 args. Antes (drift) este mock
+        # chamava com 4 args (ticker, exchange, 0, p) → TypeError silencioso
+        # → progresso nunca chegava ao monitor. Note: progress usa TAssetID
+        # (struct V1), distinto do TConnectorAssetIdentifier do history cb.
         import contextlib as _contextlib
 
+        progress_asset = TAssetID(ticker=ticker, bolsa="F", feed=0)
         for p in (50, 100):
             if self._progress_cb is None:
                 break
             with _contextlib.suppress(Exception):
-                self._progress_cb(ticker, "F", 0, p)
+                self._progress_cb(progress_asset, p)
 
 
 __all__ = [

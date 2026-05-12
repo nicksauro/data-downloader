@@ -193,7 +193,11 @@ def test_bootstrap_env_no_candidates_loads_nothing(
 
 
 def test_bootstrap_env_frozen_uses_exe_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Em frozen mode, exe-dir/.env é candidato (entre cwd e home)."""
+    """Em frozen mode, exe-dir/.env é candidato (entre cwd e home).
+
+    Wave 1 v1.1.0 (Aria — ADR-021): is_frozen() exige BOTH sys.frozen=True
+    E sys._MEIPASS setado (espelha PyInstaller real). Test atualizado.
+    """
     cwd_dir = tmp_path / "cwd_no_env"
     cwd_dir.mkdir()
     exe_dir = tmp_path / "exe_dir"
@@ -215,6 +219,8 @@ def test_bootstrap_env_frozen_uses_exe_dir(monkeypatch: pytest.MonkeyPatch, tmp_
     import sys
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    # ADR-021 contract — both required.
+    monkeypatch.setattr(sys, "_MEIPASS", str(exe_dir), raising=False)
     fake_exe = exe_dir / "data_downloader.exe"
     monkeypatch.setattr(sys, "executable", str(fake_exe))
 

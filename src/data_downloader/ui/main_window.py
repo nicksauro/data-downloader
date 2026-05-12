@@ -31,7 +31,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, Qt, Slot
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from data_downloader.ui.microcopy_loader import format_msg
+from data_downloader.ui.widgets.cheat_sheet_dialog import CheatSheetDialog
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QObject
@@ -74,7 +75,10 @@ class MainWindow(QMainWindow):
         self.resize(1024, 700)
         self.setMinimumSize(960, 640)
 
-        # Layout: sidebar (esq) + stack central + status bar (inferior).
+        # Layout: sidebar (esq) + (banner onboarding + stack) central + status
+        # bar (inferior). Wave 3 v1.1.0 (Uma): banner é coluna direita acima
+        # do stack — visible apenas quando credenciais ausentes (discoverability
+        # gap detectado em BIG COUNCIL CONCERNS).
         central = QWidget(self)
         central_layout = QHBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -83,8 +87,19 @@ class MainWindow(QMainWindow):
         self._sidebar = self._build_sidebar()
         central_layout.addWidget(self._sidebar)
 
+        # Coluna direita: banner (top) + stack (resto).
+        right_col = QWidget(self)
+        right_col_layout = QVBoxLayout(right_col)
+        right_col_layout.setContentsMargins(0, 0, 0, 0)
+        right_col_layout.setSpacing(0)
+
+        self._onboarding_banner = self._build_onboarding_banner()
+        right_col_layout.addWidget(self._onboarding_banner)
+
         self._stack = QStackedWidget(self)
-        central_layout.addWidget(self._stack, stretch=1)
+        right_col_layout.addWidget(self._stack, stretch=1)
+
+        central_layout.addWidget(right_col, stretch=1)
 
         self.setCentralWidget(central)
 
@@ -103,6 +118,11 @@ class MainWindow(QMainWindow):
 
         # Default = DownloadScreen.
         self.set_active_screen(SCREEN_DOWNLOAD)
+
+        # Wave 3 v1.1.0 (Uma): banner onboarding visível se credenciais missing.
+        # Chamada explícita após screens prontas — evita janela de visibilidade
+        # incorreta durante init (banner default hidden até esta linha decidir).
+        self._refresh_onboarding_banner()
 
     # ------------------------------------------------------------------
     # Construção de UI
@@ -137,6 +157,85 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return sidebar
 
+    def _build_onboarding_banner(self) -> QFrame:
+        """Banner amarelo no topo — visível apenas se credenciais missing.
+
+        Wave 3 v1.1.0 (Uma — diretiva Pichau): primeiro launch sem ``.env``
+        deixava DownloadScreen utilizável mas Test Connection sempre falhava
+        sem feedback óbvio do que faltava configurar. Banner deep-linka para
+        Settings com microcopy direta + CTA grande.
+
+        Visibility é checada em :meth:`_refresh_onboarding_banner` (chamado
+        em init + após saves no SettingsScreen via signal handler).
+        """
+        banner = QFrame(self)
+        banner.setObjectName("onboardingBanner")
+        # Estilo inline garante visibilidade mesmo se QSS não carregar
+        # (defense-in-depth — Story 4.15 lesson learned).
+        banner.setStyleSheet(
+            "QFrame#onboardingBanner {"
+            "  background-color: #FFF4CE;"
+            "  border-bottom: 1px solid #DDB100;"
+            "  padding: 8px 12px;"
+            "}"
+            "QFrame#onboardingBanner QLabel { color: #6B4F00; }"
+        )
+
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(12)
+
+        icon_label = QLabel("⚠", banner)
+        icon_label.setStyleSheet("font-size: 14pt; color: #B07900;")
+        layout.addWidget(icon_label)
+
+        msg_label = QLabel(
+            "Configure suas credenciais ProfitDLL para começar a baixar dados.",
+            banner,
+        )
+        msg_label.setObjectName("onboardingBannerLabel")
+        msg_label.setWordWrap(True)
+        layout.addWidget(msg_label, stretch=1)
+
+        configure_btn = QPushButton("Configurar Credenciais", banner)
+        configure_btn.setObjectName("onboardingConfigureBtn")
+        configure_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        configure_btn.setMinimumSize(180, 32)
+        configure_btn.clicked.connect(lambda: self.set_active_screen(SCREEN_SETTINGS))
+        layout.addWidget(configure_btn)
+
+        # Inicialmente oculto; ``_refresh_onboarding_banner`` decide.
+        banner.setVisible(False)
+        return banner
+
+    def _credentials_missing(self) -> bool:
+        """Retorna True se credenciais essenciais não estão configuradas.
+
+        Critério: qualquer um de ``PROFITDLL_KEY``/``PROFITDLL_USER``/
+        ``PROFITDLL_PASS`` ausente ou vazio em ``os.environ``.
+
+        Não checa file ``~/.data-downloader/.env`` diretamente porque o
+        bootstrap_env já o carregou para ``os.environ`` antes da MainWindow
+        instanciar (cli.py / app.py — load order documentado).
+        """
+        import os
+
+        required = ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS")
+        return not all(os.environ.get(var, "").strip() for var in required)
+
+    def _refresh_onboarding_banner(self) -> None:
+        """Sincroniza visibilidade do banner com estado das credenciais."""
+        if hasattr(self, "_onboarding_banner"):
+            self._onboarding_banner.setVisible(self._credentials_missing())
+
+    @Slot()
+    def _show_cheat_sheet(self) -> None:
+        """Abre :class:`CheatSheetDialog` modal — trigger ``Ctrl+/``."""
+        dlg = CheatSheetDialog(self)
+        # Guarda referência para tests (qtbot evita garbage collection).
+        self._last_cheat_sheet_dialog = dlg
+        dlg.exec()
+
     def _build_screens(self) -> None:
         """Instancia as telas e popula o ``QStackedWidget``.
 
@@ -162,11 +261,30 @@ class MainWindow(QMainWindow):
         # StatusBar reflete DLL status quando Settings testa conexão.
         with contextlib.suppress(Exception):
             settings_screen.dll_status_changed.connect(self._on_dll_status_changed)
+        # Wave 3 v1.1.0 (Uma): após Save em SettingsScreen (dll_status muda
+        # de not_configured → disconnected), re-checa banner para esconder.
+        with contextlib.suppress(Exception):
+            settings_screen.dll_status_changed.connect(
+                lambda _status, _version: self._refresh_onboarding_banner()
+            )
         # Story 4.6 — empty state CTA do Catalog navega para Download.
         with contextlib.suppress(Exception):
             catalog_screen.request_navigate_to_download.connect(
                 lambda: self.set_active_screen(SCREEN_DOWNLOAD)
             )
+        # Wave 3 v1.1.0 (Uma): deep-link "Abrir Settings" do error card do
+        # DownloadScreen quando falha for DLL/credentials.
+        with contextlib.suppress(Exception):
+            download_screen.open_settings_requested.connect(
+                lambda: self.set_active_screen(SCREEN_SETTINGS)
+            )
+        # Hotfix v1.1.0 2026-05-07 (Felix+Uma — Pichau "não aparece quando
+        # baixou, ta feio"): CTA "Ver no Catálogo" do success card do
+        # DownloadScreen navega ao Catalog. Se ``CatalogScreen`` ganhar
+        # ``set_filter_symbol(symbol)`` no futuro, o symbol carregado pelo
+        # signal alimenta o filtro automaticamente (TODO follow-up).
+        with contextlib.suppress(Exception):
+            download_screen.open_catalog_requested.connect(self._on_open_catalog_for_symbol)
 
     def _add_screen(self, screen_id: str, widget: QWidget) -> None:
         idx = self._stack.addWidget(widget)
@@ -203,22 +321,42 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._metrics_panel)
 
         # Adapter em QThread separada — D2 COUNCIL-23 (sem parent Qt).
+        # Story v1.1.0 Wave 1 (Felix-UI BIG COUNCIL B2): conexões cross-thread
+        # DEVEM usar Qt.QueuedConnection explícito. Sem isso, em alguns hosts
+        # PySide6 6.11+ o auto-detect falha e o slot roda na worker thread —
+        # set_snapshot toca QSS/properties no MainThread e gera race silenciosa
+        # (mesmo padrão do bug v1.0.7 em DownloadScreen).
         self._metrics_adapter = MetricsAdapter(owner=self)
-        self._metrics_adapter.metrics_updated.connect(self._metrics_panel.set_snapshot)
-        self._metrics_adapter.exporter_unavailable.connect(self._on_metrics_unavailable)
+        self._metrics_adapter.metrics_updated.connect(
+            self._metrics_panel.set_snapshot,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._metrics_adapter.exporter_unavailable.connect(
+            self._on_metrics_unavailable,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._metrics_adapter.start()
 
-        # Versão app (direita) — usa __api_version__ do public_api como
-        # proxy enquanto não há __version__ exposto pela UI.
+        # Versão app (direita).
+        #
+        # Story v1.0.8 fix (Pichau live test 2026-05-06): antes a status bar
+        # mostrava "v1.0.0" hardcoded porque o code lia
+        # ``public_api.__api_version__`` (SemVer da API pública, intencional-
+        # mente fixa em "1.0.0" para ADR-007a — independente da versão do
+        # pacote). O usuário esperava ver a versão do pacote (1.0.7+) que
+        # ele instalou. Fix: lê ``data_downloader.__version__``, resolvido
+        # via :func:`importlib.metadata.version` com fallback literal —
+        # garantido estar em sync com ``pyproject.toml``.
         try:
-            from data_downloader.public_api import __api_version__ as app_version
+            from data_downloader import __version__ as app_version
         except ImportError:
-            app_version = "0.1.0"
+            app_version = "0.0.0"
         version_label = QLabel(
             format_msg("LBL_STATUSBAR_APP_VERSION", version=app_version),
             self,
         )
         version_label.setProperty("role", "muted")
+        version_label.setObjectName("appVersionLabel")
         bar.addPermanentWidget(version_label)
 
     def set_metrics_exporter(self, exporter: object | None) -> None:
@@ -236,6 +374,7 @@ class MainWindow(QMainWindow):
             return
         self._metrics_adapter.set_exporter(exporter)
 
+    @Slot()
     def _on_metrics_unavailable(self) -> None:
         """Slot chamado quando exporter está indisponível (graceful)."""
         # Panel já renderiza 'off' state via snapshot vazio. Não precisamos
@@ -290,6 +429,14 @@ class MainWindow(QMainWindow):
         quit_sc.activated.connect(self._on_quit_requested)
         self._shortcuts.append(quit_sc)
 
+        # Ctrl+/ — abre cheat sheet modal (Wave 3 v1.1.0 — Uma).
+        # Discoverability: Story 4.13 implementou shortcuts mas usuário não
+        # tinha como descobri-los — resolve gap CONCERNS BIG COUNCIL.
+        cheat_sc = QShortcut(QKeySequence("Ctrl+/"), self)
+        cheat_sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        cheat_sc.activated.connect(self._show_cheat_sheet)
+        self._shortcuts.append(cheat_sc)
+
         # File-level menu actions também — facilita tooltip via QAction (V2).
         # Não criamos QMenuBar nesta story para manter footprint pequeno.
         _ = QAction  # explicit import retained for possible future menubar
@@ -331,10 +478,36 @@ class MainWindow(QMainWindow):
                     download_screen.request_cancel()  # type: ignore[attr-defined]
             self.close()
 
-    def _on_dll_status_changed(self, status: str) -> None:
-        """Atualiza statusbar com novo DLL status (vindo de SettingsScreen)."""
+    @Slot(str)
+    def _on_open_catalog_for_symbol(self, symbol: str) -> None:
+        """Hotfix v1.1.0 — navega para CatalogScreen pós-download.
+
+        Chamado pelo CTA "Ver no Catálogo" do success card do
+        :class:`DownloadScreen`. Se ``CatalogScreen`` expor
+        ``set_filter_symbol(symbol)`` no futuro, aplicamos o filtro
+        automaticamente; senão apenas trocamos a tela ativa (graceful).
+        """
+        self.set_active_screen(SCREEN_CATALOG)
+        catalog = self._screens.get(SCREEN_CATALOG)
+        if catalog is not None and symbol and hasattr(catalog, "set_filter_symbol"):
+            with contextlib.suppress(Exception):
+                catalog.set_filter_symbol(symbol)  # type: ignore[attr-defined]
+
+    @Slot(str, str)
+    def _on_dll_status_changed(self, status: str, version: str = "—") -> None:
+        """Atualiza statusbar com novo DLL status (vindo de SettingsScreen).
+
+        Fix B-1 (Pichau-bug): assinatura agora aceita ``version`` real ao
+        invés de hardcodar ``"?"``. SettingsScreen emite a versão resolvida
+        (string da DLL real ou ``"—"`` quando não-conectado), eliminando
+        o placeholder fantasma na statusbar.
+
+        ``version`` mantém default ``"—"`` para chamadas legadas (testes
+        antigos que invocam ``_on_dll_status_changed("connected")`` sem
+        passar o segundo argumento — preserva compat sem mascarar bug).
+        """
         if status == "connected":
-            text = format_msg("LBL_STATUSBAR_DLL_CONNECTED", version="?")
+            text = format_msg("LBL_STATUSBAR_DLL_CONNECTED", version=version or "—")
             qss_status = "connected"
         elif status == "testing":
             text = format_msg("LBL_STATUSBAR_DLL_CONNECTING")
@@ -375,10 +548,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):  # noqa: N802
-        """Encerra worker threads (D3 COUNCIL-23) — metrics adapter + screens."""
+        """Encerra worker threads (D3 COUNCIL-23) — metrics adapter + screens.
+
+        Os screens (Download/Catalog) NÃO recebem ``closeEvent`` quando a janela
+        principal fecha (widgets-filhos não-top-level não recebem o evento), então
+        as ``QThread`` dos seus adapters precisam ser encerradas aqui. Sem isso,
+        a thread fica viva no teardown e o Qt no Windows emite
+        ``QThread: Destroyed while thread '' is still running`` + abort exit-code
+        (task #14 v1.1.0).
+        """
         # Shutdown metrics adapter primeiro (background polling).
         adapter = getattr(self, "_metrics_adapter", None)
         if adapter is not None:
             with contextlib.suppress(Exception):
                 adapter.shutdown()
+        # Shutdown dos adapters dos screens (DownloadAdapter / CatalogAdapter).
+        for screen in getattr(self, "_screens", {}).values():
+            screen_adapter = getattr(screen, "_adapter", None)
+            if screen_adapter is not None and hasattr(screen_adapter, "shutdown"):
+                with contextlib.suppress(Exception):
+                    screen_adapter.shutdown()
         super().closeEvent(event)

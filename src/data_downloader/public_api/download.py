@@ -268,7 +268,7 @@ def _run_download_worker(
         if catalog_factory is not None:
             catalog = catalog_factory(data_dir)  # type: ignore[assignment]
         else:
-            db_path = data_dir / "history" / "catalog.db"
+            db_path = data_dir / "_internal" / "catalog.db"
             catalog = Catalog(db_path=db_path, data_dir=data_dir)
             # Story v1.0.2 (Pichau smoke 2026-05-06): first-run auto-populate
             # do seed YAML embutido em ``CONTRACTS.md``. Sem isso, .exe
@@ -437,7 +437,13 @@ def _run_download_worker(
         err_msg = str(exc)
         # DLLInitError tem .name (NL_*); guardamos para o CLI mapear.
         if isinstance(exc, DLLInitError):
-            err_msg = f"{exc.name}: {exc.args[0]}"
+            raw_args0 = str(exc.args[0]) if exc.args else ""
+            # Hotfix v1.1.0 2026-05-08 (Felix+Aria): se o message já
+            # carrega um microcopy ID dedicado (formato "ERR_xxx: …"),
+            # preserva-o como prefixo — UI parsing dispara lookup via
+            # ``MSG.get(head_id)``. Caso contrário, prefixa com .name
+            # (NL_*) para mapeamento via humanize_nl_error (legado).
+            err_msg = raw_args0 if raw_args0.startswith("ERR_") else f"{exc.name}: {raw_args0}"
         set_result(
             _make_result(
                 job_id=job_id,
@@ -623,14 +629,25 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
         retry_attempts=retry_attempts,
         retry_cooldown=retry_cooldown,
     ):
+        # Hotfix v1.1.0 2026-05-08 (Felix+Aria — Pichau smoke real):
+        # smoke 2026-05-08T00:32:29 mostrou backend falhando com
+        # ``ERR_DLL_MARKET_RETRY_EXHAUSTED`` (3x 300s) mas UI exibia
+        # success card persistente. ``DLLInitError(name="NL_WAITING_SERVER")``
+        # já é o caminho correto, mas o microcopy genérico
+        # ``NL_WAITING_SERVER`` ("Aguardando servidor") não diferencia
+        # do timeout passageiro vs retry exhausted. Mantemos o ``name``
+        # para compatibilidade com adapters existentes mas o
+        # ``error_message`` agora carrega o ID dedicado
+        # ``ERR_DLL_MARKET_RETRY_EXHAUSTED`` que a UI prefere via
+        # parsing "ID: detail".
         raise DLLInitError(
             -1,
             "NL_WAITING_SERVER",
             (
-                f"MARKET_DATA não conectou após {retry_attempts} tentativas "
-                f"de {connect_timeout}s (cooldown {retry_cooldown:.0f}s). "
-                "Verifique horário de pregão B3 (09:00-18:30 BRT) e conexão "
-                "de rede (Q-DRIFT-02)."
+                f"ERR_DLL_MARKET_RETRY_EXHAUSTED: MARKET_DATA não conectou "
+                f"após {retry_attempts} tentativas de {connect_timeout}s "
+                f"(cooldown {retry_cooldown:.0f}s). Verifique horário de "
+                "pregão B3 (09:00-18:30 BRT) e conexão de rede (Q-DRIFT-02)."
             ),
         )
     _emit(

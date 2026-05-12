@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import warnings
 from typing import Any
 
 import pytest
@@ -259,6 +260,49 @@ def test_cross_thread_propagation_preserves_secret_redaction() -> None:
     assert payload["password"] == "***REDACTED***"
 
     clear_context()
+
+
+# =====================================================================
+# Fix B-4 (Wave A 2026-05-11) — null-call surfaces a RuntimeWarning
+# =====================================================================
+
+
+@pytest.mark.integration
+def test_copy_context_to_thread_no_arg_emits_runtime_warning() -> None:
+    """copy_context_to_thread() (no arg) is a no-op — must surface a warning.
+
+    Fix B-4 (Wave A): previously the null call was silent — adapters relying
+    on it for contextvar propagation lost job_id/symbol/etc. without any
+    log signal. We now emit a one-shot ``RuntimeWarning`` so the call site
+    is visible.
+    """
+    # Reset the module-level "warned once" flag so the test is independent of
+    # any prior call in the same process (other tests / pytest collection).
+    from data_downloader.observability import logging_config as _lc
+
+    _lc._COPY_CONTEXT_NULL_WARNED = False
+
+    with pytest.warns(RuntimeWarning, match="no-op for contextvar restoration"):
+        result = copy_context_to_thread()  # null call
+        # Returned value is callable (no-op); calling it returns None.
+        assert callable(result)
+        assert result() is None
+
+
+@pytest.mark.integration
+def test_copy_context_to_thread_no_arg_warning_is_one_shot() -> None:
+    """The null-call warning fires at most once per process (no spam)."""
+    from data_downloader.observability import logging_config as _lc
+
+    # Force "already warned" state — subsequent null calls must NOT re-warn.
+    _lc._COPY_CONTEXT_NULL_WARNED = True
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        # If a RuntimeWarning fired, it would convert to an exception. The
+        # call must succeed silently.
+        result = copy_context_to_thread()
+        assert callable(result)
 
 
 # =====================================================================

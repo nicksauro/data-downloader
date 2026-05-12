@@ -14,9 +14,15 @@ Padrão (QT_PATTERNS §2.3):
       imediatamente). Adapter consome ``handle.events()`` em loop bloqueante
       dentro do próprio QThread, traduzindo cada evento em sinal Qt.
 
-Story 2.9 — context propagation: snapshot dos contextvars do MainThread é
-copiado para o worker via :func:`copy_context_to_thread` (graceful fallback
-se observability não inicializada).
+Story 2.9 — context propagation: contextvars do MainThread NÃO propagam
+automaticamente para o worker do adapter (Qt slot já roda dentro da
+QThread). Fix B-4 (Wave A 2026-05-11): o uso prévio de
+:func:`copy_context_to_thread` (no-arg) era um no-op silencioso — call site
+removido. Para correlacionar logs do worker com o job, todos os parâmetros
+operacionais (symbol, datas, data_dir) já vêm via signal args, e
+``DownloadHandle`` propaga seu próprio ``job_id`` internamente. Propagação
+real MainThread → worker via contextvars está deferida (out of Wave A
+scope — requer alteração nas signal signatures).
 
 Métrica ``ui_progress_dropped_count`` (M11): adapter expõe getter
 ``dropped_count()``; ainda não emite drop (Story 3.8 conecta a Pyro). Por
@@ -26,6 +32,8 @@ ora acumula 0 — placeholder para a story futura.
 from __future__ import annotations
 
 import contextlib
+import logging
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,6 +45,15 @@ if TYPE_CHECKING:
 
 
 __all__ = ["DownloadAdapter"]
+
+# Story v1.0.8 fix (Pichau live test 2026-05-06): instrumentação para
+# diagnosticar bugs futuros tipo "DLL conectada mas nada acontece" — este
+# logger usa stdlib logging direto (não structlog) para garantir que mesmo
+# quando structlog está em modo CLI (sem bridge_to_stdlib) os eventos do
+# worker chegam ao QtLogHandler instalado em UI mode (que escuta o root
+# logger stdlib). Não substitui structlog em produção — apenas dois
+# breadcrumbs no entry point do worker QThread.
+_log = logging.getLogger("data_downloader.ui.adapters.download_adapter")
 
 
 class DownloadAdapter(QObject):
@@ -74,6 +91,7 @@ class DownloadAdapter(QObject):
         # ``_owner`` usado apenas para vincular lifetime — não é parent Qt.
         self._owner = parent
         self._thread = QThread()
+        self._thread.setObjectName("download-adapter")
         self.moveToThread(self._thread)
         self._thread.start()
         self._handle: DownloadHandle | None = None
@@ -98,18 +116,37 @@ class DownloadAdapter(QObject):
         Captura erros sincronamente (validação) e levantamentos no worker
         — emite via signal ``error``.
         """
-        # Story 2.9 — propaga contextvars do MainThread (caller pode ter
-        # bind correlation_id antes de start()). Best-effort.
-        try:
-            from data_downloader.observability import copy_context_to_thread
+        # Story v1.0.8 fix (Pichau live test 2026-05-06): breadcrumbs no
+        # entry point do worker QThread. Sem isto, em windowed mode após
+        # "Inicializando ProfitDLL..." o painel ficava silencioso por
+        # minutos — usuário não tinha sinal de que o worker arrancou nem
+        # de que ``public_api.download()`` foi invocado. Logs vão via
+        # stdlib root logger → QtLogHandler → ProgressCard._log_view.
+        _log.info(
+            "ui.download_worker_started thread=%s symbol=%s",
+            threading.current_thread().name,
+            symbol,
+        )
 
-            copy_context_to_thread()
-        except Exception:
-            pass
+        # Fix B-4 (Wave A 2026-05-11): a tentativa anterior de propagação
+        # via ``copy_context_to_thread()`` aqui era um no-op silencioso —
+        # ``@Slot`` em ``Qt.QueuedConnection`` já roda DENTRO da QThread,
+        # então ``contextvars.copy_context()`` capturaria o contexto vazio
+        # do worker. Todos os args operacionais (symbol, datas, data_dir)
+        # vêm via signal payload; ``DownloadHandle`` propaga ``job_id``
+        # internamente. MainThread → worker contextvar propagation real
+        # está deferida (refactor maior — out of Wave A).
 
         try:
             from data_downloader.public_api import download
 
+            _log.info(
+                "ui.invoking_api_download symbol=%s exchange=%s start=%s end=%s",
+                symbol,
+                exchange,
+                start,
+                end,
+            )
             self._handle = download(
                 symbol,
                 start,
@@ -117,7 +154,9 @@ class DownloadAdapter(QObject):
                 exchange=exchange,
                 data_dir=data_dir,
             )
+            _log.info("ui.api_download_returned_handle symbol=%s", symbol)
         except Exception as exc:
+            _log.exception("ui.api_download_raised symbol=%s", symbol)
             self.error.emit(exc)
             return
 
@@ -127,6 +166,7 @@ class DownloadAdapter(QObject):
             for event in self._handle.events():
                 self.progress.emit(event)
         except Exception as exc:
+            _log.exception("ui.events_loop_raised symbol=%s", symbol)
             self.error.emit(exc)
             return
 
@@ -140,6 +180,39 @@ class DownloadAdapter(QObject):
             self.cancelled.emit(exc)
             return
         except Exception as exc:
+            self.error.emit(exc)
+            return
+
+        # Hotfix v1.1.0 2026-05-08 (Felix+Aria — Pichau smoke real):
+        # Disambiguar success vs failure pelo ``DownloadResult.status``.
+        # ``public_api.download`` NÃO leak exception em caminhos como
+        # ``DLLInitError`` (NL_WAITING_SERVER) — captura e devolve
+        # ``DownloadResult(status='failed', error_message=...)``. Adapter
+        # ANTES emitia ``finished`` para QUALQUER result, levando a UI a
+        # exibir success card persistente "Download concluído 0 trades"
+        # mesmo após retry exhausted (3x 300s timeouts MARKET_DATA).
+        # Routing canônico: ``failed`` → error signal; ``cache_hit`` /
+        # ``completed`` / ``partial`` → finished (screen lida com 0
+        # trades como ``no_trades`` defensivamente — ver
+        # ``DownloadScreen._on_finished``).
+        status = getattr(result, "status", "completed")
+        if status == "failed":
+            error_message = getattr(result, "error_message", None) or "Erro desconhecido"
+            _log.error(
+                "ui.download_failed_status symbol=%s error=%s",
+                symbol,
+                error_message,
+            )
+            # Wrap em DataDownloaderError para que ``_on_error`` no
+            # screen possa fazer humanização via ``humanized_message``
+            # quando o error_message contiver um microcopy ID
+            # (formato canônico: "ERR_xxx: detail" ou "NL_xxx: detail").
+            try:
+                from data_downloader.public_api.exceptions import DataDownloaderError
+
+                exc = DataDownloaderError(error_message)
+            except Exception:
+                exc = RuntimeError(error_message)  # type: ignore[assignment]
             self.error.emit(exc)
             return
 
@@ -174,10 +247,25 @@ class DownloadAdapter(QObject):
         return self._dropped
 
     def shutdown(self) -> None:
-        """Encerra a thread limpa. Chamar no fechamento da janela."""
+        """Encerra a thread limpa. Chamar no fechamento da janela.
+
+        Se um download está em andamento, o slot ``start`` está ocupado num
+        loop Python na worker thread e ``quit()`` não é processado a tempo —
+        ``wait()`` estouraria o timeout e a ``QThread`` ficaria viva no
+        teardown, disparando ``QThread: Destroyed while thread
+        'download-adapter' is still running`` + abort exit-code no Windows
+        (task #14 v1.1.0). Por isso pedimos ``cancel`` ao handle primeiro (o
+        loop de progresso sai assim que o worker drena) e damos um wait
+        generoso. ``terminate()`` NÃO é usado — abortar a thread no meio de
+        uma chamada nativa corrompe o estado e gera ``access violation``.
+        """
+        with contextlib.suppress(Exception):
+            handle = self._handle
+            if handle is not None:
+                handle.cancel(timeout=0.0)
         try:
             self._thread.quit()
-            self._thread.wait(2000)
+            self._thread.wait(5000)
         except Exception:
             pass
 

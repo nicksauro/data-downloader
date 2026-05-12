@@ -39,6 +39,19 @@ Story 2.9 — context propagation: snapshot dos contextvars do MainThread é
 copiado para o worker via :func:`copy_context_to_thread` (graceful fallback
 se observability não inicializada).
 
+Fix B-4 (Wave A 2026-05-11) — ``_propagate_context`` previously called
+``copy_context_to_thread()`` (no target) inside the slot body. Because
+``@Slot`` em ``Qt.QueuedConnection`` já roda DENTRO da QThread do adapter,
+``contextvars.copy_context()`` capturava o contexto vazio do worker, nunca
+o do MainThread. Resultado: contextvars (job_id, symbol, ...) jamais chegavam
+ao worker — bug silencioso. O caller passa parâmetros explicitamente via
+signal payload (data_dir, rel_path); para logs estruturados, o adapter agora
+faz bind explícito de ``adapter_thread`` no boot da slot, e operações que
+precisam de job_id devem recebê-lo via signal arg (não via contextvar
+herdado). Propagação real cross-thread requer mudança nas signaturas dos
+sinais (defer para story futura) ou que o caller chame
+``copy_context_to_thread(target).run(...)`` ANTES de emitir o signal.
+
 Decisões D1-D4 herdadas de COUNCIL-23 (Story 3.1):
     - D1: signals para despachar slots cross-thread (não invokeMethod).
     - D2: adapter sem parent Qt (moveToThread requirement).
@@ -101,6 +114,7 @@ class CatalogAdapter(QObject):
         super().__init__(None)
         self._owner = parent
         self._thread = QThread()
+        self._thread.setObjectName("catalog-adapter")
         self.moveToThread(self._thread)
         self._thread.start()
 
@@ -207,17 +221,36 @@ class CatalogAdapter(QObject):
     # ------------------------------------------------------------------
 
     def _propagate_context(self) -> None:
-        """Story 2.9 — propaga contextvars do MainThread (best-effort)."""
-        with contextlib.suppress(Exception):
-            from data_downloader.observability import copy_context_to_thread
+        """Bind adapter-thread identity context (Fix B-4 Wave A).
 
-            copy_context_to_thread()
+        Note (B-4): the previous implementation called
+        ``copy_context_to_thread()`` (no target) which was a documented no-op
+        — the slot body already runs on the worker QThread, so
+        ``contextvars.copy_context()`` would only see the empty worker
+        context. We now bind a minimal worker-side identity (adapter name +
+        thread) so logs emitted from this adapter at least carry that
+        breadcrumb. True MainThread → worker propagation requires the caller
+        to ferry the snapshot via signal payload (deferred — out of Wave A
+        scope). All operational arguments (data_dir, rel_path) are already
+        passed explicitly via signal args, so no functional regression.
+        """
+        with contextlib.suppress(Exception):
+            from data_downloader.observability import bind_context
+
+            bind_context(
+                adapter="catalog",
+                adapter_thread=QThread.currentThread().objectName() or "catalog-adapter",
+            )
 
     def _open_catalog(self, data_dir: Path):  # type: ignore[no-untyped-def]
-        """Abre Catalog na convenção ``data_dir/history/catalog.db``."""
+        """Abre Catalog na convenção ``data_dir/_internal/catalog.db`` (ADR-024).
+
+        Migration silenciosa em ``Catalog.__post_init__`` cuida de mover
+        legacy ``data_dir/history/catalog.db`` se houver.
+        """
         from data_downloader.storage.catalog import Catalog
 
-        db_path = data_dir / "history" / "catalog.db"
+        db_path = data_dir / "_internal" / "catalog.db"
         # auto_reconcile=False — UI controla reconcile explicitamente para
         # evitar surpresa em cada list_partitions.
         return Catalog(
@@ -230,7 +263,7 @@ class CatalogAdapter(QObject):
     def _load_all_partitions(self, data_dir: Path) -> list[Partition]:
         """Lista TODAS as partições (todos symbols/exchanges)."""
         # Caso o catálogo ainda não exista, retornar lista vazia silently.
-        db_path = data_dir / "history" / "catalog.db"
+        db_path = data_dir / "_internal" / "catalog.db"
         if not db_path.exists():
             return []
 
@@ -247,7 +280,7 @@ class CatalogAdapter(QObject):
 
     def _delete_partition(self, data_dir: Path, rel_path: str) -> None:
         """Apaga arquivo + remove entrada SQLite (transação)."""
-        db_path = data_dir / "history" / "catalog.db"
+        db_path = data_dir / "_internal" / "catalog.db"
         if not db_path.exists():
             raise FileNotFoundError(f"catalog db not found: {db_path}")
 
@@ -273,7 +306,7 @@ class CatalogAdapter(QObject):
 
     def _revalidate_checksum(self, data_dir: Path, rel_path: str) -> bool:
         """Recalcula sha256 + compara contra catálogo."""
-        db_path = data_dir / "history" / "catalog.db"
+        db_path = data_dir / "_internal" / "catalog.db"
         if not db_path.exists():
             raise FileNotFoundError(f"catalog db not found: {db_path}")
 
@@ -301,7 +334,7 @@ class CatalogAdapter(QObject):
 
     def _reconcile(self, data_dir: Path) -> ReconcileReport:
         """Roda reconcile com auto_correct=True."""
-        db_path = data_dir / "history" / "catalog.db"
+        db_path = data_dir / "_internal" / "catalog.db"
         if not db_path.exists():
             from data_downloader.storage.catalog_models import ReconcileReport
 

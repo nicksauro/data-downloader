@@ -86,13 +86,16 @@ def _resolve_default_dll_path() -> Path:
     ``dist/data_downloader/profitdll/DLLs/Win64/`` (não existe) → erro
     "DLL companions ausentes (missing=[])" — o algoritmo não achava o
     diretório base, mascarando como missing list vazia.
+
+    Wave 1 v1.1.0 (Aria — ADR-018): detecção frozen delegada a
+    :func:`bundle_paths.is_frozen` + :func:`bundle_paths.bundle_root`.
     """
-    if getattr(sys, "frozen", False):
-        meipass_str = getattr(sys, "_MEIPASS", "")
-        if meipass_str:
-            candidate = Path(meipass_str) / "ProfitDLL.dll"
-            if candidate.is_file():
-                return candidate
+    from data_downloader._internal.bundle_paths import bundle_root, is_frozen
+
+    if is_frozen():
+        candidate = bundle_root() / "ProfitDLL.dll"
+        if candidate.is_file():
+            return candidate
     return Path(__file__).resolve().parents[3] / "profitdll" / "DLLs" / "Win64" / "ProfitDLL.dll"
 
 
@@ -123,14 +126,22 @@ def _load_verify_dll_companions() -> Any:
     # primeira execução em modo frozen porque ``parents[3]`` aponta para
     # ``sys._MEIPASS/data_downloader/dll`` (estrutura --onedir) — sem
     # ``scripts/`` ali.
-    if getattr(sys, "frozen", False):
-        meipass = Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "_MEIPASS", "") else None
-        if meipass is not None:
-            script_path = meipass / "scripts" / "verify-dll-companions.py"
-        else:
-            # Defensivo: frozen sem _MEIPASS (raro — ex.: --onefile não-extracted).
-            # Fallback para dir do executável (--onedir layout).
-            script_path = Path(sys.executable).parent / "scripts" / "verify-dll-companions.py"
+    #
+    # Wave 1 v1.1.0 (Aria — ADR-018): delegado a bundle_paths.asset_path
+    # que já cobre bundle_root → exe_dir/_internal → exe_dir → source.
+    from data_downloader._internal.bundle_paths import asset_path, is_frozen
+
+    if is_frozen():
+        try:
+            script_path = asset_path("scripts/verify-dll-companions.py")
+        except FileNotFoundError:
+            # Defensivo: nenhum candidato achou o script. Construímos path
+            # explícito apontando para exe_dir/scripts para que a checagem
+            # subsequente ``script_path.exists()`` levante DLLInitError com
+            # mensagem clara (caminho tentado fica visível para o usuário).
+            from data_downloader._internal.bundle_paths import exe_dir
+
+            script_path = exe_dir() / "scripts" / "verify-dll-companions.py"
     else:
         repo_root = Path(__file__).resolve().parents[3]
         script_path = repo_root / "scripts" / "verify-dll-companions.py"
@@ -201,12 +212,16 @@ class ProfitDLL:
         # do usuário é arbitrário — resolver relativo daria caminho
         # inexistente. Quando frozen + env relativo: ignorar env e usar
         # ``DEFAULT_DLL_PATH`` (já frozen-aware via ``_resolve_default_dll_path``).
+        # Wave 1 v1.1.0 (Aria — ADR-018/021): is_frozen via bundle_paths
+        # (proibido sys._MEIPASS direto fora de bundle_paths).
+        from data_downloader._internal.bundle_paths import is_frozen as _is_frozen
+
         chosen: str | Path
         if dll_path is not None:
             chosen = dll_path
         elif env_path:
             env_path_obj = Path(env_path)
-            if getattr(sys, "frozen", False) and not env_path_obj.is_absolute():
+            if _is_frozen() and not env_path_obj.is_absolute():
                 # Em bundle, ignora override relativo — DEFAULT é confiável.
                 chosen = DEFAULT_DLL_PATH
             else:

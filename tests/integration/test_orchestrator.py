@@ -28,9 +28,9 @@ import pytest
 from data_downloader.dll import callbacks as cb_module
 from data_downloader.dll.types import (
     TC_LAST_PACKET,
-    SystemTime,
+    TAssetID,
     TConnectorAssetIdentifier,
-    TConnectorTrade,
+    TradeFields,
 )
 from data_downloader.orchestrator.orchestrator import (
     JobConfig,
@@ -43,6 +43,17 @@ from data_downloader.storage.parquet_writer import ParquetWriter
 # =====================================================================
 # Mock DLL — versão simplificada para orchestrator
 # =====================================================================
+
+
+def _dt_to_brt_naive_ns(dt: datetime) -> int:
+    """datetime naive (BRT, lei R7) → ns desde 1970-01-01 — espelha
+    ``download_primitive._system_time_to_ns_local`` (v1.1.0 task #10)."""
+    from datetime import UTC
+
+    aware = dt.replace(tzinfo=UTC)
+    delta = aware - datetime(1970, 1, 1, tzinfo=UTC)
+    total_seconds = delta.days * 86_400 + delta.seconds
+    return total_seconds * 1_000_000_000 + delta.microseconds * 1_000
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +110,18 @@ class _FakeProfitDLL:
     ) -> int:
         self.get_history_calls += 1
         if self._round_idx >= len(self.rounds):
-            # Ran out of rounds — empty result (test misconfig or extra calls).
+            # Ran out of rounds — emite chunk vazio mas COMPLETO (progress=100)
+            # em vez de retornar 0 e nunca sinalizar fim. Sem isso o
+            # download_chunk fica em timeout (10s) → retry → suite "pendura"
+            # quando o chunker ADR-023 (1d) gera mais chunks que rounds
+            # configurados. v1.1.0 task #10 — Quinn QA 2026-05-11.
+            self._current_specs = []
+            thread = threading.Thread(
+                target=self._emit_loop,
+                args=(ticker, [], [50, 100], 0.001),
+                daemon=True,
+            )
+            thread.start()
             return 0
         round_cfg = self.rounds[self._round_idx]
         self._round_idx += 1
@@ -120,30 +142,29 @@ class _FakeProfitDLL:
         thread.start()
         return 0
 
-    def translate_trade(self, handle: int, struct: TConnectorTrade) -> int:
+    def translate_trade(self, handle: int) -> TradeFields | None:
+        """API V2 (Story 1.7b-followup): ``(handle) -> TradeFields | None``.
+
+        Antes (drift): ``(handle, struct) -> int`` mutando struct in-place
+        — incompatível com ``download_chunk`` atual; causava o deadlock da
+        suite de integração (v1.1.0 task #10 — Quinn QA 2026-05-11).
+        """
         self.translate_trade_calls += 1
         if handle >= len(self._current_specs):
-            return -1
+            return None
         spec = self._current_specs[handle]
-        st = SystemTime()
         ts: datetime = spec["timestamp"]
-        st.wYear = ts.year
-        st.wMonth = ts.month
-        st.wDay = ts.day
-        st.wDayOfWeek = 0
-        st.wHour = ts.hour
-        st.wMinute = ts.minute
-        st.wSecond = ts.second
-        st.wMilliseconds = ts.microsecond // 1000
-        struct.TradeDate = st
-        struct.TradeNumber = spec.get("trade_number", handle + 1)
-        struct.Price = spec["price"]
-        struct.Quantity = spec["quantity"]
-        struct.Volume = spec["price"] * spec["quantity"]
-        struct.BuyAgent = spec.get("buy_agent", 0)
-        struct.SellAgent = spec.get("sell_agent", 0)
-        struct.TradeType = spec.get("trade_type", 1)
-        return 0
+        return TradeFields(
+            version=0,
+            timestamp_ns=_dt_to_brt_naive_ns(ts),
+            trade_number=spec.get("trade_number", handle + 1),
+            price=spec["price"],
+            quantity=spec["quantity"],
+            volume=spec["price"] * spec["quantity"],
+            buy_agent_id=spec.get("buy_agent", 0),
+            sell_agent_id=spec.get("sell_agent", 0),
+            trade_type=spec.get("trade_type", 1),
+        )
 
     def _emit_loop(
         self,
@@ -163,10 +184,12 @@ class _FakeProfitDLL:
                 flags |= TC_LAST_PACKET
             self._history_cb(asset, i, flags)
             time.sleep(emit_delay)
+        # TProgressCallback V2 (Q-DRIFT-05): 2 args (TAssetID, c_int).
+        progress_asset = TAssetID(ticker=ticker, bolsa="F", feed=0)
         for p in progress_seq:
             if self._progress_cb is None:
                 break
-            self._progress_cb(ticker, "F", 0, p)
+            self._progress_cb(progress_asset, p)
             time.sleep(emit_delay)
 
 
@@ -288,7 +311,7 @@ def test_orchestrator_happy_path_single_chunk(
 
 
 # =====================================================================
-# Happy path — múltiplos chunks (1 semana WDO = 1 chunk; 2 semanas = 2)
+# Happy path — múltiplos chunks (ADR-023: 1d uniforme → N dias úteis = N chunks)
 # =====================================================================
 
 
@@ -297,8 +320,13 @@ def test_orchestrator_happy_path_two_chunks(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """2 semanas WDO → 2 chunks; ambos persistidos."""
-    # 2026-03-02 (seg) a 2026-03-13 (sex) = 10 dias úteis = 2 chunks de 5.
+    """Janela de 10 dias úteis WDO → 10 chunks de 1d (ADR-023).
+
+    2 chunks carregam trades (rounds 0 e 1); os 8 restantes ficam vazios
+    (out-of-rounds → no_trades). Ambos os chunks com trades escrevem na
+    mesma partição (março/2026) via UPSERT idempotente.
+    """
+    # 2026-03-02 (seg) a 2026-03-13 (sex) = 10 dias úteis = 10 chunks de 1d.
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 13, 17, 0, 0)
     base = start
@@ -321,10 +349,11 @@ def test_orchestrator_happy_path_two_chunks(
     result = orch.run(config)
 
     assert result.status == "completed"
-    assert result.chunks_completed == 2
+    assert result.chunks_completed == 10  # 10 dias úteis = 10 chunks (ADR-023)
     assert result.chunks_failed == 0
     assert result.metrics.trades_persisted == 7
-    # Mesma partição (março/2026) — 2 chunks escrevem na mesma; UPSERT idempotente.
+    # Só os 2 chunks com trades escrevem partição (mesma: março/2026); o
+    # out-of-rounds path devolve chunk vazio (no_trades) sem escrita.
     assert len(result.partitions_written) == 2
     parts = catalog.get_completed_partitions("WDOJ26", "F")
     # Última escrita ganha (UPSERT) — 1 partição com row_count = 7
@@ -343,11 +372,12 @@ def test_orchestrator_partial_when_one_chunk_fails(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """1º chunk falha (NL_* TRANSIENT); 2º chunk OK → status='partial' + 1 gap.
+    """1º chunk (1d) falha após retries; 2º chunk OK → status='partial' + gaps.
 
-    Story 2.6 — usa código TRANSIENT (NL_INTERNAL_ERROR) para que a policy
-    default tente retry. Para velocidade de teste, injeta policy com delay
-    quase zero. Usa max_attempts=3 para conservar a forma do teste original.
+    ADR-023: janela de 10 dias úteis = 10 chunks de 1d. Chunk 0 esgota 3
+    tentativas TRANSIENT (NL_INTERNAL_ERROR) → 1 gap 'failed_chunk'. Chunk 1
+    persiste 4 trades. Chunks 2..9 ficam vazios (out-of-rounds → 8 gaps
+    'no_trades'). Story 2.6 — policy fast (delay ~0) para velocidade.
     """
     from data_downloader.orchestrator.retry_policy import RetryPolicy
 
@@ -356,6 +386,7 @@ def test_orchestrator_partial_when_one_chunk_fails(
     # NL_INTERNAL_ERROR é TRANSIENT na taxonomia Nelo (Story 2.6).
     fail_round = {"get_history_return": -2147483647}  # NL_INTERNAL_ERROR
     success_round = _round_with_n_trades(4, base=start.replace(day=9))
+    # Chunk 0: 3 falhas (3 attempts). Chunk 1: sucesso. Chunks 2..9: out-of-rounds.
     dll = _FakeProfitDLL(rounds=[fail_round, fail_round, fail_round, success_round])
 
     config = JobConfig(
@@ -376,13 +407,15 @@ def test_orchestrator_partial_when_one_chunk_fails(
     result = orch.run(config)
 
     assert result.status == "partial"
-    assert result.chunks_completed == 1
+    # 1 chunk falhou (chunk 0); os outros 9 "completaram" (1 com trades, 8 vazios).
+    assert result.chunks_completed == 9
     assert result.chunks_failed == 1
     assert result.metrics.trades_persisted == 4
-    # Gap registrado para 1ª semana.
+    # 1 gap 'failed_chunk' (chunk 0) + 8 gaps 'no_trades' (chunks 2..9).
     gaps = catalog.get_gaps("WDOJ26")
-    assert len(gaps) == 1
-    assert gaps[0].reason == "failed_chunk"
+    failed_gaps = [g for g in gaps if g.reason == "failed_chunk"]
+    assert len(failed_gaps) == 1
+    assert len(gaps) == 9
 
 
 # =====================================================================
@@ -395,17 +428,18 @@ def test_orchestrator_failed_when_all_chunks_fail(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """Todos os 6 attempts falham (3 retries x 2 chunks) -> status='failed'.
+    """Todos os chunks falham → status='failed'.
 
-    Story 2.6 — usa código TRANSIENT + policy fast para reproduzir
-    comportamento de retry-then-fail.
+    ADR-023: janela de 10 dias úteis = 10 chunks de 1d. Cada chunk esgota 3
+    tentativas TRANSIENT (NL_INTERNAL_ERROR) → 30 rounds de falha. Nenhum
+    chunk completa → status='failed'. Story 2.6 — policy fast (delay ~0).
     """
     from data_downloader.orchestrator.retry_policy import RetryPolicy
 
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 13, 17, 0, 0)
     fail_round = {"get_history_return": -2147483647}  # NL_INTERNAL_ERROR (TRANSIENT)
-    dll = _FakeProfitDLL(rounds=[fail_round] * 6)  # 2 chunks x 3 attempts
+    dll = _FakeProfitDLL(rounds=[fail_round] * 30)  # 10 chunks x 3 attempts
 
     config = JobConfig(
         symbol="WDOJ26",
@@ -426,7 +460,7 @@ def test_orchestrator_failed_when_all_chunks_fail(
 
     assert result.status == "failed"
     assert result.chunks_completed == 0
-    assert result.chunks_failed == 2
+    assert result.chunks_failed == 10  # 10 dias úteis = 10 chunks (ADR-023)
     job = catalog.get_job(result.job_id)
     assert job is not None
     assert job.status == "failed"

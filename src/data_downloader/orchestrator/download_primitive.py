@@ -93,16 +93,17 @@ Histórico:
 - Story 1.3 final: 100_000 (~1s de buffer @ 100k trades/s)
 - Story 1.7g (COUNCIL-37 Quinn / H-E): 2_000_000.
 
-Razão do bump: smoke 4-day mostrou perda silenciosa de ~71% (218k trades)
-porque DLL despeja burst histórico em ~10 min antes do ``IngestorThread``
-drenar. Com 100k items, ``put_nowait`` saturava em ~10s e ``Full`` era
-engolido em ``callbacks.py::_history_cb`` (R3 — callback NÃO BLOQUEIA).
-2M items ≈ 32 MB RAM (par de int64) — folga confortável para 5 dias úteis
-de WDOFUT a 7-10k trades/s sustentado em burst.
+Razão do bump: smoke histórico 4-day mostrou perda silenciosa de ~71% (218k
+trades) porque DLL despeja burst histórico em ~10 min antes do
+``IngestorThread`` drenar. Com 100k items, ``put_nowait`` saturava em ~10s
+e ``Full`` era engolido em ``callbacks.py::_history_cb`` (R3 — callback NÃO
+BLOQUEIA). 2M items ≈ 32 MB RAM (par de int64) é margem de segurança
+ampla — pós-ADR-023 chunks são 1 dia útil (TODOS os ativos), e WDOFUT a
+7-10k trades/s sustentado por 1d gera ~250-400k trades, bem abaixo do cap.
 
 ADR-020 (Volume Completeness): bump é Nível 1 (capacity); contador
 ``queue_dropped`` em ``callback_stats`` é Nível 4 (detecção). Se
-``queue_dropped > 0`` em smoke 5-day pós-fix, escalar para 1.7h
+``queue_dropped > 0`` em smoke pós-fix, escalar para 1.7h
 (chunking automático — Nível 3 replay)."""
 
 PROGRESS_QUEUE_MAXSIZE: Final[int] = 1000

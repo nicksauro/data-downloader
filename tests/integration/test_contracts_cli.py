@@ -23,6 +23,18 @@ from data_downloader.orchestrator.contracts import populate_contracts_from_seed
 from data_downloader.storage.catalog import Catalog
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Roda cada teste num cwd limpo (defesa contra poluição cross-test).
+
+    O CLI resolve ``_DEFAULT_CATALOG_PATH`` (e o seed bundled) relativo ao
+    cwd em alguns fallbacks; rodar num ``tmp_path`` garante que nenhum
+    artefato deixado por outro módulo (ex.: ``data/_internal/catalog.db``
+    populado) vaze para estes testes. Ver V1.1.0-FIX-PLAN task #13.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -30,9 +42,12 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def isolated_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Aponta o CLI para um catálogo temporário isolado."""
-    db_path = tmp_path / "data" / "history" / "catalog.db"
-    # CLI usa _DEFAULT_CATALOG_PATH = Path('data') / 'history' / 'catalog.db' (relativo).
+    """Aponta o CLI para um catálogo temporário isolado.
+
+    ADR-024: o catálogo canônico vive em ``data/_internal/catalog.db``.
+    Aqui usamos um path absoluto sob ``tmp_path`` (independente do cwd).
+    """
+    db_path = tmp_path / "data" / "_internal" / "catalog.db"
     # monkey-patcheamos _open_catalog para apontar ao tmp_path absoluto.
     from data_downloader import cli as cli_mod
 
@@ -46,8 +61,21 @@ def isolated_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
 
 
 @pytest.mark.integration
-def test_cli_contracts_list_empty(runner: CliRunner, isolated_catalog_path: Path) -> None:
-    """List vazio → mensagem 'Nenhum contrato cadastrado'."""
+def test_cli_contracts_list_empty(
+    runner: CliRunner, isolated_catalog_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """List vazio → mensagem 'Nenhum contrato cadastrado'.
+
+    ``_open_catalog`` faz auto-populate do seed bundled (CONTRACTS.md) em
+    first-run, então um catálogo "vazio" nunca permanece vazio na prática.
+    Para exercitar o branch da mensagem amigável, neutralizamos o
+    auto-populate (no-op). Ver V1.1.0-FIX-PLAN task #13 — a hipótese
+    original de "poluição cwd/contracts.json" era incorreta; a causa real
+    é o seed embutido.
+    """
+    import data_downloader.orchestrator.contracts as contracts_mod
+
+    monkeypatch.setattr(contracts_mod, "populate_contracts_from_seed", lambda *a, **k: None)
     result = runner.invoke(app, ["contracts", "list"])
     assert result.exit_code == 0, result.output
     assert "Nenhum contrato cadastrado" in result.output

@@ -26,7 +26,13 @@ from data_downloader.validation.holidays_dat_parser import (
     parse_holidays_dat,
 )
 
-REAL_DAT_PATH = Path("profitdll/DLLs/Win64/holidays.dat")
+# G-10 (Quinn round 2 review 2026-05-11) — path absoluto relativo ao
+# project root via parents[2] (este arquivo: tests/unit/...), eliminando
+# flake cwd-dependent. ``parents[0]`` = unit/, ``parents[1]`` = tests/,
+# ``parents[2]`` = project root.
+REAL_DAT_PATH = (
+    Path(__file__).resolve().parents[2] / "profitdll" / "DLLs" / "Win64" / "holidays.dat"
+)
 
 
 @pytest.fixture(autouse=True)

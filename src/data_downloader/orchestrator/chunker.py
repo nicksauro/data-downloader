@@ -5,16 +5,16 @@ Sol (calendar handoff via validation.calendar_b3).
 
 Quebra um intervalo ``[start, end]`` em sub-intervalos consumíveis pelo
 :func:`download_chunk` (Story 1.3). Granularidade lookup por prefixo de
-contrato (decisão COUNCIL-05 §D4):
+contrato (V1.1.0+ Pichau directive 2026-05-07 — política unificada 1d):
 
 ================  ===================  ===================================
 Prefixo           dias úteis B3/chunk  Justificativa
 ================  ===================  ===================================
-``WDO*``          5                    Manual §3.1 Q12-E — futuros mini
-``WIN*``          5                    Idem
-``IND*``          5                    Índice cheio (alta vazão)
-``DOL*``          5                    Dólar cheio
-(outros — equity) 1                    Vazão menor; granularidade fina
+``WDO*``          1                    Pichau 2026-05-07 — política unificada
+``WIN*``          1                    Idem
+``IND*``          1                    Idem
+``DOL*``          1                    Idem
+(outros — equity) 1                    Política unificada V1.1.0+
 ================  ===================  ===================================
 
 Garantias:
@@ -53,13 +53,17 @@ __all__ = [
 
 
 # Mapa default — prefixo de contrato → dias úteis B3 por chunk.
-# COUNCIL-05 §D4 — Pyro recomenda 5 dias para futuros mini (alta vazão por
-# segundo de pregão), 1 dia para equities.
+# V1.1.0+ (ADR-023, Pichau directive 2026-05-07): política unificada — TODOS
+# os ativos baixam em 1 dia útil/chunk (supersede COUNCIL-05 §D4 que
+# recomendava 5 dias para futuros mini). Justificativa: feedback granular
+# per-day na UI, resilience por chunk (retry custa 1 dia, não 5), Q-DRIFT-37
+# fully mitigated (queue nunca atinge 2M trades em 1 dia mesmo no pior caso
+# WINFUT). Referência: docs/adr/ADR-023-uniform-chunk-policy-1d.md.
 CHUNK_DAYS: Final[Mapping[str, int]] = {
-    "WDO": 5,
-    "WIN": 5,
-    "IND": 5,
-    "DOL": 5,
+    "WDO": 1,
+    "WIN": 1,
+    "IND": 1,
+    "DOL": 1,
 }
 
 DEFAULT_EQUITY_CHUNK_DAYS: Final[int] = 1

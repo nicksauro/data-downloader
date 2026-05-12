@@ -71,7 +71,8 @@ import logging
 import os
 import sys
 import threading
-from typing import TYPE_CHECKING, Any, Final, Literal
+import warnings
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import structlog
 
@@ -133,20 +134,23 @@ class _DynamicStreamLogger:
         self._target_attr: str = "stderr"
 
     def _emit(self, message: str) -> None:
-        # noqa: print — INTENCIONAL. Este é o backend do PrintLogger structlog;
-        # structlog renderiza mensagem como string e este método a emite via
-        # print() para o stream resolvido. NÃO é debug print que viola R21.
+        # print-allowed: backend do PrintLogger structlog. structlog renderiza
+        # a mensagem como string e este método a emite via print() para o
+        # stream resolvido — NÃO é debug print que viola R21. Pragma
+        # ``# print-allowed`` é reconhecido por scripts/hooks/check_no_print.py
+        # e ignorado por ruff (diferente do legado ``noqa-print``, que vira
+        # "invalid noqa" se T20x for habilitado).
         stream = getattr(sys, self._target_attr, None)
         if stream is None:  # pragma: no cover — defensivo, sys.stderr quase nunca é None
             return
         try:
-            print(message, file=stream, flush=True)  # noqa: print
+            print(message, file=stream, flush=True)  # print-allowed: structlog backend
         except (ValueError, OSError):
             # Stream foi fechado entre o getattr e o print (race em teardown
             # de pytest capture). Fallback para o stderr "real" do
             # processo via fileno=2 — best-effort, NÃO levanta.
             with contextlib.suppress(ValueError, OSError, AttributeError):
-                print(message, file=sys.__stderr__, flush=True)  # noqa: print
+                print(message, file=sys.__stderr__, flush=True)  # print-allowed: fallback
 
     msg = _emit
     log = _emit
@@ -339,6 +343,7 @@ def configure_logging(
     level: str = "INFO",
     json_output: bool = True,
     redact: bool = True,
+    bridge_to_stdlib: bool = False,
 ) -> None:
     """Configura o pipeline canônico de structlog (ADR-010 / Story 2.9 AC1).
 
@@ -373,6 +378,16 @@ def configure_logging(
             Em testes pode-se desabilitar com ``redact=False`` quando se
             está validando explicitamente o conteúdo de uma chave sensível
             (raro — preferível usar mock).
+        bridge_to_stdlib: Se ``True``, encaminha eventos structlog para o
+            stdlib ``logging`` root logger (via
+            :class:`structlog.stdlib.LoggerFactory`). Necessário em UI
+            windowed mode (``console=False`` PyInstaller build) — sem o
+            bridge, structlog escreve em ``sys.stderr`` que está detached
+            e :class:`QtLogHandler` não captura. Default ``False`` para
+            preservar comportamento CLI (stderr direto, sem cost de
+            stdlib propagation). Story v1.0.8 fix (Pichau live test
+            2026-05-06): UI mode "DLL conectada" mas nenhum log
+            posterior aparecia — root cause era structlog → void.
 
     Raises:
         ValueError: ``level`` inválido (não corresponde a um nível de
@@ -408,15 +423,39 @@ def configure_logging(
     else:
         renderer = structlog.dev.ConsoleRenderer(colors=True)
 
-    structlog.configure(
-        processors=[*shared_processors, renderer],
-        wrapper_class=structlog.make_filtering_bound_logger(level_int),
-        context_class=dict,
+    # Story v1.0.8 fix — UI windowed mode bridge:
+    # Sem bridge_to_stdlib, factory é DynamicStreamLoggerFactory que escreve
+    # em sys.stderr (CLI mode OK; UI windowed → void, QtLogHandler nunca
+    # captura). Com bridge_to_stdlib=True, factory é
+    # ``structlog.stdlib.LoggerFactory`` e cada evento structlog vira um
+    # ``logging.LogRecord`` no root logger — QtLogHandler (ou qualquer
+    # ``logging.Handler``) captura cross-thread.
+    factory: Any
+    if bridge_to_stdlib:
+        factory = structlog.stdlib.LoggerFactory()
+        # Garante que stdlib root logger emite em INFO+ por default
+        # (root.level=WARNING) e tem ao menos um handler — necessário
+        # caso UI mode esqueça de instalar QtLogHandler antes do primeiro
+        # emit (defesa em profundidade; UI mode adiciona QtLogHandler em
+        # cima).
+        root_logger = logging.getLogger()
+        if root_logger.level == 0 or root_logger.level > level_int:
+            root_logger.setLevel(level_int)
+        # NÃO adicionamos StreamHandler aqui — caller decide (CLI mode
+        # geralmente não chama com bridge_to_stdlib=True; UI mode instala
+        # QtLogHandler externamente).
+    else:
         # Story 2.7 / COUNCIL-22: factory dinâmica resolve sys.stderr a
         # CADA emit, evitando crash em testes que capturam stdout
         # (CliRunner / capsys). Hot path safe — overhead < 10ns
         # (getattr de módulo). Ver _DynamicStreamLogger docstring.
-        logger_factory=DynamicStreamLoggerFactory(),
+        factory = DynamicStreamLoggerFactory()
+
+    structlog.configure(
+        processors=[*shared_processors, renderer],
+        wrapper_class=structlog.make_filtering_bound_logger(level_int),
+        context_class=dict,
+        logger_factory=factory,
         cache_logger_on_first_use=True,
     )
 
@@ -426,6 +465,7 @@ def setup_logging(
     *,
     format: Literal["json", "console"] = "json",  # noqa: A002 — kw arg name é canônico
     redact_secrets: bool = True,
+    bridge_to_stdlib: bool = False,
 ) -> None:
     """Alias com API alternativa para :func:`configure_logging`.
 
@@ -437,11 +477,16 @@ def setup_logging(
         level: Nível mínimo (case-insensitive).
         format: ``"json"`` (production) ou ``"console"`` (dev — colorido).
         redact_secrets: Se ``True`` (default), instala redaction processor.
+        bridge_to_stdlib: Se ``True``, roteia eventos structlog para o
+            ``logging`` stdlib root logger (necessário em UI windowed
+            mode — caller instala :class:`QtLogHandler` em seguida). Ver
+            docstring de :func:`configure_logging`.
     """
     configure_logging(
         level=level,
         json_output=(format == "json"),
         redact=redact_secrets,
+        bridge_to_stdlib=bridge_to_stdlib,
     )
 
 
@@ -528,7 +573,41 @@ def bound_context(**kwargs: Any) -> Iterator[None]:
 # =====================================================================
 
 
-def copy_context_to_thread(target: Callable[..., Any]) -> Callable[..., Any]:
+# Module-level flag (set once) used to ensure the no-arg ``copy_context_to_thread()``
+# usage warning is emitted at most one time per process. Avoids log spam from
+# adapters that call this per-slot (CatalogAdapter, DownloadAdapter).
+_COPY_CONTEXT_NULL_WARNED: bool = False
+
+
+def _warn_copy_context_noop_call_site_once() -> None:
+    """Emit a one-shot warning when ``copy_context_to_thread()`` is called null.
+
+    Fix B-4 (Wave A): the previous behavior of ``copy_context_to_thread()`` with
+    ``target=None`` returns a true no-op — useful as an "I observed contextvars"
+    marker but NOT a propagator. Call sites that rely on this for actual
+    propagation (e.g., Qt slots already running on the worker thread) get
+    silently broken contextvars. We surface the issue exactly once per process
+    so the operator can fix the call site (pass an explicit target, or use
+    ``snapshot.run(...)`` from the parent thread).
+    """
+    global _COPY_CONTEXT_NULL_WARNED
+    if _COPY_CONTEXT_NULL_WARNED:
+        return
+    _COPY_CONTEXT_NULL_WARNED = True
+    warnings.warn(
+        "copy_context_to_thread() called without a target — this is a no-op for "
+        "contextvar restoration. To actually propagate contextvars to a worker "
+        "thread, capture the snapshot in the parent thread and call "
+        "snapshot.run(worker_callable, ...) from the worker, OR pass an "
+        "explicit target= to receive a decorated callable.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def copy_context_to_thread(
+    target: Callable[..., Any] | None = None,
+) -> Callable[..., Any]:
     """Wrapper que propaga ``contextvars.copy_context()`` do main → worker thread.
 
     Decora ``target`` (função alvo de ``threading.Thread(target=...)``) para
@@ -543,13 +622,28 @@ def copy_context_to_thread(target: Callable[..., Any]) -> Callable[..., Any]:
     Aria nota: para QThread no Felix (Story 3.x), o mesmo padrão se aplica
     — passar o callable wrapped via ``QThread(...)`` ou ``QRunnable``.
 
+    **v1.1.0 fix (Aria Wave 1 — copy_context_to_thread null call):**
+    Antes desta correção, o call site em
+    :class:`CatalogAdapter._propagate_context` invocava
+    ``copy_context_to_thread()`` (sem argumentos), o que levantava
+    :class:`TypeError` (target obrigatório). O ``TypeError`` era engolido por
+    ``contextlib.suppress(Exception)`` no caller — bug silencioso onde
+    contextvars NÃO eram propagados mas nenhum log alertava (Felix v1.0.8 RCA).
+    A nova assinatura aceita ``target=None`` e devolve um no-op callable que
+    apenas mantém o snapshot vivo (best-effort) — useful pattern em adapters
+    Qt onde o worker já roda dentro de uma QThread e não há um ``target``
+    discreto para decorar.
+
     Args:
         target: Função sem contexto especial (mesma assinatura aceita por
-            ``threading.Thread(target=...)``).
+            ``threading.Thread(target=...)``). Se ``None`` (default), retorna
+            um no-op callable que apenas captura snapshot — semântica "marca
+            que contextvars foram observados" sem alterar control flow.
 
     Returns:
         Wrapper que executa ``target(*args, **kwargs)`` dentro de
-        ``ctx.run(...)`` — preserva contextvars do snapshot capturado.
+        ``ctx.run(...)`` — preserva contextvars do snapshot capturado. Quando
+        ``target=None``, retorna no-op que sempre retorna ``None``.
 
     Example::
 
@@ -560,8 +654,37 @@ def copy_context_to_thread(target: Callable[..., Any]) -> Callable[..., Any]:
         bind_context(job_id="abc")
         thread = threading.Thread(target=copy_context_to_thread(worker), args=(payload,))
         thread.start()
+
+    Example (no-arg form — apenas captura, sem decorar)::
+
+        # Adapter Qt já rodando no worker thread; quer "marcar" que
+        # snapshot parent foi tomado. Best-effort, NÃO levanta TypeError.
+        copy_context_to_thread()
     """
     ctx = contextvars.copy_context()
+
+    if target is None:
+        # No-op mode — apenas captura snapshot. Caller usa este modo para
+        # honrar a API de propagação sem ter um target discreto. O snapshot
+        # ``ctx`` é mantido vivo via closure enquanto o callable retornado
+        # estiver alive (defense in depth contra GC precoce).
+        #
+        # Fix B-4 (Wave A 2026-05-11): emite warning explícito UMA vez por
+        # processo para surfaceá-lo. O call sem ``target`` é tecnicamente
+        # válido (capture-only) mas NÃO restaura contextvars no worker
+        # thread — chamadas downstream a ``get_logger().info(...)`` no
+        # worker thread ainda perdem job_id/symbol/etc. Caller deve ou
+        # passar ``target=`` discreto OU capturar o snapshot na thread
+        # parent e re-rodar via ``snapshot.run(worker_callable, ...)``.
+        _warn_copy_context_noop_call_site_once()
+
+        def _noop(*_args: Any, **_kwargs: Any) -> None:
+            # Referencia ``ctx`` para mantê-lo vivo (mypy strict não reclama
+            # de variável não-usada via no-op statement).
+            _ = ctx
+            return None
+
+        return _noop
 
     def _wrapper(*args: Any, **kwargs: Any) -> Any:
         return ctx.run(target, *args, **kwargs)
@@ -587,7 +710,10 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
         Bound logger structlog (já com pipeline configurado se
         :func:`configure_logging` foi chamado).
     """
-    return structlog.get_logger(name)
+    # structlog.get_logger é tipado como Any → cast explícito para satisfazer
+    # mypy strict (warn_return_any). BoundLogger é a classe real produzida
+    # pelo pipeline configurado via wrap_class=structlog.stdlib.BoundLogger.
+    return cast("structlog.stdlib.BoundLogger", structlog.get_logger(name))
 
 
 # =====================================================================

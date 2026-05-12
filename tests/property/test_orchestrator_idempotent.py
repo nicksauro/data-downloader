@@ -30,9 +30,9 @@ from hypothesis import strategies as st
 from data_downloader.dll import callbacks as cb_module
 from data_downloader.dll.types import (
     TC_LAST_PACKET,
-    SystemTime,
+    TAssetID,
     TConnectorAssetIdentifier,
-    TConnectorTrade,
+    TradeFields,
 )
 from data_downloader.orchestrator.orchestrator import (
     JobConfig,
@@ -81,6 +81,10 @@ class _ReplayDLL:
     def get_history_trades(self, ticker: str, *_args: Any, **_kw: Any) -> int:
         self.get_history_calls += 1
         if self._round_idx >= len(self.rounds):
+            # Out-of-rounds → chunk vazio mas COMPLETO — evita deadlock quando
+            # chunker ADR-023 (1d) gera mais chunks que rounds (v1.1.0 task #10).
+            self._current = []
+            threading.Thread(target=self._emit_loop, args=(ticker, []), daemon=True).start()
             return 0
         self._current = self.rounds[self._round_idx]
         self._round_idx += 1
@@ -92,29 +96,28 @@ class _ReplayDLL:
         thread.start()
         return 0
 
-    def translate_trade(self, handle: int, struct: TConnectorTrade) -> int:
+    def translate_trade(self, handle: int) -> TradeFields | None:
+        """API V2 (Story 1.7b-followup) — ``(handle) -> TradeFields | None``."""
+        from datetime import UTC
+
         if handle >= len(self._current):
-            return -1
+            return None
         spec = self._current[handle]
-        st_obj = SystemTime()
         ts: datetime = spec["timestamp"]
-        st_obj.wYear = ts.year
-        st_obj.wMonth = ts.month
-        st_obj.wDay = ts.day
-        st_obj.wDayOfWeek = 0
-        st_obj.wHour = ts.hour
-        st_obj.wMinute = ts.minute
-        st_obj.wSecond = ts.second
-        st_obj.wMilliseconds = ts.microsecond // 1000
-        struct.TradeDate = st_obj
-        struct.TradeNumber = spec["trade_number"]
-        struct.Price = spec["price"]
-        struct.Quantity = spec["quantity"]
-        struct.Volume = spec["price"] * spec["quantity"]
-        struct.BuyAgent = 0
-        struct.SellAgent = 0
-        struct.TradeType = 1
-        return 0
+        aware = ts.replace(tzinfo=UTC)
+        delta = aware - datetime(1970, 1, 1, tzinfo=UTC)
+        ns = (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+        return TradeFields(
+            version=0,
+            timestamp_ns=ns,
+            trade_number=spec["trade_number"],
+            price=spec["price"],
+            quantity=spec["quantity"],
+            volume=spec["price"] * spec["quantity"],
+            buy_agent_id=0,
+            sell_agent_id=0,
+            trade_type=1,
+        )
 
     def _emit_loop(self, ticker: str, specs: list[dict[str, Any]]) -> None:
         time.sleep(0.005)
@@ -126,8 +129,9 @@ class _ReplayDLL:
             flags = TC_LAST_PACKET if i == n - 1 else 0
             self._history_cb(asset, i, flags)
             time.sleep(0.001)
+        # TProgressCallback V2 (Q-DRIFT-05): 2 args (TAssetID, c_int).
         if self._progress_cb is not None:
-            self._progress_cb(ticker, "F", 0, 100)
+            self._progress_cb(TAssetID(ticker=ticker, bolsa="F", feed=0), 100)
 
 
 # =====================================================================

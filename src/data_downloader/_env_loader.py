@@ -20,8 +20,15 @@ rota antiga).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
+from data_downloader._internal.bundle_paths import (
+    exe_dir,
+    is_frozen,
+)
+from data_downloader._internal.bundle_paths import (
+    user_env_path as _bp_user_env_path,
+)
 
 __all__ = ["bootstrap_env", "user_env_path"]
 
@@ -34,10 +41,14 @@ def user_env_path() -> Path:
     ``settings_screen._config_path``) e ``.data-downloader/`` (hífen, em
     ``cli._bootstrap_env``) — essa divergência era um bug latente.
 
+    Wave 1 v1.1.0 (Aria — ADR-018): delegado para
+    :func:`data_downloader._internal.bundle_paths.user_env_path` —
+    fonte canônica única.
+
     Returns:
         ``Path.home() / ".data-downloader" / ".env"`` resolvido.
     """
-    return Path.home() / ".data-downloader" / ".env"
+    return _bp_user_env_path()
 
 
 def bootstrap_env() -> bool:
@@ -52,6 +63,10 @@ def bootstrap_env() -> bool:
         2. ``<exe-dir> / .env``         (frozen, PyInstaller --onedir)
         3. ``~/.data-downloader/.env``  (user-global, written by Settings UI)
 
+    Wave 1 v1.1.0 (Aria — ADR-018): detecção de frozen mode delegada a
+    :func:`bundle_paths.is_frozen` — antes era ``getattr(sys, 'frozen', False)``
+    duplicado.
+
     Returns:
         ``True`` se carregou um ``.env``; ``False`` caso contrário (sem
         ``python-dotenv`` instalado, ou nenhum candidato existe).
@@ -64,10 +79,10 @@ def bootstrap_env() -> bool:
         return False
 
     candidates: list[Path] = [Path.cwd() / ".env"]
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         # PyInstaller --onedir: .env junto do .exe é o caminho natural para
         # usuário final que não conhece cwd.
-        candidates.append(Path(sys.executable).parent / ".env")
+        candidates.append(exe_dir() / ".env")
     candidates.append(user_env_path())
 
     for candidate in candidates:

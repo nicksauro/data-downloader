@@ -4,6 +4,9 @@
 -- Escopo: aditivo — adiciona tabela `_migration_log` (checkpoint resumível
 -- do framework de migration de Parquet schema).
 --
+-- Note: A partir de v1.1.0 (ADR-024) o catalog vive em data/_internal/.
+-- Migration silenciosa em runtime; este SQL é só para forensics manual.
+--
 -- NOTA: Esta DDL é REFERÊNCIA DOCUMENTAL. A fonte de verdade
 -- executável vive em `data_downloader.storage.catalog._DDL_V1_1_0_DELTAS`
 -- (aplicada via `Catalog._apply_migrations` no boot — idempotente).
@@ -13,7 +16,7 @@
 -- Para aplicar manualmente em um catálogo existente sem reiniciar o
 -- processo:
 --
---     sqlite3 data/history/catalog.db < v1_0_0_to_v1_1_0.sql
+--     sqlite3 data/_internal/catalog.db < v1_0_0_to_v1_1_0.sql
 
 BEGIN;
 

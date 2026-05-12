@@ -1,8 +1,11 @@
 """Unit tests — orchestrator.chunker (Story 1.7a AC1).
 
+V1.1.0 Pichau directive (2026-05-07, supersede 2026-05-06):
+"SEMPRE 1 dia útil/chunk, qualquer ativo." → CHUNK_DAYS WDO/WIN/IND/DOL = 1.
+
 Cobertura:
 
-- ``chunk_days_for_symbol``: prefix lookup (WDO=5, WIN=5, equity default=1).
+- ``chunk_days_for_symbol``: prefix lookup (WDO=1, WIN=1, equity default=1).
 - ``chunk_date_range``: cobertura completa, sem overlap, sem gap.
 - Skip de fins de semana e feriados B3.
 - Edge cases: range vazio, range sem dias úteis, 1 dia útil.
@@ -34,11 +37,11 @@ from data_downloader.validation.calendar_b3 import b3_business_days_range
 @pytest.mark.parametrize(
     ("symbol", "expected"),
     [
-        ("WDOJ26", 5),
-        ("WDOFUT", 5),
-        ("WINJ26", 5),
-        ("INDV26", 5),
-        ("DOLF26", 5),
+        ("WDOJ26", 1),
+        ("WDOFUT", 1),
+        ("WINJ26", 1),
+        ("INDV26", 1),
+        ("DOLF26", 1),
         ("PETR4", DEFAULT_EQUITY_CHUNK_DAYS),
         ("VALE3", DEFAULT_EQUITY_CHUNK_DAYS),
         ("ITUB4", DEFAULT_EQUITY_CHUNK_DAYS),
@@ -76,28 +79,35 @@ def test_chunk_days_for_symbol_default_equity_override() -> None:
 
 @pytest.mark.unit
 def test_chunk_date_range_wdo_5_business_days() -> None:
-    """WDO em uma semana B3 sem feriado: 1 chunk de 5 dias úteis."""
+    """WDO em uma semana B3 sem feriado: 5 chunks de 1 dia útil cada
+    (V1.1.0+ política unificada Pichau 2026-05-07)."""
     # Segunda 2026-03-02 a sexta 2026-03-06 (5 dias úteis, sem feriado).
     chunks = chunk_date_range("WDOJ26", "F", date(2026, 3, 2), date(2026, 3, 6))
-    assert len(chunks) == 1
+    assert len(chunks) == 5
     assert chunks[0].start == datetime(2026, 3, 2, 0, 0, 0)
     assert chunks[0].end.year == 2026
     assert chunks[0].end.month == 3
-    assert chunks[0].end.day == 6
+    assert chunks[0].end.day == 2
+    assert chunks[-1].end.day == 6
     assert chunks[0].symbol == "WDOJ26"
     assert chunks[0].exchange == "F"
+    for c in chunks:
+        # cada chunk = 1 dia útil (start.date() == end.date()).
+        assert c.start.date() == c.end.date()
 
 
 @pytest.mark.unit
 def test_chunk_date_range_wdo_two_weeks() -> None:
-    """WDO em 10 dias úteis: 2 chunks de 5."""
+    """WDO em 10 dias úteis: 10 chunks de 1 dia (V1.1.0+ Pichau 2026-05-07)."""
     # 2026-03-02..03-13 = 10 dias úteis (sem feriado).
     chunks = chunk_date_range("WDOJ26", "F", date(2026, 3, 2), date(2026, 3, 13))
-    assert len(chunks) == 2
+    assert len(chunks) == 10
     assert chunks[0].start.day == 2
-    assert chunks[0].end.day == 6
-    assert chunks[1].start.day == 9
-    assert chunks[1].end.day == 13
+    assert chunks[0].end.day == 2
+    assert chunks[-1].start.day == 13
+    assert chunks[-1].end.day == 13
+    for c in chunks:
+        assert c.start.date() == c.end.date()
 
 
 @pytest.mark.unit
@@ -233,7 +243,7 @@ def test_chunks_cover_all_business_days_no_gap_no_overlap(rng: tuple[date, date]
 @settings(max_examples=200, deadline=None)
 @given(rng=_date_range())
 def test_each_chunk_size_le_n_business_days(rng: tuple[date, date]) -> None:
-    """Para WDO (CHUNK_DAYS=5), nenhum chunk tem > 5 dias úteis."""
+    """Para WDO (V1.1.0+ CHUNK_DAYS=1), nenhum chunk tem > 1 dia útil."""
     start, end = rng
     chunks = chunk_date_range("WDOJ26", "F", start, end)
     n_max = CHUNK_DAYS["WDO"]

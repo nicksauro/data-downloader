@@ -30,9 +30,9 @@ import pytest
 from data_downloader.dll import callbacks as cb_module
 from data_downloader.dll.types import (
     TC_LAST_PACKET,
-    SystemTime,
+    TAssetID,
     TConnectorAssetIdentifier,
-    TConnectorTrade,
+    TradeFields,
 )
 from data_downloader.orchestrator.orchestrator import (
     JobConfig,
@@ -40,6 +40,16 @@ from data_downloader.orchestrator.orchestrator import (
 )
 from data_downloader.storage.catalog import Catalog
 from data_downloader.storage.parquet_writer import ParquetWriter
+
+
+def _dt_to_brt_naive_ns(dt: datetime) -> int:
+    """datetime naive (BRT, lei R7) → ns desde 1970-01-01 (v1.1.0 task #10)."""
+    from datetime import UTC
+
+    aware = dt.replace(tzinfo=UTC)
+    delta = aware - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+
 
 # =====================================================================
 # Spy MetricsEmitter
@@ -113,6 +123,13 @@ class _FakeProfitDLL:
     ) -> int:
         self.get_history_calls += 1
         if self._round_idx >= len(self.rounds):
+            # Out-of-rounds → chunk vazio mas COMPLETO (progress=100) — evita
+            # timeout/retry/deadlock quando o chunker ADR-023 (1d) gera mais
+            # chunks que rounds (v1.1.0 task #10 — Quinn QA).
+            self._current_specs = []
+            threading.Thread(
+                target=self._emit_loop, args=(ticker, [], [50, 100], 0.001), daemon=True
+            ).start()
             return 0
         round_cfg = self.rounds[self._round_idx]
         self._round_idx += 1
@@ -129,30 +146,24 @@ class _FakeProfitDLL:
         thread.start()
         return 0
 
-    def translate_trade(self, handle: int, struct: TConnectorTrade) -> int:
+    def translate_trade(self, handle: int) -> TradeFields | None:
+        """API V2 (Story 1.7b-followup) — ``(handle) -> TradeFields | None``."""
         self.translate_trade_calls += 1
         if handle >= len(self._current_specs):
-            return -1
+            return None
         spec = self._current_specs[handle]
-        st = SystemTime()
         ts: datetime = spec["timestamp"]
-        st.wYear = ts.year
-        st.wMonth = ts.month
-        st.wDay = ts.day
-        st.wDayOfWeek = 0
-        st.wHour = ts.hour
-        st.wMinute = ts.minute
-        st.wSecond = ts.second
-        st.wMilliseconds = ts.microsecond // 1000
-        struct.TradeDate = st
-        struct.TradeNumber = spec.get("trade_number", handle + 1)
-        struct.Price = spec["price"]
-        struct.Quantity = spec["quantity"]
-        struct.Volume = spec["price"] * spec["quantity"]
-        struct.BuyAgent = spec.get("buy_agent", 0)
-        struct.SellAgent = spec.get("sell_agent", 0)
-        struct.TradeType = spec.get("trade_type", 1)
-        return 0
+        return TradeFields(
+            version=0,
+            timestamp_ns=_dt_to_brt_naive_ns(ts),
+            trade_number=spec.get("trade_number", handle + 1),
+            price=spec["price"],
+            quantity=spec["quantity"],
+            volume=spec["price"] * spec["quantity"],
+            buy_agent_id=spec.get("buy_agent", 0),
+            sell_agent_id=spec.get("sell_agent", 0),
+            trade_type=spec.get("trade_type", 1),
+        )
 
     def _emit_loop(
         self,
@@ -172,10 +183,12 @@ class _FakeProfitDLL:
                 flags |= TC_LAST_PACKET
             self._history_cb(asset, i, flags)
             time.sleep(emit_delay)
+        # TProgressCallback V2 (Q-DRIFT-05): 2 args (TAssetID, c_int).
+        progress_asset = TAssetID(ticker=ticker, bolsa="F", feed=0)
         for p in progress_seq:
             if self._progress_cb is None:
                 break
-            self._progress_cb(ticker, "F", 0, p)
+            self._progress_cb(progress_asset, p)
             time.sleep(emit_delay)
 
 
@@ -324,7 +337,13 @@ def test_orchestrator_emits_metrics_for_two_chunks(
     catalog: Catalog,
     writer: ParquetWriter,
 ) -> None:
-    """2 chunks (10 dias úteis WDO) → 2 chunk_completed{success}."""
+    """Janela de 10 dias úteis WDO → 10 chunks de 1d (ADR-023).
+
+    2 chunks carregam trades → 2 ``chunks_completed_total{status=success}``;
+    os 8 restantes ficam vazios (out-of-rounds → status=no_trades). O
+    histograma ``chunk_duration_seconds`` é observado 1x por chunk
+    (independente do status) → 10 observações.
+    """
     start = datetime(2026, 3, 2, 9, 0, 0)
     end = datetime(2026, 3, 13, 17, 0, 0)
     dll = _FakeProfitDLL(
@@ -351,9 +370,9 @@ def test_orchestrator_emits_metrics_for_two_chunks(
         for c in spy.counters
         if c[0] == "chunks_completed_total" and c[1] == {"symbol": "WDOJ26", "status": "success"}
     ]
-    assert len(chunks_done) == 2
+    assert len(chunks_done) == 2  # apenas 2 chunks têm trades
     chunk_durations = [o for o in spy.observations if o[0] == "chunk_duration_seconds"]
-    assert len(chunk_durations) == 2
+    assert len(chunk_durations) == 10  # 10 dias úteis = 10 chunks (ADR-023)
 
 
 @pytest.mark.integration

@@ -48,10 +48,16 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def populated_data_dir(tmp_path: Path) -> Path:
-    """Cria data_dir com 1 partição v1.0.0 + catálogo registrado."""
+    """Cria data_dir com 1 partição v1.0.0 + catálogo registrado.
+
+    ADR-024 (v1.1.0): o catálogo canônico é ``data/_internal/catalog.db``
+    (antes ``data/history/catalog.db``). A CLI ``migrate`` abre o catálogo
+    via ``_open_migration_components`` que usa ``_internal/``; o fixture e
+    as asserções precisam usar o mesmo path (v1.1.0 task #10 — Quinn QA).
+    """
     data_dir = tmp_path / "data"
     catalog = Catalog(
-        db_path=data_dir / "history" / "catalog.db",
+        db_path=data_dir / "_internal" / "catalog.db",
         data_dir=data_dir,
         auto_reconcile=False,
     )
@@ -149,7 +155,7 @@ def test_cli_migrate_execute_success(runner: CliRunner, populated_data_dir: Path
     assert "Migração concluída" in result.output
     # Verifica catalog.
     catalog = Catalog(
-        db_path=populated_data_dir / "history" / "catalog.db",
+        db_path=populated_data_dir / "_internal" / "catalog.db",
         data_dir=populated_data_dir,
         auto_reconcile=False,
     )
@@ -207,7 +213,7 @@ def test_cli_migrate_rollback(runner: CliRunner, populated_data_dir: Path) -> No
     assert "Rollback concluído" in result_rb.output
 
     catalog = Catalog(
-        db_path=populated_data_dir / "history" / "catalog.db",
+        db_path=populated_data_dir / "_internal" / "catalog.db",
         data_dir=populated_data_dir,
         auto_reconcile=False,
     )

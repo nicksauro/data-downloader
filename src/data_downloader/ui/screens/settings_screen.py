@@ -55,7 +55,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
@@ -115,24 +115,27 @@ def _auto_detect_dll_path() -> Path | None:
 
     Ordem de busca:
 
-        1. **Frozen mode (PyInstaller)**: ``sys._MEIPASS / ProfitDLL.dll``
+        1. **Frozen mode (PyInstaller)**: ``bundle_root() / ProfitDLL.dll``
            — DLL bundled com o .exe é o golden path para o usuário final.
         2. **Common Nelogica install paths** (Windows): Program Files
            (x64 e x86) + ``%PROGRAMFILES%`` env var.
         3. **Bundled dev path** (repo): ``profitdll/DLLs/Win64/ProfitDLL.dll``
            — útil em dev/CI quando rodando ``python -m data_downloader``.
 
+    Wave 1 v1.1.0 (Aria — ADR-018): detecção frozen delegada a
+    :func:`bundle_paths.is_frozen` + :func:`bundle_paths.bundle_root`.
+
     Returns:
         Primeiro path existente como :class:`pathlib.Path`, ou ``None`` se
         nenhum candidato existe (usuário precisa usar Browse... ou colar).
     """
+    from data_downloader._internal.bundle_paths import bundle_root, is_frozen
+
     # 1. Frozen mode — bundled DLL é o golden path.
-    if getattr(sys, "frozen", False):
-        meipass_str = getattr(sys, "_MEIPASS", "")
-        if meipass_str:
-            bundled = Path(meipass_str) / "ProfitDLL.dll"
-            if bundled.is_file():
-                return bundled
+    if is_frozen():
+        bundled = bundle_root() / "ProfitDLL.dll"
+        if bundled.is_file():
+            return bundled
 
     # 2. Common Nelogica install paths (Windows).
     candidates: list[Path] = [
@@ -171,19 +174,156 @@ _ENV_VARS = ("PROFITDLL_KEY", "PROFITDLL_USER", "PROFITDLL_PASS")
 _SECRET_VARS = ("PROFITDLL_KEY", "PROFITDLL_PASS")
 
 
+# =====================================================================
+# QThread workers (Story v1.1.0 Wave 3 P1 — Felix-UI BIG COUNCIL B3+B4)
+# =====================================================================
+#
+# Antes da Wave 3, ``_do_test_connection``, ``_on_integrity_clicked`` e
+# ``_on_reconcile_clicked`` rodavam SYNC no MainThread, freezando a UI
+# por 1-30s (test_connection chamando ProfitDLL Init/Login + waitMarket;
+# integrity iterando sha256 de N partições; reconcile abrindo SQLite +
+# scan disco). Resultado: ao clicar "Testar Conexão" o usuário não conseguia
+# nem mover a janela. Wave 3 P1 move tudo para QThread workers — UI fica
+# fluida e workers comunicam via signals (Qt.QueuedConnection na conexão).
+
+
+class _TestConnectionWorker(QObject):
+    """Worker que executa teste de conexão DLL em QThread.
+
+    Move a operação bloqueante (ProfitDLL Init + Login + wait) para fora
+    do MainThread. Caller cria o worker, move para QThread, conecta
+    ``finished`` ao slot UI (Qt.QueuedConnection) e dá ``thread.start()``.
+    """
+
+    finished = Signal(bool, str, str)  # ok, version, error_msg
+
+    def __init__(self, key: str, user: str, password: str) -> None:
+        super().__init__()
+        self._key = key
+        self._user = user
+        self._password = password
+
+    @Slot()
+    def run(self) -> None:
+        ok = False
+        version = ""
+        error_msg = ""
+        try:
+            if not all((self._key, self._user, self._password)):
+                error_msg = "Credenciais ausentes (PROFITDLL_KEY/USER/PASS)"
+            else:
+                # Import lazy — evita custo se worker nunca rodar.
+                from data_downloader.dll.wrapper import ProfitDLL
+
+                with ProfitDLL() as dll:
+                    dll.initialize_market_only(
+                        self._key, self._user, self._password, minimal_handshake=True
+                    )
+                    connected = dll.wait_market_connected(timeout=30, retry_attempts=1)
+                    if connected:
+                        version = str(getattr(dll, "dll_version", None) or "?")
+                        ok = True
+                    else:
+                        error_msg = "Timeout aguardando MARKET_CONNECTED"
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            ok = False
+        self.finished.emit(ok, version, error_msg)
+
+
+class _IntegrityWorker(QObject):
+    """Worker que executa integrity check (revalidate sha256 de N partições).
+
+    Itera sobre todas as partições do catálogo na thread separada — cada
+    partição requer leitura do arquivo + cálculo sha256, custo O(arquivo).
+    """
+
+    finished = Signal(int, int, str)  # n_ok, n_total, error_msg
+    progress = Signal(int, int)  # current, total (não usado por padrão; hook futuro)
+
+    def __init__(self, data_dir: Path) -> None:
+        super().__init__()
+        self._data_dir = data_dir
+
+    @Slot()
+    def run(self) -> None:
+        n_ok = 0
+        n_total = 0
+        error_msg = ""
+        try:
+            from data_downloader.ui.adapters.catalog_adapter import CatalogAdapter
+
+            adapter = CatalogAdapter()
+            try:
+                partitions = adapter._load_all_partitions(self._data_dir)
+                n_total = len(partitions)
+                for idx, partition in enumerate(partitions, start=1):
+                    rel_path = getattr(partition, "partition_path", "")
+                    if not rel_path:
+                        continue
+                    try:
+                        ok = adapter._revalidate_checksum(self._data_dir, rel_path)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        n_ok += 1
+                    self.progress.emit(idx, n_total)
+            finally:
+                adapter.shutdown()
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+        self.finished.emit(n_ok, n_total, error_msg)
+
+
+class _ReconcileWorker(QObject):
+    """Worker que executa reconcile (auto-correct=True) em QThread.
+
+    Reconcile abre SQLite + scaneia disco — pode demorar segundos em
+    catálogos grandes. Movido para fora do MainThread.
+    """
+
+    finished = Signal(int, int, str)  # n_added, n_removed, error_msg
+
+    def __init__(self, data_dir: Path) -> None:
+        super().__init__()
+        self._data_dir = data_dir
+
+    @Slot()
+    def run(self) -> None:
+        n_added = 0
+        n_removed = 0
+        error_msg = ""
+        try:
+            from data_downloader.ui.adapters.catalog_adapter import CatalogAdapter
+
+            adapter = CatalogAdapter()
+            try:
+                report = adapter._reconcile(self._data_dir)
+                n_added = len(getattr(report, "auto_corrected_paths", ()) or ())
+                # reconcile não remove drift B (só reporta) — Story 4.10.
+                n_removed = 0
+            finally:
+                adapter.shutdown()
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+        self.finished.emit(n_added, n_removed, error_msg)
+
+
 class SettingsScreen(QWidget):
     """Tela Configurações — 4 seções em QScrollArea (5 estados).
 
     Sinais públicos:
         state_changed(str): emitido em troca de estado.
-        dll_status_changed(str): emitido quando teste de conexão completa.
-            Payload: "connected" | "disconnected" | "testing" | "not_configured".
+        dll_status_changed(str, str): emitido quando teste de conexão completa.
+            Payload: (status, version) onde status é
+            "connected" | "disconnected" | "testing" | "not_configured"
+            e version é a string da versão (ou "—" quando indisponível).
         data_dir_changed(str): emitido quando usuário muda data_dir + salva.
             Payload: novo path.
     """
 
     state_changed = Signal(str)
-    dll_status_changed = Signal(str)
+    dll_status_changed = Signal(str, str)
     data_dir_changed = Signal(str)
     # Story 4.4 — emitted após check_for_updates() completar.
     # Payload: status string (UpdateStatus value: "up_to_date" | "outdated"
@@ -196,6 +336,16 @@ class SettingsScreen(QWidget):
         self._current_state = STATE_NORMAL
         self._dirty = False  # marca quando usuário editou algo.
         self._secrets_visible: dict[str, bool] = dict.fromkeys(_SECRET_VARS, False)
+
+        # Timer (parented em ``self``) usado para restaurar STATE_NORMAL após o
+        # toast de Save. Antes era ``QTimer.singleShot(3000, lambda: ...)`` órfão
+        # — o lambda capturava ``self`` e podia disparar após a screen ser
+        # destruída, causando ``RuntimeError: Signal source has been deleted``
+        # de forma não-determinística (poluindo testes seguintes). Com parent
+        # ``self`` o timer é destruído junto com a screen → não vaza.
+        self._state_restore_timer = QTimer(self)
+        self._state_restore_timer.setSingleShot(True)
+        self._state_restore_timer.timeout.connect(lambda: self._set_state(STATE_NORMAL))
 
         # Layout exterior — title + scroll com seções.
         self._title = QLabel(format_msg("LBL_SETTINGS_SCREEN_TITLE"), self)
@@ -280,6 +430,12 @@ class SettingsScreen(QWidget):
         self._toast = self._build_toast()
         self._toast.setParent(self)
         self._toast.hide()
+        # Timer (parented em self) que esconde o toast após ``duration_ms``.
+        # Antes era ``QTimer.singleShot(duration_ms, self._toast.hide)`` órfão —
+        # podia disparar após a screen ser destruída → RuntimeError flaky.
+        self._toast_hide_timer = QTimer(self)
+        self._toast_hide_timer.setSingleShot(True)
+        self._toast_hide_timer.timeout.connect(self._toast.hide)
 
         # Atalhos.
         self._register_shortcuts()
@@ -466,7 +622,7 @@ class SettingsScreen(QWidget):
         defaults = (
             ("LBL_PERF_DLL_QUEUE_SIZE", "8192 (default)"),
             ("LBL_PERF_STORAGE_QUEUE_SIZE", "2048 (default)"),
-            ("LBL_PERF_CHUNK_SIZE", "30 dias (default)"),
+            ("LBL_PERF_CHUNK_SIZE", "1 dia útil (todos os ativos)"),
             ("LBL_PERF_MAX_RETRIES", "3 (default)"),
         )
         for label_id, value in defaults:
@@ -632,15 +788,18 @@ class SettingsScreen(QWidget):
         if auto_detected:
             # Toast curto informando que populamos automaticamente —
             # ``_show_toast`` requer widget visível; defer para depois do
-            # show() inicial via QTimer (idem padrão de outras screens).
-            QTimer.singleShot(
-                250,
+            # show() inicial via QTimer parented em self (não órfão — evita
+            # disparo pós-destruição da screen → RuntimeError flaky).
+            self._auto_detect_toast_timer = QTimer(self)
+            self._auto_detect_toast_timer.setSingleShot(True)
+            self._auto_detect_toast_timer.timeout.connect(
                 lambda: self._show_toast(
                     format_msg("LBL_DLL_PATH_AUTO_DETECTED"),
                     variant="info",
                     duration_ms=3000,
-                ),
+                )
             )
+            self._auto_detect_toast_timer.start(250)
 
         # Env vars from environment.
         for var_name, (edit, _toggle) in self._env_widgets.items():
@@ -702,7 +861,7 @@ class SettingsScreen(QWidget):
             self._free_space_label.setText("—")
 
         # Catalog status — count partitions sem auto-reconcile (rápido).
-        db_path = data_dir / "history" / "catalog.db"
+        db_path = data_dir / "_internal" / "catalog.db"
         n_partitions = 0
         if db_path.exists():
             try:
@@ -737,63 +896,55 @@ class SettingsScreen(QWidget):
         toggle_btn.setText(format_msg("BTN_HIDE_SECRET" if new_visible else "BTN_SHOW_SECRET"))
 
     def _on_test_connection_clicked(self) -> None:
-        """Testa conexão DLL.
+        """Testa conexão DLL — agora rodando em QThread (Wave 3 P1).
 
-        Esta é uma operação que tipicamente precisa de DLL — em ambiente
-        sem DLL (testes/Linux), retorna falha rapidamente. Implementação
-        síncrona com timeout curto; futuro: mover para adapter próprio
-        em QThread se for muito lento (Story 3.x).
+        Antes da Wave 3 v1.1.0, esta operação rodava SYNC no MainThread
+        (com ``QTimer.singleShot(50, ...)`` apenas para repintar o status
+        antes do bloqueio). Felix-UI BIG COUNCIL B3 identificou que
+        ``ProfitDLL.initialize_market_only`` + ``wait_market_connected``
+        bloqueavam a UI por 1-30s, impedindo o usuário até de mover a
+        janela. Agora o trabalho real vai para :class:`_TestConnectionWorker`
+        em QThread separada; a UI permanece fluida.
         """
+        # Lê credenciais runtime — Save deve ter aplicado em os.environ.
+        key = os.environ.get("PROFITDLL_KEY", "").strip()
+        user = os.environ.get("PROFITDLL_USER", "").strip()
+        pwd = os.environ.get("PROFITDLL_PASS", "").strip()
+
         self._set_dll_status("testing")
         self._test_conn_btn.setEnabled(False)
 
-        # Defer execução para próximo evento — UI atualiza primeiro.
-        QTimer.singleShot(50, self._do_test_connection)
+        self._dispatch_test_connection_worker(key, user, pwd)
 
-    def _do_test_connection(self) -> None:
-        """Tenta conectar à DLL com credenciais atuais.
+    def _dispatch_test_connection_worker(self, key: str, user: str, password: str) -> None:
+        """Cria QThread + worker e os conecta — chamado por
+        :meth:`_on_test_connection_clicked`.
 
-        Story v1.0.5 fix (Pichau live test 2026-05-06): a versão pré-v1.0.5
-        importava ``data_downloader.dll.session.open_session`` — módulo que
-        NUNCA EXISTIU no código real. Resultado: o try/except sempre caía
-        no ``ImportError`` e o botão "Test Connection" reportava falha
-        independente das credenciais — bug 100% reprodutível.
-
-        Substituído por uso direto do ``ProfitDLL`` wrapper (módulo correto):
-        valida credenciais runtime via ``os.environ`` (Save deve ter
-        propagado), inicializa em modo market-only com ``minimal_handshake``
-        (handshake rápido espelhando probe canônico) e aguarda
-        MARKET_CONNECTED com timeout curto (30s — UX: feedback rápido,
-        teste real é "smoke" não download).
+        Mantemos referências em ``self`` para evitar GC (regra padrão Qt:
+        thread/worker precisam sobreviver até ``finished``). Cleanup é
+        idempotente — ``deleteLater`` agendado nos signals.
         """
-        ok = False
-        version: str | None = None
-        error_msg = ""
-        try:
-            # ler credenciais runtime — Save deve ter aplicado em os.environ.
-            key = os.environ.get("PROFITDLL_KEY", "").strip()
-            user = os.environ.get("PROFITDLL_USER", "").strip()
-            pwd = os.environ.get("PROFITDLL_PASS", "").strip()
-            if not all((key, user, pwd)):
-                error_msg = "Credenciais ausentes (PROFITDLL_KEY/USER/PASS)"
-            else:
-                from data_downloader.dll.wrapper import ProfitDLL
+        self._test_thread = QThread(self)
+        self._test_thread.setObjectName("settings-test-connection")
+        self._test_worker = _TestConnectionWorker(key, user, password)
+        self._test_worker.moveToThread(self._test_thread)
 
-                with ProfitDLL() as dll:
-                    dll.initialize_market_only(key, user, pwd, minimal_handshake=True)
-                    connected = dll.wait_market_connected(timeout=30, retry_attempts=1)
-                    if connected:
-                        version = getattr(dll, "dll_version", None) or "?"
-                        ok = True
-                    else:
-                        error_msg = "Timeout aguardando MARKET_CONNECTED"
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            ok = False
+        self._test_thread.started.connect(self._test_worker.run)
+        # Qt.QueuedConnection — ``finished`` cruza thread → MainThread.
+        self._test_worker.finished.connect(
+            self._on_test_connection_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self._test_worker.finished.connect(self._test_thread.quit)
+        self._test_worker.finished.connect(self._test_worker.deleteLater)
+        self._test_thread.finished.connect(self._test_thread.deleteLater)
+        self._test_thread.start()
 
+    @Slot(bool, str, str)
+    def _on_test_connection_finished(self, ok: bool, version: str, error_msg: str) -> None:
+        """Slot MainThread — recebe resultado do worker e atualiza UI."""
         self._test_conn_btn.setEnabled(True)
         if ok:
-            self._set_dll_status("connected", version=version or "?")
+            self._set_dll_status("connected", version=version or "—")
             self._show_toast(
                 format_msg("TST_TEST_CONNECTION_OK"), variant="success", duration_ms=3000
             )
@@ -805,9 +956,14 @@ class SettingsScreen(QWidget):
                 duration_ms=5000,
             )
             self._set_state(STATE_ERROR)
-            # Detalhe técnico no hint do empty (caso exista).
             if error_msg:
                 self._dll_empty_hint.setText(f"Erro técnico: {error_msg}")
+
+    # Backward-compat alias — testes antigos podem chamar ``_do_test_connection``
+    # diretamente esperando a versão sync. Novo código deve usar
+    # ``_on_test_connection_clicked`` (assíncrono via QThread).
+    def _do_test_connection(self) -> None:  # pragma: no cover compat
+        self._on_test_connection_clicked()
 
     def _on_open_dll_folder_clicked(self) -> None:
         path_str = self._dll_path_edit.text().strip()
@@ -930,15 +1086,13 @@ class SettingsScreen(QWidget):
     # ------------------------------------------------------------------
 
     def _on_integrity_clicked(self) -> None:
-        """Roda integrity check via CatalogAdapter.revalidate_checksum.
+        """Roda integrity check em QThread (Wave 3 P1 — Felix-UI BIG COUNCIL B4).
 
         Itera sobre TODAS as partições do catálogo e revalida sha256 de cada
-        uma. Operação síncrona — para catálogos grandes (>500 partições) pode
-        bloquear MainThread; aceitável v1.0.3 pois usuário clicou
-        explicitamente. V1.1+ migra para QThread (Story 4.10 follow-up).
+        uma. Em catálogos grandes (>500 partições) o sync bloqueava MainThread
+        por segundos — agora rodamos em :class:`_IntegrityWorker` em QThread
+        separada e atualizamos UI via signal Queued.
         """
-        from data_downloader.ui.adapters.catalog_adapter import CatalogAdapter
-
         data_dir_str = self._data_dir_edit.text().strip()
         if not data_dir_str:
             self._show_toast(
@@ -950,77 +1104,64 @@ class SettingsScreen(QWidget):
 
         data_dir = Path(data_dir_str)
         self._integrity_btn.setEnabled(False)
-        try:
-            adapter = CatalogAdapter()
-            try:
-                # Lista partições direto via helper interno (mesma thread —
-                # evita signals para simplicidade no settings flow).
-                partitions = adapter._load_all_partitions(data_dir)
-                n_total = len(partitions)
-                if n_total == 0:
-                    self._show_toast(
-                        format_msg("TST_SETTINGS_INTEGRITY_OK", n_ok=0, n_total=0),
-                        variant="success",
-                        duration_ms=3000,
-                    )
-                    return
+        # Toast de progresso aparece imediatamente — UI fluida.
+        self._show_toast(
+            format_msg("TST_SETTINGS_INTEGRITY_RUNNING", n_partitions="?"),
+            variant="info",
+            duration_ms=2000,
+        )
 
-                self._show_toast(
-                    format_msg("TST_SETTINGS_INTEGRITY_RUNNING", n_partitions=n_total),
-                    variant="info",
-                    duration_ms=2000,
-                )
-                n_ok = 0
-                n_bad = 0
-                for partition in partitions:
-                    rel_path = getattr(partition, "partition_path", "")
-                    if not rel_path:
-                        continue
-                    try:
-                        ok = adapter._revalidate_checksum(data_dir, rel_path)
-                    except Exception:
-                        ok = False
-                    if ok:
-                        n_ok += 1
-                    else:
-                        n_bad += 1
+        self._integrity_thread = QThread(self)
+        self._integrity_thread.setObjectName("settings-integrity")
+        self._integrity_worker = _IntegrityWorker(data_dir)
+        self._integrity_worker.moveToThread(self._integrity_thread)
 
-                if n_bad == 0:
-                    self._show_toast(
-                        format_msg("TST_SETTINGS_INTEGRITY_OK", n_ok=n_ok, n_total=n_total),
-                        variant="success",
-                        duration_ms=4000,
-                    )
-                else:
-                    self._show_toast(
-                        format_msg(
-                            "TST_SETTINGS_INTEGRITY_DRIFT",
-                            n_bad=n_bad,
-                            n_total=n_total,
-                        ),
-                        variant="warning",
-                        duration_ms=6000,
-                    )
-            finally:
-                adapter.shutdown()
-        except Exception as exc:
+        self._integrity_thread.started.connect(self._integrity_worker.run)
+        self._integrity_worker.finished.connect(
+            self._on_integrity_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self._integrity_worker.finished.connect(self._integrity_thread.quit)
+        self._integrity_worker.finished.connect(self._integrity_worker.deleteLater)
+        self._integrity_thread.finished.connect(self._integrity_thread.deleteLater)
+        self._integrity_thread.start()
+
+    @Slot(int, int, str)
+    def _on_integrity_finished(self, n_ok: int, n_total: int, error_msg: str) -> None:
+        """Slot MainThread — recebe resultado do integrity worker."""
+        self._integrity_btn.setEnabled(True)
+        if error_msg:
             self._show_toast(
-                format_msg("TST_SETTINGS_OPERATION_ERROR", error=str(exc)),
+                format_msg("TST_SETTINGS_OPERATION_ERROR", error=error_msg),
                 variant="error",
                 duration_ms=5000,
             )
-        finally:
-            self._integrity_btn.setEnabled(True)
+            return
+        n_bad = n_total - n_ok
+        if n_total == 0 or n_bad == 0:
+            self._show_toast(
+                format_msg("TST_SETTINGS_INTEGRITY_OK", n_ok=n_ok, n_total=n_total),
+                variant="success",
+                duration_ms=4000,
+            )
+        else:
+            self._show_toast(
+                format_msg(
+                    "TST_SETTINGS_INTEGRITY_DRIFT",
+                    n_bad=n_bad,
+                    n_total=n_total,
+                ),
+                variant="warning",
+                duration_ms=6000,
+            )
 
     def _on_reconcile_clicked(self) -> None:
-        """Roda reconcile (auto-correct=True) via CatalogAdapter.reconcile.
+        """Roda reconcile em QThread (Wave 3 P1 — Felix-UI BIG COUNCIL B4).
 
-        Operação síncrona (mesma justificativa do integrity acima).
-        Mostra toast de progresso, executa, e mostra toast de resultado
-        com contadores de drift A (auto-corrected) e drift B (reportado).
+        Reconcile abre SQLite + scan disco — pode demorar segundos.
+        Movido para :class:`_ReconcileWorker` em QThread, UI fica fluida.
+        Toast de progresso aparece imediatamente, toast de resultado vem
+        do slot ``_on_reconcile_finished``.
         """
-        from data_downloader.ui.adapters.catalog_adapter import CatalogAdapter
-
         data_dir_str = self._data_dir_edit.text().strip()
         if not data_dir_str:
             self._show_toast(
@@ -1032,36 +1173,47 @@ class SettingsScreen(QWidget):
 
         data_dir = Path(data_dir_str)
         self._reconcile_btn.setEnabled(False)
-        try:
+        self._show_toast(
+            format_msg("TST_SETTINGS_RECONCILE_RUNNING"),
+            variant="info",
+            duration_ms=2000,
+        )
+
+        self._reconcile_thread = QThread(self)
+        self._reconcile_thread.setObjectName("settings-reconcile")
+        self._reconcile_worker = _ReconcileWorker(data_dir)
+        self._reconcile_worker.moveToThread(self._reconcile_thread)
+
+        self._reconcile_thread.started.connect(self._reconcile_worker.run)
+        self._reconcile_worker.finished.connect(
+            self._on_reconcile_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self._reconcile_worker.finished.connect(self._reconcile_thread.quit)
+        self._reconcile_worker.finished.connect(self._reconcile_worker.deleteLater)
+        self._reconcile_thread.finished.connect(self._reconcile_thread.deleteLater)
+        self._reconcile_thread.start()
+
+    @Slot(int, int, str)
+    def _on_reconcile_finished(self, n_added: int, n_removed: int, error_msg: str) -> None:
+        """Slot MainThread — recebe resultado do reconcile worker."""
+        self._reconcile_btn.setEnabled(True)
+        if error_msg:
             self._show_toast(
-                format_msg("TST_SETTINGS_RECONCILE_RUNNING"),
-                variant="info",
-                duration_ms=2000,
-            )
-            adapter = CatalogAdapter()
-            try:
-                report = adapter._reconcile(data_dir)
-                n_added = len(getattr(report, "auto_corrected_paths", ()) or ())
-                n_removed = 0  # reconcile não remove drift B (só reporta).
-                self._show_toast(
-                    format_msg("TST_RECONCILE_DONE", n_added=n_added, n_removed=n_removed),
-                    variant="success",
-                    duration_ms=4000,
-                )
-            finally:
-                adapter.shutdown()
-        except Exception as exc:
-            self._show_toast(
-                format_msg("TST_SETTINGS_OPERATION_ERROR", error=str(exc)),
+                format_msg("TST_SETTINGS_OPERATION_ERROR", error=error_msg),
                 variant="error",
                 duration_ms=5000,
             )
-        finally:
-            self._reconcile_btn.setEnabled(True)
+            return
+        self._show_toast(
+            format_msg("TST_RECONCILE_DONE", n_added=n_added, n_removed=n_removed),
+            variant="success",
+            duration_ms=4000,
+        )
 
     def _on_save_clicked(self) -> None:
-        """Persiste config em ~/.data_downloader/config.toml (ADR-012) +
-        credenciais em ~/.data-downloader/.env (Story v1.0.3 — Pichau
+        """Persiste config em ~/.data-downloader/config.toml (ADR-012,
+        canônico hífen pós-v1.0.5) + credenciais em ~/.data-downloader/.env
+        (Story v1.0.3 — Pichau
         2026-05-06: UI digita creds → clica Save → persiste, sem precisar
         criar .env manualmente).
 
@@ -1108,8 +1260,8 @@ class SettingsScreen(QWidget):
         # Notifica MainWindow para CatalogScreen recarregar com novo data_dir.
         if config_data["data_dir"]:
             self.data_dir_changed.emit(config_data["data_dir"])
-        # Restaura state normal após toast.
-        QTimer.singleShot(3000, lambda: self._set_state(STATE_NORMAL))
+        # Restaura state normal após toast (timer parented em self — ver __init__).
+        self._state_restore_timer.start(3000)
 
     def _write_env_credentials(self, env_data: dict[str, str]) -> None:
         """Escreve credenciais em ~/.data-downloader/.env (formato KEY=value).
@@ -1365,27 +1517,46 @@ class SettingsScreen(QWidget):
             pass
 
     def _set_dll_status(self, status: str, version: str = "") -> None:
-        """status: connected | disconnected | testing | not_configured."""
+        """status: connected | disconnected | testing | not_configured.
+
+        Quando ``status != "connected"`` o label "Sobre / Versão DLL" é
+        resetado para o placeholder (``—``) para evitar reter uma versão
+        fantasma de uma sessão anterior — fix B-2 (Pichau-bug: statusbar
+        + about-dll mostravam versão obsoleta em sessões sem credenciais
+        válidas).
+        """
         self._dll_status_label.setProperty("status", status)
+        # Versão resolvida usada tanto no label de status quanto no signal.
+        resolved_version = version or "—"
         if status == "connected":
             self._dll_status_label.setText(
-                format_msg("LBL_DLL_STATUS_CONNECTED", version=version or "?")
+                format_msg("LBL_DLL_STATUS_CONNECTED", version=resolved_version)
             )
             self._about_dll_label.setText(
-                format_msg("LBL_ABOUT_DLL_VERSION", version=version or "?")
+                format_msg("LBL_ABOUT_DLL_VERSION", version=resolved_version)
             )
         elif status == "disconnected":
             self._dll_status_label.setText(format_msg("LBL_DLL_STATUS_DISCONNECTED"))
+            # Fix B-2: reset about-dll label para não reter versão antiga.
+            self._about_dll_label.setText(format_msg("LBL_ABOUT_DLL_VERSION", version="—"))
         elif status == "testing":
             self._dll_status_label.setText(format_msg("LBL_DLL_STATUS_TESTING"))
+            # Fix B-2: reset about-dll durante teste — evita exibir versão
+            # de tentativa anterior enquanto o worker ainda está rodando.
+            self._about_dll_label.setText(format_msg("LBL_ABOUT_DLL_VERSION", version="—"))
             self._set_state(STATE_LOADING)
         elif status == "not_configured":
             self._dll_status_label.setText(format_msg("LBL_DLL_STATUS_NOT_CONFIGURED"))
+            # Fix B-2: reset about-dll quando .env desaparece / nunca foi
+            # configurado — caso clássico do Pichau-bug.
+            self._about_dll_label.setText(format_msg("LBL_ABOUT_DLL_VERSION", version="—"))
             self._set_state(STATE_EMPTY)
 
         self._dll_status_label.style().unpolish(self._dll_status_label)
         self._dll_status_label.style().polish(self._dll_status_label)
-        self.dll_status_changed.emit(status)
+        # Fix B-1: emitir versão real (resolvida) ao invés de só status —
+        # MainWindow consome para popular statusbar sem hardcode "?".
+        self.dll_status_changed.emit(status, resolved_version)
 
     def _open_in_explorer(self, path: Path) -> None:
         try:
@@ -1408,4 +1579,4 @@ class SettingsScreen(QWidget):
         self._toast.move(max(margin, x), y)
         self._toast.show()
         self._toast.raise_()
-        QTimer.singleShot(duration_ms, self._toast.hide)
+        self._toast_hide_timer.start(duration_ms)

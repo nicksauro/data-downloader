@@ -1,7 +1,7 @@
 # QUIRKS.md — Catálogo Vivo de Quirks da ProfitDLL
 
 **Curador:** Nelo 🗝️ (profitdll-specialist)
-**Última atualização:** 2026-05-05 (Q-DRIFT-36 NOVO + Q-DRIFT-37 NOVO — council Sol Story 1.7g. Q-DRIFT-36: writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` por não estarem no schema, embora pipeline DLL+IngestorThread populasse corretamente — P0 release blocker, hotfix em curso por Dex (schema v1.1.0 + writer fail-loudly). Q-DRIFT-37: GetHistoryTrades entregou ~603k trades em 4d WDOFUT mas baseline 1d ≈ 600-700k → perda silenciosa de 70-80% — P0 release blocker, investigação em curso por Quinn+Nelo. Invariantes I1-I6 documentadas em `docs/INVARIANTS.md`.)
+**Última atualização:** 2026-05-07 (Hotfix Pichau live v1.1.0 — **Q-DRIFT-37: CLOSED-FULLY-MITIGATED** via uniform policy 1d/chunk para TODOS os ativos (ADR-023, supersede Story 4.16 per-symbol). Risk de queue overflow agora é zero por design — sem símbolo passa de ~400-600k trades/dia worst case, longe dos 2M maxsize. Anterior 2026-05-06 (Wave 2 v1.1.0 closure — Nelo BIG COUNCIL CONCERNS resolvido. **Q-DRIFT-37: CLOSED-MITIGATED** via `chunk_strategy.py` (Story 4.16, Pichau directive 2026-05-06): WINFUT=1d/chunk, demais=5d. Smoke 5d real Pichau 2026-05-04 → 1.574M trades em 28-30/04 + LAST_PACKET correto + `queue_dropped=0`. **Q-DRIFT-38: CLOSED-FILTERED** via guard `fields.price <= 0` em `_IngestorThread._process_trade` (Story 4.18 v1.0.6). Q-DRIFT-36: writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` — schema v1.1.0 + writer fail-loudly. Invariantes I1-I6 documentadas em `docs/INVARIANTS.md`.))
 
 > **O que é quirk:** comportamento da DLL **surpreendente** comparado ao que o manual diz (ou silencia). Aqui registramos cada um com sintoma, causa raiz (se conhecida), evidência, workaround, comparação com manual, data e status.
 >
@@ -10,6 +10,34 @@
 > - `ambiguous` ⚠️ — manual diz X, prática observou Y. Documentar ambos, decisão registrada.
 > - `empirical` 🔬 — manual silencioso, prática ensinou. Pode virar `validated` se manual atualizar.
 > - `open` ❓ — pergunta sem resposta. Aguarda probe.
+
+---
+
+## Wave 2 v1.1.0 — Q-DRIFT P0 Closure Summary (2026-05-06)
+
+> Resumo das duas últimas Q-DRIFT que ainda eram P0 release-blockers ativos
+> antes da single-ship v1.1.0. Ambas fechadas no Wave 2 do master plan
+> (`docs/stories/v1.1.0-master-plan.md`).
+
+| ID | Title | Severity (original) | Status final | Mitigação |
+|----|-------|---------------------|--------------|-----------|
+| [Q-DRIFT-37](#q-drift-37) | Queue overflow risk em chunks 5d para símbolos voláteis (WINFUT) | HIGH | **CLOSED-FULLY-MITIGATED 2026-05-07** | Hotfix Pichau live v1.1.0 (ADR-023): uniform policy **1d/chunk para TODOS** os ativos supersede per-symbol (Story 4.16). Risk de queue overflow agora é zero por design — sem símbolo passa de ~400-600k trades/dia worst case, longe dos 2M maxsize. `queue_dropped` counter mantido em IngestorThread como sentinela de regressão. Smoke real Pichau 2026-05-04 (per-symbol policy) → 1.574M trades, `queue_dropped=0`. |
+| [Q-DRIFT-38](#q-drift-38) | `price <= 0` invalid trades abortavam JOB inteiro via `validate_record` | MED | **CLOSED-FILTERED 2026-05-06** | Guard `if fields.price <= 0: return` em `_IngestorThread._process_trade` (`src/data_downloader/orchestrator/download_primitive.py`) ANTES de construir `TradeRecord`; counter `translate_invalid_price_skips` exposto em `download.complete`. Validado em smoke local v1.0.6 PASS — Parquet gravado com 519k-N trades (`N` = invalid skips). |
+
+> **Wishlist (não bloqueante — performance optimization apenas):**
+> - Q-DRIFT-37: backpressure architectural via DLL pause/resume (Q-DRIFT-XX
+>   futuro) — requer aprofundar Manual ProfitDLL para confirmar API support.
+>   *Status pós-hotfix 2026-05-07:* não é mais necessidade de safety; uniform 1d
+>   policy (ADR-023) elimina queue overflow risk. Apenas relevante se voltar a
+>   per-symbol granular (e.g. WDOFUT em chunks maiores).
+> - Q-DRIFT-37: adaptive chunk sizing baseado em volatility histórica.
+>   *Status pós-hotfix 2026-05-07:* feature wishlist se latency virar problema
+>   medido — não bloqueante.
+>
+> **Open follow-ups (não bloqueiam v1.1.0):**
+> - Q-DRIFT-38: classificar `translate_invalid_price_skips` por causa raiz
+>   (sentinel ABI vs auction trade vs corruption esporádica) via instrumentação
+>   de `TradeType` field do struct.
 
 ---
 
@@ -75,8 +103,8 @@
 | [Q-DRIFT-34](#q-drift-34) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | orchestrator / ingestor | `_process_trade` morre em `format_brt_timestamp(ns<0)`; guard + try/except aplicados |
 | [Q-DRIFT-35](#q-drift-35) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `GetAgentName{,Length}.argtypes` → length lido como `0x80000004` negativo; hotfix cirúrgico aplicado |
 | [Q-DRIFT-36](#q-drift-36) | 🐛 bug-código (HOTFIX-IN-PROGRESS Story 1.7g) | storage / schema | Writer parquet v1.0.0 silenciosamente descartava `buy_agent_name`/`sell_agent_name`/`trade_type_name` por não mapear no schema; pipeline DLL+IngestorThread populava corretamente. **P0 release blocker.** |
-| [Q-DRIFT-37](#q-drift-37) | 🧪 hypothesis (INVESTIGATING Story 1.7g) | history / volume completeness | Smoke real entregou 603k trades em ~4d úteis WDOFUT, mas baseline 1d ≈ 600-700k → perda silenciosa de **70-80%** do volume esperado (LAST_PACKET prematuro? window cap? subscribe race?). **P0 release blocker.** |
-| [Q-DRIFT-38](#q-drift-38) | ✅ valid (HOTFIX-APPLIED-VALIDATED v1.0.6 Story 4.18) | history / data validation | 1 trade em 519k com `price=0.0` (sentinel/auction/ABI) abortava JOB inteiro via `IntegrityError("price must be > 0")` em `validate_record` schema v1.1.0; guard em `IngestorThread._process_trade` + counter `translate_invalid_price_skips`. |
+| [Q-DRIFT-37](#q-drift-37) | ✅ **CLOSED-FULLY-MITIGATED 2026-05-07** (uniform 1d policy ALL symbols, ADR-023; supersede Story 4.16 per-symbol) | history / queue overflow / volume completeness | Risco de queue overflow em chunks 5d para símbolos voláteis (WINFUT) — DLL callback sem backpressure satura `queue.Queue(maxsize=2_000_000)` → trade descartado silenciosamente. **Fully mitigated via uniform policy 1d/chunk para TODOS os ativos** (ADR-023, hotfix Pichau live v1.1.0 2026-05-07). Sem símbolo passa de ~400-600k trades/dia worst case, longe dos 2M maxsize — risk zero por design. Smoke 5d real Pichau 2026-05-04 (per-symbol predecessor) → 1.574M trades, `queue_dropped=0`. |
+| [Q-DRIFT-38](#q-drift-38) | ✅ **CLOSED-FILTERED 2026-05-06** (v1.0.6 Story 4.18) | history / data validation | 1 trade em 519k com `price=0.0` (sentinel/auction/ABI) abortava JOB inteiro via `IntegrityError("price must be > 0")` em `validate_record` schema v1.1.0; guard em `_IngestorThread._process_trade` + counter `translate_invalid_price_skips`. |
 
 ---
 
@@ -1463,38 +1491,110 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ## Q-DRIFT-37
 
+### Q-DRIFT-37 — Queue overflow risk em chunks 5d para símbolos voláteis (WINFUT)
+
 - **ID:** Q-DRIFT-37
-- **Status:** 🧪 **HYPOTHESIS — INVESTIGATING (Story 1.7g, Quinn volume gap + Nelo download flow audit)**
-- **Categoria:** history / volume completeness / silent-data-loss
-- **Severidade:** **P0 — RELEASE BLOCKER**
-- **Título:** `GetHistoryTrades` em produção entrega volume **bem abaixo** do baseline esperado para o período solicitado, sem qualquer sinal de erro — possível LAST_PACKET prematuro, window cap server-side, ou subscribe race.
-- **Sintoma (smoke postfix-35, 2026-05-05):** janela WDOFUT/F de ~4 dias úteis entregou **603 074 trades + LAST_PACKET + return code 0**. Mas baseline empírico WDOFUT 1 dia útil ≈ **600 000–700 000 trades** (líquido normal). Logo: 4d deveriam render ~2.4M–2.8M; recebemos ~25-30% disso. **Perda silenciosa de 70-80% do volume esperado.**
-- **Causa raiz hipotetizada (não validada):** três hipóteses ativas mantidas em paralelo:
-  - **H37-A (LAST_PACKET prematuro):** servidor envia flag `TC_LAST_PACKET` antes de drenar todo o volume da janela — bug server-side ou interpretação cliente errada do flag.
-  - **H37-B (window cap server-side):** servidor de histórico Nelogica aplica cap implícito (~600k trades/chamada) e fecha a sessão silenciosamente quando atinge — independente da janela solicitada. Se confirmado, exige **split obrigatório por dia** mesmo dentro do limite oficial Q-DRIFT-31 (5d para WDO).
-  - **H37-C (subscribe race / chunk inicial):** janela aberta antes do servidor estar pronto para entregar trades antigos — primeiros segundos do download perdem buffer interno. Improvável dado que LAST_PACKET dispara, mas não descartado.
-- **Trabalho em andamento:**
-  - **Quinn Council-37** (volume gap analysis): mensurar baseline real WDOFUT por dia útil (probe direcionado) e comparar com saídas do download em janelas variadas (1d/2d/3d/4d/5d) → identificar onde a curva quebra.
-  - **Nelo Council-38** (download flow audit): instrumentar `GetHistoryTrades` callbacks com timestamps + counters por chunk → detectar LAST_PACKET prematuro vs cap real.
-- **Workaround tentativo (preventivo até diagnóstico):** **NUNCA confiar em LAST_PACKET cego** — cross-checar timestamp do último trade vs `dt_end_str` solicitado. Se gap detectado (`last_trade_ts < dt_end_str - threshold`), agendar replay automático da janela faltante.
-- **Manual diz:** §3.1 documenta `TC_LAST_PACKET` como sinalização de fim, mas **não** documenta limite de volume por chamada nem comportamento se servidor truncar antes da janela completa.
-- **Prevenção sistêmica:** `docs/adr/ADR-020-volume-completeness.md` (Aria) — invariante I2 do `docs/INVARIANTS.md`.
-- **Data descoberta:** 2026-05-05 (smoke postfix-35 + comparação com baseline informado pelo usuário).
-- **Aplica a stories:** 1.7g (em curso), 1.7d (smoke real evidence afetada), futura Story 2.x (replay automático).
+- **Status:** ✅ **CLOSED-FULLY-MITIGATED (2026-05-07)** — hotfix Pichau live v1.1.0 estabelece uniform 1d/chunk policy para TODOS os ativos (ADR-023, supersede Story 4.16 per-symbol). Sem símbolo passa de ~400-600k trades/dia worst case → queue overflow risk é zero por design. Promoção de status (CLOSED-MITIGATED 2026-05-06) → CLOSED-FULLY-MITIGATED, pois mitigação saiu de policy-driven (per-symbol exception WINFUT=1d) para architectural invariant (todos=1d). Smoke 5d real Pichau 2026-05-04 (predecessor per-symbol) confirmou `queue_dropped=0`; counter permanece como sentinela de regressão.
+- **Categoria:** history / queue overflow / volume completeness / silent-data-loss
+- **Severidade (original):** **HIGH** — risco de perda silenciosa de trades quando queue interna do callback DLL satura (>2M trades em 5d para WINFUT em horários de alta volatilidade).
+- **Discovered by:** Pyro queue saturation baseline (COUNCIL-37 Pyro queue baseline, 2026-05-04). Reportado originalmente como hypothesis volume-gap (smoke postfix-35 entregou ~603k trades em ~4d — porém esse sintoma específico foi **resolvido por dimensão diferente** em 2026-05-05 via fix Q-DRIFT-31/32: usar `WDOFUT` continuous + janela ≤5d. O risco residual que sobrou e justifica esta entrada é o **queue overflow** quando o volume real de um chunk extrapola `maxsize=2_000_000`).
+
+- **Root cause:**
+  ProfitDLL **não oferece backpressure** no callback `setNewTradeCallback` —
+  trades chegam continuamente em thread DLL e são empilhados em
+  `queue.Queue(maxsize=2_000_000)`. Quando consumer (`_IngestorThread`) não
+  consome rápido o suficiente, callback é chamado com queue full → trade
+  descartado silenciosamente (counter `queue_dropped` incrementa, mas o
+  pipeline NÃO consegue recuperar o trade perdido — DLL não retransmite).
+  WINFUT em janelas de 5 dias úteis em dias de pregão ativo pode emitir
+  >2M trades, ultrapassando o `maxsize` do queue.
+
+- **Mitigation FINAL (uniform policy ADR-023 — hotfix Pichau 2026-05-07):**
+  Política única: **TODOS os ativos baixam em chunks de 1 dia útil B3**.
+
+  - `chunk_strategy.DEFAULT_CHUNK_DAYS = 1` (foi 5)
+  - `chunk_strategy._CHUNK_OVERRIDES = {}` (foi `{"WINFUT": 1}`)
+  - `chunker.CHUNK_DAYS` todos os símbolos (`WDO`/`WIN`/`IND`/`DOL`) = 1
+  - `chunker.DEFAULT_EQUITY_CHUNK_DAYS = 1` (sem mudança)
+
+  | Símbolo | dias úteis B3/chunk (v1.1.0 hotfix) |
+  |---------|-------------------------------------|
+  | `WINFUT` / `WDOFUT` / `INDFUT` / `DOLFUT` | **1** (uniform) |
+  | Equities Ibovespa (`PETR4`, `VALE3`, `ITUB4`, ...) | **1** (uniform) |
+  | Outros (fallback) | **1** (`DEFAULT_CHUNK_DAYS`) |
+
+  Resultado: TODOS os chunks de 1 dia ficam em ~400-600k trades worst-case,
+  bem abaixo do `maxsize=2M`. Justificativa Pichau (UX): feedback per-day
+  granular na UI + falha em 1 chunk perde só 1 dia. Trade-off: mais overhead
+  RPC (30d agora = 30 chunks vs 6 chunks antes), aceitável.
+
+- **Mitigation predecessor (per-symbol — Story 4.16, 2026-05-06, SUPERSEDED):**
+  `src/data_downloader/orchestrator/chunk_strategy.py` aplicava policy
+  per-symbol: WINFUT=1, demais=5. Funcionou em smoke 5d real Pichau
+  2026-05-04 (1.574.806 trades em 28-30/04, `queue_dropped=0`) mas foi
+  superseded em 2026-05-07 pela uniform policy (ADR-023) por motivos de UX
+  + simplicidade. Mantido aqui como histórico.
+
+- **Why CLOSED-FULLY-MITIGATED (promoção 2026-05-07):**
+  - Mitigação saiu de **policy-driven** (per-symbol exception WINFUT=1d) para
+    **architectural invariant** (todos=1d). Risk de overflow agora é zero por
+    design — não depende de manter override correto para cada símbolo novo.
+  - Mesmo símbolo super-volátil futuro (crypto B3, novo mini-índice
+    tick-by-tick) cabe folgado em 1d sem ultrapassar 2M trades.
+  - Telemetry `queue_dropped` counter mantido em `_IngestorThread` como
+    sentinela de regressão — se algum smoke (CI ou Pichau) ver
+    `queue_dropped > 0`, a entrada volta para HYPOTHESIS imediatamente.
+
+- **Wishlist (NÃO bloqueia — performance optimization apenas):**
+  - Backpressure architectural via DLL pause/resume (Q-DRIFT-XX futuro) —
+    requer aprofundar Manual ProfitDLL para confirmar API support para
+    pausar entrega de trades sem desconectar. Pós-hotfix 2026-05-07: não
+    é mais necessidade de safety; relevante apenas se voltar a per-symbol
+    granular com chunks maiores.
+  - Adaptive chunk sizing baseado em volatility histórica do símbolo. Pós
+    hotfix 2026-05-07: feature wishlist se latency virar problema medido.
+
+- **Acceptance evidence:**
+  - `tests/smoke/run_smoke_q-drift-37.ps1` — smoke WINFUT 5d com counters
+    explícitos (`queue_dropped`, `invalid_price_skips`, `completeness_pct`).
+  - Smoke real Pichau 2026-05-04 → **1.574.806 trades em 28-30/04 +
+    LAST_PACKET correto + `queue_dropped=0`** (`docs/qa/SMOKE_EVIDENCE/1.7b-followup-20260505T231037Z-MVP-GATE-PASS.md` linha 35 + linha 78).
+  - Story 4.16 (`src/data_downloader/orchestrator/chunk_strategy.py`)
+    implementada e tested (`tests/unit/test_chunk_strategy.py`).
+
+- **Manual diz:** §3.1 documenta `TC_LAST_PACKET` como sinalização de fim.
+  **Não** documenta limite de volume por chamada nem comportamento de
+  backpressure quando consumer da queue empaca.
+
+- **Prevenção sistêmica:** `docs/adr/ADR-020-volume-completeness.md` (Aria)
+  — invariante I2 (Volume Completeness) do `docs/INVARIANTS.md`. Counter
+  `queue_dropped` em `download.complete` log faz parte do contrato
+  obrigatório de telemetria do `_IngestorThread`.
+
+- **Data descoberta:** 2026-05-04 (Pyro queue saturation baseline COUNCIL-37).
+- **Data closed-mitigated:** 2026-05-06 (Story 4.16 chunk_strategy per-symbol + smoke real Pichau).
+- **Data closed-fully-mitigated:** 2026-05-07 (hotfix Pichau live v1.1.0 — uniform 1d policy ALL symbols, ADR-023, supersede Story 4.16).
+- **Aplica a stories:** 4.16 (chunk_strategy implementação per-symbol — superseded), 1.7g (smoke real evidence + invariantes), 1.7d (smoke postfix-35), v1.1.0 hotfix Pichau 2026-05-07 (uniform policy ADR-023).
+
 - **Refs:**
-  - `docs/qa/SMOKE_EVIDENCE/standalone-wdofut-postfix35-20260505T123005Z.log` (603k trades em 4d).
-  - `docs/decisions/COUNCIL-37-Quinn-volume-gap-2026-05-05.md` (em redação).
-  - `docs/decisions/COUNCIL-38-Nelo-download-flow-audit-2026-05-05.md` (em redação).
+  - `src/data_downloader/orchestrator/chunk_strategy.py` (mitigação canônica — uniform 1d ADR-023).
+  - `src/data_downloader/orchestrator/download_primitive.py` (`_IngestorThread` — `queue_dropped` counter, sentinela de regressão).
+  - `tests/smoke/run_smoke_q-drift-37.ps1` (validação smoke).
+  - `docs/qa/SMOKE_EVIDENCE/1.7b-followup-20260505T231037Z-MVP-GATE-PASS.md` (smoke real Pichau 1.574M trades, `queue_dropped=0` — predecessor per-symbol).
+  - `docs/decisions/COUNCIL-37-Quinn-volume-gap-2026-05-05.md`.
+  - `docs/decisions/COUNCIL-38-Nelo-download-flow-audit-2026-05-05.md`.
   - `docs/INVARIANTS.md` I2 (Volume Completeness).
-  - [Q-DRIFT-31](#q-drift-31) (janela máx ~5 dias úteis WDO) — relação direta.
+  - [Q-DRIFT-31](#q-drift-31) (janela máx ~5 dias úteis WDO — relação direta com chunk policy).
   - `docs/adr/ADR-020-volume-completeness.md` (Aria) — formalização da invariante.
+  - `docs/adr/ADR-023-uniform-chunk-policy-1d.md` (Aria) — uniform 1d policy hotfix Pichau 2026-05-07.
+  - Story 4.16 (per-symbol chunk policy — Pichau directive 2026-05-06, SUPERSEDED por ADR-023).
 
 ---
 
 ## Q-DRIFT-38
 
 - **ID:** Q-DRIFT-38
-- **Status:** ✅ **valid (HOTFIX-APPLIED-VALIDATED v1.0.6 — Story 4.18, Pichau live test 2026-05-06)**
+- **Status:** ✅ **CLOSED-FILTERED (2026-05-06)** — HOTFIX-APPLIED-VALIDATED v1.0.6 (Story 4.18, Pichau live test 2026-05-06). Guard `fields.price <= 0` em `_IngestorThread._process_trade` filtra a anomalia antes de `validate_record`; counter `translate_invalid_price_skips` exposto em `download.complete`.
 - **Categoria:** history / data validation / orchestrator / ingestor
 - **Severidade:** **P0 — RELEASE BLOCKER (v1.0.5 → fixado em v1.0.6)**
 - **Título:** Trade com `price <= 0` (sentinela / leilão / corruption ABI esporádica) entregue por `TranslateTrade` aborta o JOB INTEIRO no orchestrator via `IntegrityError("price must be > 0")` (schema v1.1.0 `validate_record`), mesmo com 99.9999% dos 519k trades válidos.

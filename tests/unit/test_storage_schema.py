@@ -180,3 +180,67 @@ def test_validate_record_rejects_zero_timestamp() -> None:
     with pytest.raises(IntegrityError) as ei:
         validate_record(rec)
     assert ei.value.details["field"] == "timestamp_ns"
+
+
+# =====================================================================
+# Sol Wave 2 — Delegation rationale (validate_record vs schema/writer)
+# =====================================================================
+#
+# `validate_record` cobre INT-3/4/5 in-Python (defesa em profundidade).
+# Outras invariantes ficam DELEGADAS ao schema SQLite (catalog) e ao
+# writer Parquet (I1 — Schema-as-Contract). Estes tests documentam a
+# fronteira para evitar drift entre validador e schema.
+
+
+@pytest.mark.unit
+def test_validate_record_does_not_check_uniqueness_delegates_to_schema() -> None:
+    """Sol Wave 2: ``validate_record`` NÃO valida unicidade de records.
+
+    Unicidade (PRIMARY KEY / UNIQUE INDEX) é responsabilidade do schema
+    SQLite (catalog ``gaps`` PK, ``partitions`` PK por path). Chamar
+    ``validate_record`` duas vezes com o mesmo registro NÃO levanta —
+    o validador é stateless. Isso é intencional: duplicar checagem
+    em Python exigiria SELECT por record (caro) + criaria drift entre
+    validador e schema.
+    """
+    rec = _valid_record()
+    # Duas chamadas consecutivas com o mesmo registro: ambas devem passar.
+    validate_record(rec)
+    validate_record(rec)  # não levanta — uniqueness não é escopo deste validador
+
+
+@pytest.mark.unit
+def test_validate_record_does_not_check_schema_contract_delegates_to_writer() -> None:
+    """Sol Wave 2: ``validate_record`` NÃO valida I1 (Schema-as-Contract).
+
+    Campos extras fora do schema NÃO levantam aqui — quem fail-loudly
+    é o ``ParquetWriter`` (``SchemaIntegrityError`` quando o ``TradeRecord``
+    traz chave não mapeada). Essa separação evita drift: o writer conhece
+    o schema runtime; o validador não.
+    """
+    rec = _valid_record()
+    # Adicionar chave fora do schema: validate_record não tem como saber
+    # quais chaves são válidas; ele cobre INT-3/4/5 apenas.
+    rec_with_extra = dict(rec)
+    rec_with_extra["this_field_does_not_exist_in_schema"] = "spurious"
+    # Type-checker não vê esta chave — é intencional para testar tolerância.
+    validate_record(rec_with_extra)  # type: ignore[arg-type]
+    # Confirmação positiva: writer faria fail-loudly downstream
+    # (ver test_storage_schema_v110.py — SchemaIntegrityError suite).
+
+
+@pytest.mark.unit
+def test_validate_record_accepts_volume_zero_quantity_must_be_positive() -> None:
+    """Sol Wave 2: documenta que volume == 0 é REJEITADO via INT-4.
+
+    INT-4 (``quantity > 0``) é estrito; INVARIANTS.md não lista um
+    invariante "volume_zero permitido" — Q-DRIFT-38 garante que trades
+    com volume <= 0 são filtrados em ``IngestorThread``. Este test
+    confirma que ``validate_record`` reforça a regra mesmo se algo
+    contornar a thread de ingestão.
+    """
+    rec = _valid_record()
+    rec["quantity"] = 0
+    with pytest.raises(IntegrityError) as ei:
+        validate_record(rec)
+    assert ei.value.details["field"] == "quantity"

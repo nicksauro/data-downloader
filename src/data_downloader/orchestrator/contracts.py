@@ -269,15 +269,21 @@ def list_contracts(
 # CONTRACTS.md é bundled em ``sys._MEIPASS/docs/storage/CONTRACTS.md``
 # via spec template ``datas`` tuple. Sem este branch, ``populate_contracts_
 # from_seed`` falhava silenciosamente em first-run do .exe distribuído.
+#
+# Wave 1 v1.1.0 (Aria — ADR-018): resolução delegada a
+# :func:`bundle_paths.asset_path` em frozen mode; em source mode mantemos
+# o cálculo via ``parents[3]`` (repo root) para compat com layout dev.
 def _resolve_default_seed_path() -> Path:
-    import sys
+    from data_downloader._internal.bundle_paths import asset_path, is_frozen
 
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            candidate = Path(meipass) / "docs" / "storage" / "CONTRACTS.md"
-            if candidate.is_file():
-                return candidate
+    if is_frozen():
+        try:
+            return asset_path("docs/storage/CONTRACTS.md")
+        except FileNotFoundError:
+            # Fallback defensivo — em frozen sem datas extraído, cai no
+            # repo-root path (provavelmente vai falhar em is_file mais tarde
+            # mas mantém o contrato de retorno).
+            pass
     return Path(__file__).resolve().parents[3] / "docs" / "storage" / "CONTRACTS.md"
 
 

@@ -104,6 +104,7 @@ def test_qss_no_unauthorized_colors(qss_text: str) -> None:
         "#2BB8C9",  # cyan pressed
         "#5A5A62",  # scrollbar pressed
         "#131316",  # alternate row
+        "#2FB85C",  # green pressed — downloadSuccessCard primary button (par de #5BD884 hover)
     }
     allowed = CANONICAL_HEX_TOKENS | authorized_derivatives
     invented = found_hex - allowed

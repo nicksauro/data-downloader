@@ -21,7 +21,8 @@ def test_root_package_exposes_version() -> None:
     from data_downloader import __version__
 
     assert isinstance(__version__, str)
-    assert __version__ == "0.1.0"
+    # Story v1.1.0 — bumpado de 0.1.0 → 1.1.0 (single-ship release).
+    assert __version__ == "1.1.0"
 
 
 @pytest.mark.smoke

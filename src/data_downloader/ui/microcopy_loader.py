@@ -218,6 +218,61 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         detail="Defina PROFITDLL_KEY, PROFITDLL_USER, PROFITDLL_PASS no ambiente.",
         action="Configure em ~/.data-downloader/.env e reinicie o terminal.",
     ),
+    # Hotfix v1.1.0 2026-05-08 (Felix+Aria — Pichau smoke real):
+    # smoke 2026-05-08T00:32:29 mostrou "dll.market_connect_retry_exhausted
+    # attempts=3 microcopy_id=ERR_DLL_MARKET_RETRY_EXHAUSTED" sendo emitido
+    # pelo backend, mas a UI não tinha a entry — exibia success card vazio.
+    # IDs canônicos para os 3 cenários (timeout, retry exhausted, empty
+    # silencioso). Texto pt-BR consistente com o estilo §5.
+    "ERR_DLL_MARKET_TIMEOUT": MicrocopyEntry(
+        msg_type="error",
+        title="Servidor de mercado não respondeu",
+        detail=(
+            "A DLL aguardou pelo servidor MARKET_DATA e não obteve "
+            "resposta. Pregão pode estar fora do horário ou servidor em "
+            "manutenção."
+        ),
+        action=(
+            "Tente durante o pregão B3 (09:00-18:00 BRT) ou aguarde "
+            "alguns minutos e tente novamente."
+        ),
+    ),
+    "ERR_DLL_MARKET_RETRY_EXHAUSTED": MicrocopyEntry(
+        msg_type="error",
+        title="Servidor MARKET_DATA não disponível",
+        detail=(
+            "Esgotamos as tentativas de conectar ao servidor MARKET_DATA " "(timeout em todas)."
+        ),
+        action=(
+            "Aguarde alguns minutos e tente novamente. Se persistir, "
+            "rode `data-downloader doctor`."
+        ),
+    ),
+    "ERR_DOWNLOAD_EMPTY": MicrocopyEntry(
+        msg_type="error",
+        title="Download retornou vazio sem motivo claro",
+        detail=(
+            "O backend não baixou nenhum trade nem reportou erro. Pode "
+            "ser dia sem pregão (feriado/fim de semana) ou contrato "
+            "vencido."
+        ),
+        action=(
+            "Verifique se a data é dia útil B3 com pregão. Se persistir, "
+            "reporte como bug — `data-downloader doctor`."
+        ),
+    ),
+    "ERR_GENERIC": MicrocopyEntry(
+        msg_type="error",
+        title="Erro desconhecido",
+        detail="Erro inesperado durante o download.",
+        action="Tente novamente ou rode `data-downloader doctor`.",
+    ),
+    "INFO_NO_TRADES_IN_RANGE": MicrocopyEntry(
+        msg_type="info",
+        title="Nenhum trade no período",
+        detail="{symbol} em {date_range} não retornou trades.",
+        action="Verifique se é dia útil B3 com pregão.",
+    ),
     # Story 2.11 — IDs novos (Uma sign-off COUNCIL-17). Cancelamento H10
     # + ConnectionLost Q02-E. IDs em dot-notation seguem padrão error.*.{title,description}
     # alinhado com MICROCOPY_CATALOG.md §6.
@@ -461,7 +516,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     ),
     "LBL_FOOTER_SHORTCUTS": MicrocopyEntry(
         msg_type="label",
-        title="Atalhos: Ctrl+D iniciar  •  Ctrl+R repetir último  •  Ctrl+/ todos",
+        title="Atalhos: Ctrl+D iniciar  •  Ctrl+C cancelar  •  Ctrl+/ todos",
     ),
     "PLH_SYMBOL": MicrocopyEntry(msg_type="placeholder", title="ex: WDOFUT, PETR4"),
     "PLH_SYMBOL_SUGGESTED_HINT": MicrocopyEntry(
@@ -478,7 +533,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="label",
         title=(
             "Período de histórico para baixar. Default: mês corrente. "
-            "Períodos > 30 dias são divididos em chunks."
+            "Dividido em chunks de 1 dia útil (todos os ativos)."
         ),
     ),
     "TIP_BTN_DOWNLOAD": MicrocopyEntry(msg_type="label", title="Iniciar download (Ctrl+D)."),

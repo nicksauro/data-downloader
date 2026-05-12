@@ -288,7 +288,7 @@ commands:
       Guia de GetHistoryTrades + THistoryTradeCallback + TProgressCallback:
       - Manual §3.1: formato datas "DD/MM/YYYY HH:mm:SS"
       - Contratos vigentes por mês (empírico: WDOJ26, WINH26)
-      - Limites de chunk (empírico: WDO 5d, WIN 1d)
+      - Limites de chunk: política runtime unificada 1d uniforme (ADR-023); cap empírico DLL ≤5d documentado em Q-DRIFT-31
       - Timeout ≥ 1800s (empírico)
       - Progress 99% + reconexão (empírico)
       - V2: SetHistoryTradeCallbackV2 + TConnectorTradeCallback + TranslateTrade

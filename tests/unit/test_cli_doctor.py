@@ -63,7 +63,7 @@ def test_doctor_all_checks_pass(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -93,7 +93,7 @@ def test_doctor_credentials_missing(
         monkeypatch.delenv(var, raising=False)
     for var in ("PROFIT_USER", "PROFIT_PASS"):
         monkeypatch.delenv(var, raising=False)
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -124,7 +124,7 @@ def test_doctor_dll_companions_missing(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
 
     from data_downloader import cli as cli_module
 
@@ -195,7 +195,7 @@ def test_doctor_schema_outdated_warns_but_not_fail(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.0.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.0.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -255,7 +255,7 @@ def test_doctor_legacy_credentials_warn(
     monkeypatch.delenv("PROFITDLL_PASS", raising=False)
     monkeypatch.setenv("PROFIT_USER", "legacy_u")
     monkeypatch.setenv("PROFIT_PASS", "legacy_p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -285,7 +285,7 @@ def test_doctor_with_handshake_flag_invokes_check(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -311,7 +311,7 @@ def test_doctor_without_handshake_omits_check(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -338,7 +338,7 @@ def test_run_doctor_checks_returns_exit_code_and_results(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader.cli import run_doctor_checks
@@ -369,7 +369,7 @@ def test_run_doctor_checks_with_handshake_adds_6th_check(
     monkeypatch.setenv("PROFITDLL_KEY", "k")
     monkeypatch.setenv("PROFITDLL_USER", "u")
     monkeypatch.setenv("PROFITDLL_PASS", "p")
-    _seed_catalog(tmp_path / "history" / "catalog.db", version="1.1.0")
+    _seed_catalog(tmp_path / "_internal" / "catalog.db", version="1.1.0")
     _patch_static_checks_pass(monkeypatch)
 
     from data_downloader import cli as cli_module
@@ -379,6 +379,9 @@ def test_run_doctor_checks_with_handshake_adds_6th_check(
 
     exit_code, results = run_doctor_checks(data_dir=tmp_path, with_handshake=True)
 
+    # All 6 checks PASS → exit_code=0 (Wave 1 P0: assertion antes faltava,
+    # ruff RUF059 flagueava ``exit_code`` como unpacked-but-unused).
+    assert exit_code == 0
     assert len(results) == 6
     names = [r[0] for r in results]
     assert "DLL handshake" in names
