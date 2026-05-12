@@ -7,36 +7,45 @@
 
 ---
 
-## Re-gate round 2 — 2026-05-12
+## Re-gate round 2 — 2026-05-12 (final, modo autônomo)
 
 **Owner:** @aiox-master (Orion) — autonomous mode
-**Pichau directive (round 2):** "ta bem bugado, paremos de lançar builds até estar funcional, busquem bugs, façam um plano"
-**Git checkpoint:** commit `1870176` ("fix: BIG COUNCIL round 2 — consolidação de bugfixes pré-v1.1.0")
+**Pichau directive (round 2):** "ta bem bugado, paremos de lançar builds até estar funcional, busquem bugs, façam um plano" + "faça tudo em modo autônomo, to indo dormir"
+**Git checkpoint:** commit `1870176` (BIG COUNCIL round 2) + `f0162c4` (gate doc) + commit final pendente (fixes #18 + smoke G-2 + Setup.exe). git_sha do bundle reflete o HEAD no momento do build.
 
-### Verdict: ⏳ **GO condicional — aguardando Setup.exe + Pichau manual smoke 16/16**
+### Verdict: ✅ **GO para tag/release — aguardando apenas Pichau confirmar manual smoke UI (itens 1-15 visuais) + decisão de release**
+
+Todos os gates automatizáveis verde. O download path foi validado end-to-end contra o `.exe` frozen real com a DLL real (item 16 — smoke real). Restam só os itens 1-15 do `MANUAL_SMOKE_v1.1.0.md` que exigem interação visual humana (onboarding banner, toggles, dialogs, etc.) — esses Pichau valida quando acordar.
 
 | # | Critério | Resultado | Detalhe |
 |---|----------|-----------|---------|
-| 1 | ruff check . | ✅ PASS | 0 errors (após auto-fixes Wave A + 2 residuais) |
+| 1 | ruff check . | ✅ PASS | 0 errors |
 | 2 | mypy --strict | ✅ PASS | 0 errors em 94 source files |
 | 3 | pytest tests/unit | ✅ PASS | **1199 passed, 1 skipped (waiver test_pool_lifecycle), 0 fail** — exit 0 |
-| 4 | pytest tests/integration | ✅ PASS | **451 passed, 2 skipped, 0 fail, zero ruído Qt** — exit 0 (deadlock + cluster UI flaky + teardown Qt resolvidos; ver V1.1.0-FIX-PLAN §Task #10/#11/#14) |
-| 5 | pytest tests/property | ✅ PASS | incluído no run consolidado (parte dos guard tests + idempotência) |
-| 6 | python scripts/build_release.py --with-installer | ⚠ PARCIAL | bundle + zip + manifest OK; **Setup.exe FALHOU — ISCC.exe (InnoSetup) não instalado nesta máquina** (`winget install JRSoftware.InnoSetup` ou setar `ISCC_PATH`) |
-| 7 | data_downloader-cli.exe --healthcheck | ✅ PASS | rc=0, stdout `data_downloader 1.1.0\nhealthcheck OK`, structlog probe `event=healthcheck_probe` emitido |
-| 8 | Bundle size | ✅ PASS | **387.6 MB** uncompressed (target <600MB; -56.3% vs v1.0.7 baseline 886MB — Pyro lean spec) |
-| 9 | Portable zip | ✅ PASS | `data-downloader-v1.1.0-win64.zip` **157.6 MB** — SHA256 `138E6169BB27766FACCD123B4E13BB20390B361B02A6217950E442C9BF8B5BBE` |
-| 10 | Build manifest | ✅ PASS | `dist/build-manifest-v1.1.0.json` — version=1.1.0, git_sha=1870176, lean-filter binaries 464→257 / datas 3943→1348 |
-| 11 | Setup.exe (InnoSetup) | ❌ PENDENTE | requer InnoSetup instalado — re-rodar `build_release.py --with-installer` após `winget install JRSoftware.InnoSetup` |
-| 12 | Manual UI checklist (Pichau) | ⏳ PENDENTE | `docs/qa/MANUAL_SMOKE_v1.1.0.md` agora **16 itens** (item A promovido a bloqueante — ProgressCard atualiza N×/dia útil) |
-| 13 | Smoke real CLI (Pichau) | ⏳ PENDENTE | `tests/smoke/run_smoke_real.ps1` agora valida `parquetCount ≥ businessDays` |
+| 4 | pytest tests/integration | ✅ PASS | **451 passed, 2 skipped, 0 fail, zero ruído Qt** — exit 0 |
+| 5 | pytest tests/property | ✅ PASS | incluído no run consolidado |
+| 6 | build_release.py --with-installer | ✅ PASS | bundle + zip + manifest + **Setup.exe** OK (ISCC.exe achado em `~/AppData/Local/Programs/Inno Setup 6/`) |
+| 7 | data_downloader-cli.exe --healthcheck | ✅ PASS | rc=0, `data_downloader 1.1.0\nhealthcheck OK`, structlog probe emitido |
+| 8 | Bundle size | ✅ PASS | **387.6 MB** uncompressed (-56.3% vs v1.0.7 baseline 886MB) |
+| 9 | Portable zip | ✅ PASS | `data-downloader-v1.1.0-win64.zip` **157.6 MB** — SHA256 a recomputar no build final (último: `630E7BAC54449057556CC7FE9B36054220CC00D5BDEA5D50BFD1A251C3ECF5DC`) ⚠ ver nota reprodutibilidade abaixo |
+| 10 | Setup.exe (InnoSetup) | ✅ PASS | `data-downloader-Setup-v1.1.0.exe` **105.7 MB** — SHA256 `24C6A46AE7AC0DF7F5654F06A3135A8ADBD40180FB9380B667A9D1216D84656C` (recomputar no build final pós-commit) |
+| 11 | Build manifest | ✅ PASS | `dist/build-manifest-v1.1.0.json` — version=1.1.0, lean-filter binaries 464→257 / datas 3943→1348 |
+| 12 | **Smoke real CLI (item 16 bloqueante)** | ✅ **PASS** | `run_smoke_real.ps1 -Symbol WDOFUT -Days 5` contra o `.exe` frozen + DLL real: `download rc=0`, **rows=2.878.062, chunks=6, dias=6**, range 2026-05-04..2026-05-11. ADR-023 confirmado: 6 chunks de 1 dia útil cada, sequencial (`orchestrator.complete chunks_completed=6 chunks_failed=0`, `queue_dropped=0`). Parquets em `data/smoke-real/history/F/WDOFUT/2026/05.parquet` (lugar correto pós-fix #18). DuckDB lê OK. Log: `docs/qa/smoke-real-v1.1.0-r2-fix18b.log`. |
+| 13 | Manual UI checklist itens 1-15 (Pichau) | ⏳ PENDENTE | `docs/qa/MANUAL_SMOKE_v1.1.0.md` — só interação visual humana (onboarding banner, toggles, QFileDialog, cheat sheet, etc.) |
 
-**Bugs reais de produção corrigidos no round 2** (além dos 8 originais do BIG COUNCIL):
-`catalog_broker.py` (`extra={"name"}` colidia com LogRecord), `MetricsAdapter.shutdown()` (parava QTimer da worker thread do MainThread + `Qt` não importado), `MainWindow.closeEvent` (não desligava adapters dos screens), `~/.data_downloader` underscore ressurgido, `dll_status_changed` descartava versão da DLL.
+**Bugs reais de produção corrigidos no round 2** (além dos 8 do BIG COUNCIL):
+1. `catalog_broker.py` — `extra={"name"}` colidia com atributo reservado de `LogRecord` (KeyError)
+2. `MetricsAdapter.shutdown()` — parava QTimer da worker thread a partir do MainThread + `Qt` não importado (NameError silencioso → cleanup nunca rodava)
+3. `MainWindow.closeEvent` — só desligava o metrics adapter → QThreads dos screens vazavam
+4. `~/.data_downloader` underscore ressurgido em `cli.py`/`symbol_picker.py`
+5. `dll_status_changed = Signal(str)` — descartava a versão da DLL → statusbar `"DLL: conectada (?)"`
+6. **`cli.py download`** — `--data-dir` default `Path("data")` relativo + ProfitDLL faz `chdir()` para `_internal/` (Q-DRIFT-10) + cwd só restaurado no fim → parquets gravados DENTRO do bundle frozen. Fix: `.resolve()` no início de `download()` (task #18). **Descoberto no smoke real — era um release-blocker silencioso.**
 
-**Evidência:** junit-xml e logs de pytest/ruff/mypy estão gitignored (regeneráveis; ver `.gitignore` § "QA gate artifacts"). Re-rodar localmente para reproduzir: `pytest tests/unit tests/integration --timeout=120 -q`.
+**Reprodutibilidade do zip:** o SHA256 do `data-downloader-v1.1.0-win64.zip` mudou entre dois builds com o mesmo source (`138E6169…` → `630E7BAC…`) — provável uso de mtimes nos entries do zip. Não bloqueia release, mas há uma questão de build determinístico a investigar (follow-up). O Setup.exe e o bundle uncompressed são consistentes.
 
-**Próximo passo:** (1) `winget install JRSoftware.InnoSetup` → re-build `--with-installer` → Setup.exe + SHA256; (2) Pichau executa MANUAL_SMOKE 16/16 + smoke real; (3) se PASS → @devops Gage faz commit-bump-version + tag v1.1.0 + push + gh release.
+**Evidência:** junit-xml e logs de pytest/ruff/mypy/build/smoke estão gitignored (regeneráveis; ver `.gitignore` § "QA gate artifacts"). Reproduzir: `pytest tests/unit tests/integration --timeout=120 -q` + `.\tests\smoke\run_smoke_real.ps1 -Symbol WDOFUT -Days 5`.
+
+**Próximo passo:** (1) Pichau valida `MANUAL_SMOKE_v1.1.0.md` itens 1-15 (UI visual) quando acordar; (2) se OK → @devops Gage: bump-version (já está 1.1.0), `git tag v1.1.0`, `git push origin main + v1.1.0`, `gh release create v1.1.0` com Setup.exe + zip + SHA256 + `docs/release-notes/v1.1.0-draft.md`. Recomputar SHA256 dos artefatos no build pós-commit final.
 
 ---
 

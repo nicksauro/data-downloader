@@ -29,7 +29,11 @@ param(
     [string]$BundleDir = "dist\data_downloader"
 )
 
-$ErrorActionPreference = "Stop"
+# NÃO usar "Stop" aqui: este script chama exes nativos (data_downloader-cli.exe)
+# que emitem logs/probes em stderr. Em PS 5.1, native-stderr + ErrorActionPreference=Stop
+# vira NativeCommandError terminante e aborta o script antes de checarmos $LASTEXITCODE.
+# As checagens de exit code abaixo (rc=0?) são explícitas e suficientes.
+$ErrorActionPreference = "Continue"
 
 # -------------------------------------------------------------------
 # Resolução de paths
@@ -38,6 +42,15 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $bundlePath = Join-Path $repoRoot $BundleDir
 $cli = Join-Path $bundlePath "data_downloader-cli.exe"
 
+# Task #18 (smoke real v1.1.0): passamos --data-dir EXPLÍCITO para um diretório
+# de smoke dedicado. Antes, o download usava o default relativo ./data, mas a
+# ProfitDLL faz chdir() para _internal/ ao carregar (Q-DRIFT-10) → o parquet
+# writer (que roda com cwd já trocado) escrevia DENTRO do bundle frozen
+# (dist\...\_internal\data\). O fix no cli.py resolve --data-dir para absoluto
+# logo no início (.resolve() captura o cwd original), mas aqui passamos o path
+# explícito para o smoke ser determinístico e não poluir o repo root ./data.
+$smokeDataDir = Join-Path $repoRoot "data\smoke-real"
+
 Write-Host ""
 Write-Host "=================================================" -ForegroundColor Cyan
 Write-Host " Smoke real v1.1.0 — Quinn Wave 2 P0" -ForegroundColor Cyan
@@ -45,6 +58,7 @@ Write-Host "=================================================" -ForegroundColor 
 Write-Host "Repo root : $repoRoot"
 Write-Host "Bundle    : $bundlePath"
 Write-Host "CLI exe   : $cli"
+Write-Host "Data dir  : $smokeDataDir"
 Write-Host "Symbol    : $Symbol"
 Write-Host "Days      : $Days"
 Write-Host ""
@@ -70,6 +84,8 @@ if (-not (Test-Path $envFile)) {
 # Step 1: Healthcheck
 # -------------------------------------------------------------------
 Write-Host "[1/4] Healthcheck..." -ForegroundColor Cyan
+# O probe structlog vai para stderr — em PS 5.1 isso aparece em vermelho mas
+# (com ErrorActionPreference=Continue) NÃO aborta. rc=0 é o que validamos.
 & $cli --healthcheck
 if ($LASTEXITCODE -ne 0) {
     Write-Host "SMOKE FAIL: healthcheck retornou $LASTEXITCODE" -ForegroundColor Red
@@ -92,7 +108,9 @@ Write-Host "[2/4] Download $Symbol $startStr -> $endStr ..." -ForegroundColor Cy
 # Step 3: Download via CLI
 # -------------------------------------------------------------------
 $downloadStart = Get-Date
-& $cli download $Symbol --start $startStr --end $endStr --exchange F
+# Sintaxe da CLI: símbolo via --symbol (não posicional). --exchange F = BMF (WDO/WIN/IND).
+# --data-dir explícito (Task #18): smoke determinístico, não polui repo root ./data.
+& $cli download --symbol $Symbol --start $startStr --end $endStr --exchange F --data-dir $smokeDataDir
 $downloadRc = $LASTEXITCODE
 $downloadDuration = (Get-Date) - $downloadStart
 
@@ -105,33 +123,34 @@ Write-Host "      duração: $([math]::Round($downloadDuration.TotalSeconds, 1))
 Write-Host ""
 Write-Host "[3/4] Validando parquets gerados..." -ForegroundColor Cyan
 
-$dataDir = Join-Path $repoRoot "data\history"
+$dataDir = Join-Path $smokeDataDir "history"
 if (-not (Test-Path $dataDir)) {
     Write-Host "AVISO: $dataDir não existe — download pode ter falhado antes do write." -ForegroundColor Yellow
-    $parquetCount = 0
+    $parquetFileCount = 0
 } else {
     $parquets = Get-ChildItem -Path $dataDir -Recurse -Filter "*.parquet" -ErrorAction SilentlyContinue
-    $parquetCount = ($parquets | Measure-Object).Count
-    Write-Host "      Parquet files: $parquetCount"
-    if ($parquetCount -gt 0) {
-        # Lista os 5 mais recentes — útil para diagnóstico.
+    $parquetFileCount = ($parquets | Measure-Object).Count
+    Write-Host "      Parquet files: $parquetFileCount (particionados por ano/mês — N dias do mesmo mês = 1 arquivo)"
+    if ($parquetFileCount -gt 0) {
         $parquets | Sort-Object LastWriteTime -Descending | Select-Object -First 5 |
             ForEach-Object { Write-Host "        - $($_.FullName)" }
     }
 }
 
 # -------------------------------------------------------------------
-# G-2 (Quinn round 2 review 2026-05-11) — Validação de chunk count
-# Conta n de dias úteis (Mon-Fri, ignorando feriados — aproximação:
-# usamos só weekday filter; feriados B3 podem subestimar levemente o
-# esperado mas isso é safe — valida >= business_days, não exato pois
-# pode haver merge de parquets em runs subsequentes).
-# Política V1.1.0+ ADR-023: 1 chunk = 1 dia útil, então parquetCount
-# deve refletir >= business_days no range [start, end].
+# G-2 (Quinn round 2 review 2026-05-11; revisto Task #18 2026-05-12) —
+# Validação de chunk count via CONTEÚDO dos parquets, não nº de arquivos.
+# O schema particiona por ano/mês (history/F/SYM/YYYY/MM.parquet), então
+# N dias úteis do mesmo mês viram 1 arquivo. A política ADR-023 (1 chunk =
+# 1 dia útil) é validada por: (a) nº de chunk_id distintos = nº de chunks
+# emitidos pelo orchestrator; (b) nº de dias-calendário distintos nos
+# timestamps. Ambos devem ser >= business_days (com tolerância p/ feriados B3).
 # -------------------------------------------------------------------
 Write-Host ""
-Write-Host "[3b/4] G-2: Validando chunk count (ADR-023 1d/chunk)..." -ForegroundColor Cyan
+Write-Host "[3b/4] G-2: Validando ADR-023 (1 chunk = 1 dia útil) via conteúdo dos parquets..." -ForegroundColor Cyan
 
+# Conta dias úteis (Mon-Fri) no range. Feriados B3 podem reduzir o real;
+# por isso validamos >= (businessDays - tolerância), não exato.
 $businessDays = 0
 $cursor = $start
 while ($cursor -le $end) {
@@ -140,58 +159,59 @@ while ($cursor -le $end) {
     }
     $cursor = $cursor.AddDays(1)
 }
-Write-Host "      Business days esperados (Mon-Fri, sem feriado B3): $businessDays"
-Write-Host "      Parquets gerados: $parquetCount"
+$tolerance = [Math]::Max(1, $businessDays - 2)
+Write-Host "      Business days esperados (Mon-Fri, sem feriado B3): $businessDays (tolerância feriados: >= $tolerance)"
 
-# Valida que pelo menos 1 parquet por dia útil foi emitido. Não exigimos
-# exato porque (a) feriados B3 podem reduzir o esperado e (b) runs
-# subsequentes podem mergir partições do mesmo dia.
-$chunkCountOk = $true
-if ($parquetCount -lt $businessDays) {
-    # Subtraímos até 2 feriados de tolerância para janelas curtas — se
-    # ainda assim diverge, falha.
-    $tolerance = [Math]::Max(0, $businessDays - 2)
-    if ($parquetCount -lt $tolerance) {
-        $chunkCountOk = $false
-        Write-Host "      ERRO G-2: parquetCount=$parquetCount < tolerance=$tolerance" -ForegroundColor Red
-        Write-Host "        Esperado >= $businessDays parquets (1 chunk/dia útil — ADR-023)" -ForegroundColor Red
-        Write-Host "        Possível regressão: chunker quebrou política 1d/chunk OU" -ForegroundColor Red
-        Write-Host "        download falhou em múltiplos chunks silenciosamente." -ForegroundColor Red
-    } else {
-        Write-Host "      OK (tolerância 2 feriados: $parquetCount >= $tolerance)" -ForegroundColor Green
-    }
+# Helper python: lê os parquets via duckdb e printa "rows=N chunks=C days=D files=F range=...".
+$counterScript = Join-Path $PSScriptRoot "_count_chunks.py"
+$counterOut = & python $counterScript $smokeDataDir $Symbol 2>&1 | Out-String
+$counterOut = $counterOut.Trim()
+Write-Host "      $counterOut"
+
+$rowCount = 0; $chunkIdCount = 0; $distinctDays = 0
+if ($counterOut -match 'rows=(\d+)')   { $rowCount = [int]$matches[1] }
+if ($counterOut -match 'chunks=(\d+)') { $chunkIdCount = [int]$matches[1] }
+if ($counterOut -match 'days=(\d+)')   { $distinctDays = [int]$matches[1] }
+
+$chunkCountOk = ($chunkIdCount -ge $tolerance) -and ($distinctDays -ge $tolerance)
+if ($chunkCountOk) {
+    Write-Host "      OK (chunk_id distintos=$chunkIdCount, dias distintos=$distinctDays, ambos >= $tolerance)" -ForegroundColor Green
 } else {
-    Write-Host "      OK ($parquetCount >= $businessDays)" -ForegroundColor Green
+    Write-Host "      ERRO G-2: chunk_id distintos=$chunkIdCount, dias distintos=$distinctDays — esperado ambos >= $tolerance" -ForegroundColor Red
+    Write-Host "        Possível regressão: chunker quebrou política 1d/chunk (ADR-023) OU" -ForegroundColor Red
+    Write-Host "        download falhou em múltiplos chunks silenciosamente OU parquet vazio." -ForegroundColor Red
 }
 
 # -------------------------------------------------------------------
-# Step 5: Catalog list (sanity — confirma que catalog SQLite tem entries)
+# Step 5: Catalog contracts list (sanity — confirma que catalog SQLite responde)
 # -------------------------------------------------------------------
 Write-Host ""
 Write-Host "[4/4] Catalog contracts list..." -ForegroundColor Cyan
-& $cli contracts list 2>&1 | Select-Object -First 20
+# Nota: `contracts list` não aceita --data-dir (lê o catálogo padrão / seed bundled).
+# É só um sanity-check de que a CLI responde; o dado do smoke já foi validado em [3b/4].
+& $cli contracts list 2>&1 | Select-Object -First 12
 
 # -------------------------------------------------------------------
 # Verdict
 # -------------------------------------------------------------------
 Write-Host ""
 Write-Host "=================================================" -ForegroundColor Cyan
-if ($downloadRc -eq 0 -and $parquetCount -gt 0 -and $chunkCountOk) {
+if ($downloadRc -eq 0 -and $rowCount -gt 0 -and $chunkCountOk) {
     Write-Host " SMOKE PASS" -ForegroundColor Green
-    Write-Host "   download rc=0, parquets=$parquetCount, business_days=$businessDays"
+    Write-Host "   download rc=0, rows=$rowCount, chunks=$chunkIdCount, dias=$distinctDays, business_days=$businessDays, files=$parquetFileCount"
     Write-Host "================================================="
     exit 0
 } else {
     Write-Host " SMOKE FAIL" -ForegroundColor Red
-    Write-Host "   download rc=$downloadRc, parquets=$parquetCount, business_days=$businessDays, chunkCountOk=$chunkCountOk"
+    Write-Host "   download rc=$downloadRc, rows=$rowCount, chunks=$chunkIdCount, dias=$distinctDays, business_days=$businessDays, chunkCountOk=$chunkCountOk"
     if ($downloadRc -ne 0) {
         Write-Host "   -> CLI download retornou erro; veja logs acima." -ForegroundColor Red
     }
-    if ($parquetCount -eq 0) {
-        Write-Host "   -> Nenhum parquet gerado; possível NL_NO_LICENSE ou janela sem trades." -ForegroundColor Red
+    if ($rowCount -eq 0) {
+        Write-Host "   -> Nenhum trade gravado; possível NL_NO_LICENSE, janela sem trades, ou parquet vazio." -ForegroundColor Red
     }
     if (-not $chunkCountOk) {
-        Write-Host "   -> G-2: chunk count divergiu do esperado (ADR-023 1d/chunk)." -ForegroundColor Red
+        Write-Host "   -> G-2: chunk/dias distintos divergiram do esperado (ADR-023 1d/chunk)." -ForegroundColor Red
     }
     Write-Host "================================================="
     exit 1

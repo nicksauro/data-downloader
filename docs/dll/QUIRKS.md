@@ -1218,6 +1218,18 @@ ret: int = self._dll.DLLInitializeMarketLogin(
   - `src/data_downloader/dll/callbacks.py:make_noop_callback` (factory que deve deixar de ser invocada para slots 4/6/7/8).
   - Q11-E (folclore refutado — origem do erro), Q-DRIFT-02 (sintoma original `(2,1)`), Q-DRIFT-05 (signatures Noop fixadas — não suficiente), Q-DRIFT-06 (refuta Q11-E por leitura do exemplo), Q-DRIFT-10 (audit linha-por-linha que apontou divergência), [Q-DRIFT-12](#q-drift-12) (hipótese irmã emergente — slots 5/9/10 podem requerer REAL).
 
+- **Addendum 2026-05-12 (smoke real v1.1.0 — efeito colateral do `os.chdir` × paths relativos):**
+  A receita de fix do Q-DRIFT-10 inclui `os.chdir(self._dll_path.parent)` ANTES de `WinDLL(...)` —
+  efeito **processo-wide**, só revertido em `finalize()` (log `dll.cwd_restored quirk=Q-DRIFT-10`).
+  Durante toda a vida da instância DLL, o `cwd` do processo é a pasta da DLL (em frozen mode:
+  `dist\data_downloader\_internal\`). **Consequência descoberta no smoke real:** qualquer path
+  RELATIVO resolvido LAZY enquanto a DLL está carregada aponta para `_internal\`. O comando
+  `download` da CLI usava `data_dir = Path("data")` (relativo) → o parquet writer escreveu em
+  `_internal\data\history\...` em vez do `./data/` do shell. **Mitigação canônica:** todo path de
+  saída deve ser resolvido para ABSOLUTO (`Path(...).resolve()`) **antes** de carregar a DLL —
+  `.resolve()` captura o `cwd` original do shell. Corrigido em `cli.py` `download()` (Task #18 —
+  `docs/qa/V1.1.0-FIX-PLAN.md`). Regra geral: **nunca confie no `cwd` enquanto a ProfitDLL estiver carregada.**
+
 ---
 
 ## Q-DRIFT-12

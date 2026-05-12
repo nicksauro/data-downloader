@@ -1235,7 +1235,16 @@ def download_cmd(
         )
         raise typer.Exit(code=2)
 
-    resolved_data_dir = Path(data_dir) if data_dir is not None else Path("data")
+    # ── data_dir → ABSOLUTO e RESOLVIDO AGORA (Task #18) ──────────────────
+    # CRÍTICO: a ProfitDLL faz chdir() para o diretório dela ao carregar
+    # (quirk Q-DRIFT-10) — em frozen mode isso é ``_internal/``. Se
+    # ``resolved_data_dir`` for relativo, o parquet writer (que roda DURANTE
+    # o download, com o cwd já trocado pela DLL) resolveria ``data/`` para
+    # ``_internal/data/``, escrevendo dentro do bundle. ``.resolve()`` captura
+    # o cwd ORIGINAL do shell AGORA, antes de ``api_download()`` carregar a DLL.
+    resolved_data_dir = (
+        Path(data_dir).expanduser() if data_dir is not None else Path.cwd() / "data"
+    ).resolve()
 
     # ---- 3. Multi-symbol path (Story 4.1 AC6) ----
     if use_multi_symbol:

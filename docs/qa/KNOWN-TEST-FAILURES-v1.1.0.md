@@ -167,3 +167,28 @@ timeout_method = "thread"
 - Testes legitimamente lentos (subprocess de `.exe`, spawn de `multiprocessing`)
   continuam abaixo de 120s; nenhum precisou de `@pytest.mark.timeout(300)` local
   até agora — adicionar pontualmente se algum teste de `.exe` real demorar mais.
+
+---
+
+## Addendum — bug de produção descoberto no smoke real v1.1.0 (Task #18, 2026-05-12)
+
+> **Não é um test failure** — a suite (unit + integração) está verde. É um bug de
+> produção que só o smoke real (`.exe` + DLL real + B3) expõe, registrado aqui para
+> rastreabilidade do gate v1.1.0.
+
+- **Sintoma:** `run_smoke_real.ps1 -Symbol WDOFUT -Days 5` contra o bundle frozen — o
+  download funcionou (6 chunks 1d, 2.866.352 trades, status=completed), mas os parquets
+  foram escritos em `dist\data_downloader\_internal\data\history\...` (dentro do bundle)
+  em vez de `./data/`.
+- **Causa:** `cli.py` `download()` usava `data_dir = Path("data")` (relativo, resolvido
+  lazy); a ProfitDLL faz `os.chdir()` para `_internal\` ao carregar (Q-DRIFT-10) e o app
+  só restaura o cwd no fim do download → o parquet writer (que roda com o cwd já trocado)
+  resolveu `data/` para `_internal\data\`.
+- **Fix:** resolver `data_dir` para absoluto (`.resolve()`) no início de `download()`,
+  antes de carregar a DLL; `--data-dir` explícito no smoke script. Detalhes:
+  `docs/qa/V1.1.0-FIX-PLAN.md` Task #18; addendum em `docs/dll/QUIRKS.md` Q-DRIFT-10.
+- **Cobertura de teste:** os testes unit de `download` (`test_public_api_download.py`,
+  `test_download_handle_cancel.py`) já passam `data_dir` absoluto via `tmp_path`, então não
+  capturam o caso relativo+chdir. Follow-up opcional (não bloqueante v1.1.0): teste que
+  simula `os.chdir` após `resolved_data_dir` ser computado e verifica que o path ficou pinado.
+- **Status:** ✅ fix aplicado em dev; rebuild do `.exe` pendente (Orion) antes de re-rodar o smoke.
