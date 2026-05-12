@@ -1,12 +1,52 @@
 # Release Gate v1.1.0 — Results
 
+> **⚠ Re-gate round 2 — ver seção no topo (2026-05-12).** A seção
+> "Round 1 (2026-05-07)" abaixo está mantida como histórico mas foi
+> superseded: 5 personas (BIG COUNCIL round 2) acharam bugs depois;
+> ver `docs/qa/V1.1.0-FIX-PLAN.md`.
+
+---
+
+## Re-gate round 2 — 2026-05-12
+
+**Owner:** @aiox-master (Orion) — autonomous mode
+**Pichau directive (round 2):** "ta bem bugado, paremos de lançar builds até estar funcional, busquem bugs, façam um plano"
+**Git checkpoint:** commit `1870176` ("fix: BIG COUNCIL round 2 — consolidação de bugfixes pré-v1.1.0")
+
+### Verdict: ⏳ **GO condicional — aguardando Setup.exe + Pichau manual smoke 16/16**
+
+| # | Critério | Resultado | Detalhe |
+|---|----------|-----------|---------|
+| 1 | ruff check . | ✅ PASS | 0 errors (após auto-fixes Wave A + 2 residuais) |
+| 2 | mypy --strict | ✅ PASS | 0 errors em 94 source files |
+| 3 | pytest tests/unit | ✅ PASS | **1199 passed, 1 skipped (waiver test_pool_lifecycle), 0 fail** — exit 0 |
+| 4 | pytest tests/integration | ✅ PASS | **451 passed, 2 skipped, 0 fail, zero ruído Qt** — exit 0 (deadlock + cluster UI flaky + teardown Qt resolvidos; ver V1.1.0-FIX-PLAN §Task #10/#11/#14) |
+| 5 | pytest tests/property | ✅ PASS | incluído no run consolidado (parte dos guard tests + idempotência) |
+| 6 | python scripts/build_release.py --with-installer | ⚠ PARCIAL | bundle + zip + manifest OK; **Setup.exe FALHOU — ISCC.exe (InnoSetup) não instalado nesta máquina** (`winget install JRSoftware.InnoSetup` ou setar `ISCC_PATH`) |
+| 7 | data_downloader-cli.exe --healthcheck | ✅ PASS | rc=0, stdout `data_downloader 1.1.0\nhealthcheck OK`, structlog probe `event=healthcheck_probe` emitido |
+| 8 | Bundle size | ✅ PASS | **387.6 MB** uncompressed (target <600MB; -56.3% vs v1.0.7 baseline 886MB — Pyro lean spec) |
+| 9 | Portable zip | ✅ PASS | `data-downloader-v1.1.0-win64.zip` **157.6 MB** — SHA256 `138E6169BB27766FACCD123B4E13BB20390B361B02A6217950E442C9BF8B5BBE` |
+| 10 | Build manifest | ✅ PASS | `dist/build-manifest-v1.1.0.json` — version=1.1.0, git_sha=1870176, lean-filter binaries 464→257 / datas 3943→1348 |
+| 11 | Setup.exe (InnoSetup) | ❌ PENDENTE | requer InnoSetup instalado — re-rodar `build_release.py --with-installer` após `winget install JRSoftware.InnoSetup` |
+| 12 | Manual UI checklist (Pichau) | ⏳ PENDENTE | `docs/qa/MANUAL_SMOKE_v1.1.0.md` agora **16 itens** (item A promovido a bloqueante — ProgressCard atualiza N×/dia útil) |
+| 13 | Smoke real CLI (Pichau) | ⏳ PENDENTE | `tests/smoke/run_smoke_real.ps1` agora valida `parquetCount ≥ businessDays` |
+
+**Bugs reais de produção corrigidos no round 2** (além dos 8 originais do BIG COUNCIL):
+`catalog_broker.py` (`extra={"name"}` colidia com LogRecord), `MetricsAdapter.shutdown()` (parava QTimer da worker thread do MainThread + `Qt` não importado), `MainWindow.closeEvent` (não desligava adapters dos screens), `~/.data_downloader` underscore ressurgido, `dll_status_changed` descartava versão da DLL.
+
+**Evidência:** junit-xml e logs de pytest/ruff/mypy estão gitignored (regeneráveis; ver `.gitignore` § "QA gate artifacts"). Re-rodar localmente para reproduzir: `pytest tests/unit tests/integration --timeout=120 -q`.
+
+**Próximo passo:** (1) `winget install JRSoftware.InnoSetup` → re-build `--with-installer` → Setup.exe + SHA256; (2) Pichau executa MANUAL_SMOKE 16/16 + smoke real; (3) se PASS → @devops Gage faz commit-bump-version + tag v1.1.0 + push + gh release.
+
+---
+
+## Round 1 (2026-05-07) — HISTÓRICO (superseded pelo round 2 acima)
+
 **Date:** 2026-05-07
 **Owner:** @aiox-master (Orion) — autonomous mode
 **Pichau directive:** "ta bem bugado, na oadianta ficar lançando 1 milhão de v e todas bugadas, temos que consertar. E implementem, modo autonomo"
 
----
-
-## Verdict: ✅ **GO for Pichau manual smoke**
+### Verdict (round 1): ✅ GO for Pichau manual smoke — **INVALIDADO** (5 personas acharam bugs depois — ver round 2)
 
 All hard NO-GO criteria PASS. Aguardando Pichau executar `docs/qa/MANUAL_SMOKE_v1.1.0.md` (15 itens) + smoke real CLI antes de tag/push (delegado @devops).
 
