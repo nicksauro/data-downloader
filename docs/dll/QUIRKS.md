@@ -1670,6 +1670,33 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ---
 
+## Q-DRIFT-40
+
+- **ID:** Q-DRIFT-40
+- **Status:** 🐛 **bug-código — FIX-APPLIED (2026-05-12)** — translate-in-callback (v1.2.0 / COUNCIL-38 decisão 2, mini-council Nelo + Aria, modo autônomo). `make_history_trade_callback_v2` agora chama `TranslateTrade` DENTRO do callback e enfileira o `TradeFields` copiado.
+- **Categoria:** callback / threading / handle lifetime / volume completeness
+- **Severidade:** **HIGH** (perda silenciosa ~0.01% dos trades históricos — RCA: 261 / 2.86M num download)
+- **Título:** O handle de trade do callback V2 (`a_pTrade` de `TConnectorTradeCallback` — passado como `c_size_t` pela `THistoryTradeCallbackV2`) só é válido **dentro do escopo do callback**. A DLL recicla/libera o buffer interno do pacote assim que o callback retorna. Enfileirar o handle e traduzir DEPOIS (no `_IngestorThread`, fora do callback) → ~0.01% dos handles ficam stale → `ConnectorMarketDataLibraryU.PopulateTradeV0` lê freed memory → access violation interna da DLL (SILENT MODE, Error Number 1) → `TranslateTrade` retorna `rc != 0` → `translate_trade()` → `None` → `nl_error` → trade perdido.
+- **Causa raiz:** semântica transiente do ponteiro do callback (padrão comum de C/Delphi: o caller só garante o buffer durante a chamada). O design original (`SetHistoryTradeCallbackV2` → callback `put_nowait((handle, flags))` → `TranslateTrade` no IngestorThread) respeitava R3 ("callback só put_nowait") mas violava o contrato do handle. Com filas grandes (até 2M trades) e download de ~2.86M trades, o ingestor drena devagar o suficiente para que ~0.01% dos handles já tenham sido reciclados quando `TranslateTrade(handle)` finalmente roda.
+- **Workaround / fix:** traduzir DENTRO do callback (padrão do exemplo oficial Nelogica) — `TranslateTrade(handle, byref(struct))` é ~µs (a DLL só copia campos do buffer interno para o struct out), não bloqueia a ConnectorThread perceptivelmente. O callback enfileira o `TradeFields` JÁ COPIADO (`(fields, flags)`), nunca o handle. `AgentResolver` / format de timestamp / construção de `TradeRecord` continuam no `_IngestorThread` (cool path). Counters `translate_nl_errors` / `translate_invalid_price_skips` (Q-DRIFT-38) / `queue_dropped` (Q-DRIFT-37) agora incrementados in-callback (dict mutável, GIL-atômico). Métrica `completeness_pct` por chunk (= trades / (trades + nl_errors) * 100) logada + gauge Prometheus `download_chunk_completeness_pct`; < 99.99% dispara retry do chunk no orchestrator (max 2 retries, classificado AMBIGUOUS). R3 amended formalmente — ver `docs/adr/ADR-005-thread-model.md` amendment 2026-05-12.
+- **Manual diz:** silencioso — Manual ProfitDLL §3.2 não documenta o lifetime do `a_pTrade` do callback V2. O exemplo oficial Nelogica (`profitdll/Exemplo Python/main.py` L325-333 — `Version = 0` + `TranslateTrade(pTrade, byref(trade))` síncrono dentro do callback; `profitdll/Exemplo Delphi/Wrapper/CallbackHandlerU.pas` L473-497) é o **contrato de fato**: traduzir dentro do callback.
+- **Evidência:** `Erro.log` Pichau 2026-05-12 (COUNCIL-38 H-B — `translate_failures == translate_nl_errors`, ex. 261/2.86M ≈ 0.0091%); exemplo oficial Nelogica (Python + Delphi).
+- **Data descoberta:** 2026-05-12 (RCA do council v1.2.0).
+- **Data fix:** 2026-05-12 (v1.2.0, modo autônomo — pendente smoke real Pichau confirmar `translate_failures → ~0`).
+- **Aplica a stories:** v1.2.0 Wave 1C (Nelo-C), 1.3 (download primitive — gap de design original), 1.7g (telemetry split — counters realocados), 4.18 (Q-DRIFT-38 — `price<=0` agora checado no callback).
+- **Refs:**
+  - `src/data_downloader/dll/callbacks.py` (`make_history_trade_callback_v2` — translate-in-callback).
+  - `src/data_downloader/dll/types.py` (`THistoryTradeCallbackV2` / `TConnectorTrade` — struct bate byte-a-byte com `ProfitDataTypesU.pas` L390, 64 bytes alinhamento natural; council confirmou).
+  - `src/data_downloader/dll/wrapper.py` (`translate_trade` / `_translate_trade_raw` — chamável de dentro do callback; `TranslateTrade.argtypes/restype` preservado também no path `minimal_handshake` — Q-DRIFT-33).
+  - `src/data_downloader/orchestrator/download_primitive.py` (`_IngestorThread` recebe `TradeFields`; `ChunkResult.completeness_pct`/`translate_nl_errors`; `download_chunk` agrega counters do callback).
+  - `src/data_downloader/orchestrator/orchestrator.py` (hook retry-on-low-completeness + gauge `download_chunk_completeness_pct`).
+  - `docs/adr/ADR-005-thread-model.md` (amendment 2026-05-12 — R3 amended).
+  - `tests/unit/test_dll_callbacks.py`, `tests/unit/test_dll_wrapper_history.py`, `tests/unit/test_translate_failures_split.py`, `tests/unit/test_ingestor_thread_sentinel.py`, `tests/unit/test_ingestor_thread_invalid_price.py` (cobertura).
+  - [Q-DRIFT-33](#q-drift-33) (TranslateTrade signature no path minimal), [Q-DRIFT-34](#q-drift-34) (sentinela `TradeDate` zerado — `translate_trade` filtra → `None`), [Q-DRIFT-37](#q-drift-37) (`queue_dropped`), [Q-DRIFT-38](#q-drift-38) (`price<=0`), [Q06-V](#q06-v) / R3.
+  - `profitdll/Exemplo Python/main.py` L325-333, `profitdll/Exemplo Delphi/Wrapper/CallbackHandlerU.pas` L473-497 (contrato Nelogica).
+
+---
+
 ## Manutenção
 
 - **Adicionar quirk:** comando Nelo `*add-quirk {description}` OU edit manual aqui.

@@ -17,12 +17,17 @@ import pytest
 
 @pytest.mark.smoke
 def test_root_package_exposes_version() -> None:
-    """``data_downloader.__version__`` existe e bate com pyproject."""
-    from data_downloader import __version__
+    """``data_downloader.__version__`` existe e bate com a source-of-truth.
+
+    Não enrijece um literal — deriva da constante canônica
+    ``_PACKAGE_VERSION`` (que por sua vez é mantida em sync com
+    ``pyproject.toml::project.version``). Isso evita a regressão recorrente
+    de o teste travar numa versão antiga após cada bump.
+    """
+    from data_downloader import _PACKAGE_VERSION, __version__
 
     assert isinstance(__version__, str)
-    # Story v1.1.0 — bumpado de 0.1.0 → 1.1.0 (single-ship release).
-    assert __version__ == "1.1.0"
+    assert __version__ == _PACKAGE_VERSION
 
 
 @pytest.mark.smoke

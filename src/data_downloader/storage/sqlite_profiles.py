@@ -143,9 +143,7 @@ def _lookup_or_raise(name: str, *, source: str) -> SQLiteProfile:
     key = name.lower()
     if key not in SQLITE_PROFILES:
         valid = sorted(SQLITE_PROFILES)
-        raise ValueError(
-            f"unknown SQLite profile {name!r} from {source}; " f"valid options: {valid}"
-        )
+        raise ValueError(f"unknown SQLite profile {name!r} from {source}; valid options: {valid}")
     return SQLITE_PROFILES[key]
 
 
@@ -155,6 +153,7 @@ def apply_profile(conn: sqlite3.Connection, profile: SQLiteProfile) -> None:
     Aplica também invariantes não-configuráveis:
 
     - ``foreign_keys = ON``
+    - ``busy_timeout = 5000`` (ms)
     - ``cache_size``, ``mmap_size``, ``journal_mode``, ``synchronous``,
       ``temp_store`` do perfil.
 
@@ -166,6 +165,12 @@ def apply_profile(conn: sqlite3.Connection, profile: SQLiteProfile) -> None:
         ``journal_mode`` é uma instrução stateful (per-database), mas
         re-aplicar o mesmo modo é no-op no SQLite. Os demais PRAGMAs são
         per-connection.
+
+        ``busy_timeout = 5000``: ``register_partition`` dispara
+        ``wal_checkpoint(TRUNCATE)``, que pode bater em "database is
+        locked" se a UI tiver uma read-tx aberta. Com busy_timeout a
+        conexão *espera* até 5s pelo lock em vez de falhar imediatamente
+        — paliativo de robustez (v1.2.0 Wave 1A).
     """
     # Order matters slightly: journal_mode primeiro (mais barato se já
     # aplicado), depois caches.
@@ -174,6 +179,7 @@ def apply_profile(conn: sqlite3.Connection, profile: SQLiteProfile) -> None:
     conn.execute(f"PRAGMA cache_size = {profile.cache_size}")
     conn.execute(f"PRAGMA mmap_size = {profile.mmap_size}")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute(f"PRAGMA temp_store = {profile.temp_store}")
 
     _LOG.debug(

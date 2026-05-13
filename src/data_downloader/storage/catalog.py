@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
 
@@ -69,7 +69,11 @@ _LOG = logging.getLogger(__name__)
 
 # Versão do catálogo SQLite (independente do schema Parquet).
 # v1.1.0 (Story 2.3): adiciona `_migration_log` para framework de migrations.
-CATALOG_VERSION: str = "1.1.0"
+# v1.2.0 (Wave 1B — resume real): adiciona `chunk_ledger` (1 row por dia
+#   útil baixado — granularidade DIÁRIA, resolve o "mês tocado conta como
+#   completo" sem mexer no layout parquet mensal) + `idx_partitions_job`
+#   (resume query indexada).
+CATALOG_VERSION: str = "1.2.0"
 
 # DDL inicial — schema v1.0.0 (SCHEMA.md §5.1..5.7).
 # Nota: ``_schema_meta`` usa o formato chave/valor (SCHEMA.md §5.1)
@@ -202,12 +206,47 @@ _DDL_V1_1_0_DELTAS: tuple[str, ...] = (
 )
 
 
+# DDL delta v1.1.0 → v1.2.0 — Wave 1B (resume real).
+#
+# Background: chunks são DIÁRIOS (1 dia útil — ADR-023) mas ``partitions``
+# é granularidade MENSAL (1 row por ``(year, month)``). Inferir "dias
+# baixados" a partir de ``partitions`` é incorreto: se 2018-01 caiu no dia
+# 12, todo janeiro/2018 contava como "completo" e os outros 21 dias úteis
+# nunca eram re-baixados (perda silenciosa). ``chunk_ledger`` rastreia 1
+# row por dia útil de fato baixado (``status='completed'`` ou ``'no_trades'``)
+# — fonte de verdade para o cache-hit / resume / fresh-skip em granularidade
+# diária, sem mexer no layout parquet mensal (ADR-025 parquet-per-day fica
+# para Wave 2).
+#
+# ``idx_partitions_job`` cobre o resume query (``WHERE job_id = ?``) que
+# antes só tinha índice composto ``(symbol, year, month)`` — o ``OR`` na
+# query forçava full scan.
+_DDL_V1_2_0_DELTAS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS chunk_ledger (
+        symbol         TEXT NOT NULL,
+        exchange       TEXT NOT NULL,
+        chunk_date     TEXT NOT NULL,
+        job_id         TEXT,
+        status         TEXT NOT NULL CHECK(status IN
+                           ('completed','no_trades','failed')),
+        trades_count   INTEGER NOT NULL DEFAULT 0 CHECK(trades_count >= 0),
+        written_at     TIMESTAMP NOT NULL,
+        PRIMARY KEY (symbol, exchange, chunk_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chunk_ledger_sym_ex_date "
+    "ON chunk_ledger(symbol, exchange, chunk_date)",
+    "CREATE INDEX IF NOT EXISTS idx_partitions_job ON partitions(job_id)",
+)
+
+
 # Registry de migrações ordenadas por versão.
 # Cada entry = (versao_destino, lista de DDL statements).
-# Para aplicar uma nova versão (ex: 1.2.0), adicione ``("1.2.0", _DDL_V1_2_0_DELTAS)``.
 MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("1.0.0", _DDL_V1_0_0),
     ("1.1.0", _DDL_V1_1_0_DELTAS),
+    ("1.2.0", _DDL_V1_2_0_DELTAS),
 )
 
 
@@ -844,6 +883,99 @@ class Catalog:
                 ),
             )
 
+    # ------------------------------------------------------------------
+    # Wave 1B — chunk_ledger (granularidade DIÁRIA — resume real)
+    # ------------------------------------------------------------------
+
+    def record_chunk(
+        self,
+        *,
+        symbol: str,
+        exchange: str,
+        chunk_date: date,
+        job_id: str | None,
+        status: str,
+        trades_count: int = 0,
+    ) -> None:
+        """Registra (UPSERT) 1 dia útil baixado em ``chunk_ledger`` (Wave 1B).
+
+        Granularidade DIÁRIA — 1 row por ``(symbol, exchange, chunk_date)``.
+        Chamado pelo orchestrator ao completar um chunk (sucesso ou
+        ``no_trades``; ``failed`` registrado também, mas não conta como
+        "feito" no resume/cache-hit). UPSERT torna re-runs idempotentes.
+
+        Args:
+            symbol: Contrato vigente (ex.: ``"WDOJ26"``) — NÃO a raiz.
+            exchange: ``"F"`` ou ``"B"``.
+            chunk_date: Dia útil B3 coberto por este chunk.
+            job_id: UUID do job que originou (pode ser ``None``).
+            status: ``"completed"`` (trades persistidos), ``"no_trades"``
+                (dia válido vazio) ou ``"failed"`` (falha definitiva).
+            trades_count: Trades persistidos neste dia (0 em no_trades/failed).
+        """
+        with self._transaction():
+            conn = self._conn_or_raise()
+            conn.execute(
+                """
+                INSERT INTO chunk_ledger(
+                    symbol, exchange, chunk_date, job_id, status, trades_count, written_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, exchange, chunk_date) DO UPDATE SET
+                    job_id = excluded.job_id,
+                    status = excluded.status,
+                    trades_count = excluded.trades_count,
+                    written_at = excluded.written_at
+                """,
+                (
+                    symbol,
+                    exchange,
+                    chunk_date.isoformat(),
+                    job_id,
+                    status,
+                    trades_count,
+                    _utcnow_iso(),
+                ),
+            )
+
+    def completed_days(
+        self,
+        symbol: str,
+        exchange: str,
+        start: date,
+        end: date,
+    ) -> set[date]:
+        """Dias úteis já baixados (status ``completed``/``no_trades``) em ``[start, end]``.
+
+        Consulta ``chunk_ledger`` (granularidade diária — Wave 1B). Usado
+        pelo orchestrator no fresh-path skip + resume + cache-hit check
+        para NÃO re-baixar dias já presentes. ``failed`` NÃO conta (queremos
+        re-tentar dias que falharam definitivamente num run anterior).
+
+        Args:
+            symbol: Contrato vigente resolvido (ex.: ``"WDOJ26"``).
+            exchange: ``"F"`` ou ``"B"``.
+            start: Início do range (inclusive).
+            end: Fim do range (inclusive).
+
+        Returns:
+            ``set`` de ``date`` — dias já baixados dentro do range. Vazio
+            se nenhum.
+        """
+        conn = self._conn_or_raise()
+        rows = conn.execute(
+            "SELECT chunk_date FROM chunk_ledger "
+            "WHERE symbol = ? AND exchange = ? AND status IN ('completed','no_trades') "
+            "AND chunk_date >= ? AND chunk_date <= ?",
+            (symbol, exchange, start.isoformat(), end.isoformat()),
+        ).fetchall()
+        out: set[date] = set()
+        for r in rows:
+            try:
+                out.add(date.fromisoformat(str(r["chunk_date"])))
+            except ValueError:  # pragma: no cover defensive — corrupted row
+                continue
+        return out
+
     def get_completed_partitions(self, symbol: str, exchange: str) -> list[Partition]:
         """Lista partições registradas para ``(symbol, exchange)``.
 
@@ -871,6 +1003,41 @@ class Catalog:
         if row is None:
             return None
         return _row_to_job(row)
+
+    def list_jobs(
+        self,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        limit: int | None = None,
+    ) -> list[Job]:
+        """Lista jobs do catálogo, mais recentes primeiro.
+
+        v1.2.0 Wave 1D (Uma/Felix — detecção de download interrompido):
+        a UI consulta jobs com ``status in ('in_progress','partial')`` ao
+        reabrir o app para oferecer "Retomar".
+
+        Args:
+            statuses: Filtra por status (ex.: ``("in_progress", "partial")``).
+                ``None`` = todos.
+            limit: Limita o número de linhas retornadas. ``None`` = sem limite.
+
+        Returns:
+            Lista de :class:`Job` ordenada por ``started_at``/``completed_at``
+            descendente (jobs sem timestamp ao final).
+        """
+        conn = self._conn_or_raise()
+        sql = "SELECT * FROM downloads"
+        params: list[object] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            sql += f" WHERE status IN ({placeholders})"
+            params.extend(statuses)
+        sql += " ORDER BY COALESCE(completed_at, started_at) DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_job(r) for r in rows]
 
     def get_gaps(self, symbol: str) -> list[Gap]:
         """Lista gaps para um símbolo (resolvidos e não-resolvidos)."""
@@ -911,9 +1078,15 @@ class Catalog:
         if job is None:
             raise ValueError(f"job_id not found: {job_id}")
 
+        # Wave 1B — `OR` impedia uso de índice (full scan @ 90k rows no
+        # resume). UNION de dois SELECTs: o 1º usa `idx_partitions_job`
+        # (job_id), o 2º usa `idx_partitions_symbol_ym` (symbol, year,
+        # month). UNION (não UNION ALL) já dedup linhas idênticas.
         conn = self._conn_or_raise()
         rows = conn.execute(
-            "SELECT * FROM partitions WHERE job_id = ? OR (symbol = ? AND exchange = ?) "
+            "SELECT * FROM partitions WHERE job_id = ? "
+            "UNION "
+            "SELECT * FROM partitions WHERE symbol = ? AND exchange = ? "
             "ORDER BY year ASC, month ASC",
             (job_id, job.symbol, job.exchange),
         ).fetchall()

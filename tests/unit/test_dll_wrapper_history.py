@@ -7,7 +7,8 @@ Cobertura dos métodos novos do ``ProfitDLL`` (Story 1.3):
 - ``get_history_trades`` — chama ``GetHistoryTrades`` com 4 args + valida
   exchange + valida formato de data.
 - ``translate_trade`` — chama ``TranslateTrade(handle, byref(struct))``.
-- Lei R3 / INV-1: ``TranslateTrade`` NÃO é chamado durante callback exec.
+- v1.2.0 (COUNCIL-38 / Q-DRIFT-40): ``TranslateTrade`` É chamado DENTRO do
+  callback V2 (handle transiente) — enfileira ``TradeFields`` copiado.
 """
 
 from __future__ import annotations
@@ -249,50 +250,58 @@ def test_translate_trade_raw_low_level_still_works(tmp_path: Path) -> None:
 
 
 # =====================================================================
-# Lei R3 / INV-1 — TranslateTrade NÃO chamado durante callback exec
+# v1.2.0 (COUNCIL-38 / Q-DRIFT-40) — TranslateTrade DENTRO do callback
+# (R3 amended: handle transiente exige tradução no escopo do callback;
+# enfileira TradeFields copiado, nunca o handle stale)
 # =====================================================================
 
 
 @pytest.mark.unit
-def test_history_callback_does_not_invoke_translate_trade_inv1(tmp_path: Path) -> None:
-    """INV-1 — V2 history callback NÃO chama dll.TranslateTrade.
+def test_history_callback_translates_in_callback_and_enqueues_tradefields(tmp_path: Path) -> None:
+    """Q-DRIFT-40 — V2 history callback chama dll.translate_trade(handle) DENTRO do callback.
 
-    Isto é a invariante CRÍTICA da Story 1.3: o callback faz apenas
-    ``put_nowait((handle, flags))`` — ``TranslateTrade`` é responsabilidade
-    do IngestorThread (FORA do callback / ConnectorThread).
-
-    Verificação: substitui dll por MagicMock; cria callback via factory
-    real; invoca callback; assert que mock_dll.TranslateTrade NUNCA foi
-    chamado.
+    Inversão da invariante antiga (era: "callback só put_nowait((handle,
+    flags))"). O handle ``a_pTrade`` só é válido no escopo do callback (a DLL
+    recicla o buffer ao retornar) — por isso traduzimos AGORA. A fila recebe
+    ``(TradeFields, flags)``, NUNCA o handle (stale).
     """
-    dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
-    mock_dll = MagicMock()
-    dll._dll = mock_dll
-
     from queue import Queue
 
     from data_downloader.dll.callbacks import make_history_trade_callback_v2
-    from data_downloader.dll.types import TConnectorAssetIdentifier
+    from data_downloader.dll.types import TConnectorAssetIdentifier, TradeFields
 
-    trade_queue: Queue[tuple[int, int]] = Queue()
-    cb = make_history_trade_callback_v2(trade_queue)
+    dll = ProfitDLL(dll_path=tmp_path / "fake.dll")
+    mock_dll = MagicMock()
+
+    def _fill(_handle: int, struct_ref: object) -> int:
+        struct = struct_ref._obj  # type: ignore[attr-defined]
+        struct.TradeDate.wYear = 2026
+        struct.TradeDate.wMonth = 4
+        struct.TradeDate.wDay = 15
+        struct.TradeDate.wHour = 9
+        struct.Price = 5500.0
+        struct.Quantity = 1
+        struct.TradeNumber = _handle + 1
+        return 0
+
+    mock_dll.TranslateTrade = MagicMock(side_effect=_fill)
+    dll._dll = mock_dll
+
+    trade_queue: Queue[tuple[TradeFields, int]] = Queue()
+    cb = make_history_trade_callback_v2(trade_queue, dll)
     asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
 
-    # Invocar callback várias vezes (simulando ConnectorThread):
-    for handle in range(100):
+    for handle in range(50):
         cb(asset, handle, 0)
 
-    # CORE INV-1: TranslateTrade NUNCA foi chamado:
-    assert (
-        not mock_dll.TranslateTrade.called
-    ), "V2 history callback chamou TranslateTrade — viola INV-1/R3!"
-    # Nem qualquer outro método da DLL:
-    assert (
-        mock_dll.mock_calls == []
-    ), f"V2 history callback chamou métodos da DLL — viola R3. Calls: {mock_dll.mock_calls}"
-
-    # Side-check: queue recebeu todos os 100 handles.
-    assert trade_queue.qsize() == 100
+    # CORE Q-DRIFT-40: TranslateTrade chamado dentro do callback, 1x por trade.
+    assert mock_dll.TranslateTrade.call_count == 50
+    # Fila tem 50 TradeFields (não handles).
+    assert trade_queue.qsize() == 50
+    fields, flags = trade_queue.get_nowait()
+    assert isinstance(fields, TradeFields)
+    assert fields.price == 5500.0
+    assert flags == 0
 
 
 # =====================================================================

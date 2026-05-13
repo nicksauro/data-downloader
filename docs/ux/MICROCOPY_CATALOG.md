@@ -58,7 +58,6 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `BTN_VIEW_CATALOG` | button | Após sucesso (toast) | Ver no Catálogo | View Catalog |
 | `BTN_VALIDATE_CONTRACT` | button | Tela Catálogo > item | Validar Contrato | Validate Contract |
 | `BTN_LIST_CONTRACTS` | button | Tela Download > Símbolo | Listar Contratos Vigentes | List Active Contracts |
-| `BTN_REPEAT_LAST` | button | Tela Catálogo / atalho Ctrl+R | Repetir Último Download | Repeat Last Download |
 | `BTN_RETRY` | button | Após erro recuperável | Tentar Novamente | Try Again |
 | `BTN_OPEN_FOLDER` | button | Tela Catálogo > item | Abrir Pasta | Open Folder |
 | `BTN_DELETE` | button | Tela Catálogo > item (destrutivo) | Apagar Histórico | Delete History |

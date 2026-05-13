@@ -96,6 +96,19 @@ class DownloadProgress:
         is_99_reconnect: ``True`` quando o quirk Q11-99 (download travado em
             ~99% por DLL reconectando) está ativo. UI deve renderizar
             amarelo com microcopy ``WAR_99_RECONNECT`` em vez de "stuck".
+        elapsed_s: Tempo decorrido (segundos) desde o início do job até este
+            evento. ``0.0`` quando o produtor não popula (UI/adapter pode
+            computar do lado dela a partir de timestamps locais). v1.2.0
+            Wave 1D (long-haul UX).
+        eta_s: Estimativa de tempo restante (segundos) — tipicamente
+            ``chunks_restantes * duração_média_por_chunk``. ``None`` quando
+            ainda não há base para estimar (plano não calculado, 0 chunks
+            concluídos) ou o produtor não popula. v1.2.0 Wave 1D.
+        trades_failed: Acumulado de trades que falharam tradução / erros NL
+            (``translate_failures`` + ``nl_errors``) reportados pelo
+            orchestrator. ``0`` quando o produtor não popula ainda. v1.2.0.
+        retries: Acumulado de chunks que precisaram de retry. ``0`` quando o
+            produtor não popula ainda. v1.2.0 Wave 1D.
 
     Examples:
         Update de UI a cada evento::
@@ -120,6 +133,14 @@ class DownloadProgress:
     trades_received: int = 0
     current_contract: str | None = None
     is_99_reconnect: bool = False
+    # v1.2.0 Wave 1D (long-haul UX) — campos kwarg-only com defaults; não
+    # quebram SemVer (aditivos). Quem popula é o orchestrator/worker ao emitir
+    # ``ChunkCompletedEvent`` → ``DownloadProgress``. Enquanto o orchestrator
+    # não popular ``trades_failed``/``retries``, a UI mostra "—".
+    elapsed_s: float = 0.0
+    eta_s: float | None = None
+    trades_failed: int = 0
+    retries: int = 0
 
 
 @dataclass(frozen=True)
@@ -365,7 +386,7 @@ class DownloadHandle:
         finished = self._completed_event.wait(timeout=timeout)
         if not finished:
             raise TimeoutError(
-                f"Download did not complete within {timeout}s " "(call .cancel() if needed)"
+                f"Download did not complete within {timeout}s (call .cancel() if needed)"
             )
         with self._result_lock:
             if self._result is None:

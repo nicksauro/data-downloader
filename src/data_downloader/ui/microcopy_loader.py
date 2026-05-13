@@ -240,12 +240,9 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "ERR_DLL_MARKET_RETRY_EXHAUSTED": MicrocopyEntry(
         msg_type="error",
         title="Servidor MARKET_DATA não disponível",
-        detail=(
-            "Esgotamos as tentativas de conectar ao servidor MARKET_DATA " "(timeout em todas)."
-        ),
+        detail=("Esgotamos as tentativas de conectar ao servidor MARKET_DATA (timeout em todas)."),
         action=(
-            "Aguarde alguns minutos e tente novamente. Se persistir, "
-            "rode `data-downloader doctor`."
+            "Aguarde alguns minutos e tente novamente. Se persistir, rode `data-downloader doctor`."
         ),
     ),
     "ERR_DOWNLOAD_EMPTY": MicrocopyEntry(
@@ -284,7 +281,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="error",
         title="Download cancelado",
         detail=(
-            "Você cancelou o download. {trades_preserved} trades já " "baixados foram preservados."
+            "Você cancelou o download. {trades_preserved} trades já baixados foram preservados."
         ),
         action="Retomar com: `data-downloader download --symbol {symbol} --resume`",
     ),
@@ -296,8 +293,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="error",
         title="Conexão perdida",
         detail=(
-            "Conexão com a corretora caiu. Tentando reconectar... "
-            "(até 30 minutos é normal — Q02-E)"
+            "Conexão com a corretora caiu. Tentando reconectar... (até 30 minutos é normal — Q02-E)"
         ),
         action="Aguarde até 30 minutos. Se persistir, rode `data-downloader doctor`.",
     ),
@@ -306,8 +302,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         msg_type="error",
         title="Conexão perdida",
         detail=(
-            "Conexão com a corretora caiu. Tentando reconectar... "
-            "(até 30 minutos é normal — Q02-E)"
+            "Conexão com a corretora caiu. Tentando reconectar... (até 30 minutos é normal — Q02-E)"
         ),
         action="Aguarde até 30 minutos. Se persistir, rode `data-downloader doctor`.",
     ),
@@ -353,9 +348,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "WAR_99_RECONNECT": MicrocopyEntry(
         msg_type="warning",
         title=None,  # subtitle inline (CLI_PATTERNS §3)
-        detail=(
-            "A corretora está reconectando — é normal, " "aguarde até 30 minutos. Não cancele."
-        ),
+        detail=("A corretora está reconectando — é normal, aguarde até 30 minutos. Não cancele."),
     ),
     "WAR_99_RECONNECT_SHORT": MicrocopyEntry(
         msg_type="warning",
@@ -540,7 +533,7 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "TIP_BTN_CANCEL": MicrocopyEntry(
         msg_type="label",
         title=(
-            "Cancelar download em progresso. Trades já baixados são preservados. " "(Ctrl+C ou Esc)"
+            "Cancelar download em progresso. Trades já baixados são preservados. (Ctrl+C ou Esc)"
         ),
     ),
     "TIP_CANCEL_DURING_RECONNECT": MicrocopyEntry(
@@ -589,7 +582,6 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "BTN_DELETE_CONFIRM": MicrocopyEntry(msg_type="button", title="Apagar permanentemente"),
     "BTN_OPEN_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta"),
     "BTN_VALIDATE_CONTRACT": MicrocopyEntry(msg_type="button", title="Validar Contrato"),
-    "BTN_REPEAT_LAST": MicrocopyEntry(msg_type="button", title="Repetir Último Download"),
     "EMP_CATALOG_FIRST_RUN_TITLE": MicrocopyEntry(
         msg_type="empty", title="Nenhum dado baixado ainda"
     ),

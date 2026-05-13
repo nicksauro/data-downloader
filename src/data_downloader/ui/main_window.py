@@ -170,15 +170,19 @@ class MainWindow(QMainWindow):
         """
         banner = QFrame(self)
         banner.setObjectName("onboardingBanner")
-        # Estilo inline garante visibilidade mesmo se QSS não carregar
-        # (defense-in-depth — Story 4.15 lesson learned).
+        # v1.2.0 Wave 1D (Uma): migrado de cores fora da palette
+        # (#FFF4CE/#DDB100/#6B4F00/#B07900) para o ``role="warning-card"``
+        # canônico (rgba do warning.yellow #F2C94C — ver style.qss §11) +
+        # text.primary nos labels. Defense-in-depth: estilo inline mínimo
+        # usando apenas tokens autorizados, caso o QSS não carregue.
+        banner.setProperty("role", "warning-card")
         banner.setStyleSheet(
             "QFrame#onboardingBanner {"
-            "  background-color: #FFF4CE;"
-            "  border-bottom: 1px solid #DDB100;"
+            "  background-color: rgba(242, 201, 76, 0.08);"
+            "  border-bottom: 1px solid #F2C94C;"
             "  padding: 8px 12px;"
             "}"
-            "QFrame#onboardingBanner QLabel { color: #6B4F00; }"
+            "QFrame#onboardingBanner QLabel { color: #E8E8EA; }"
         )
 
         layout = QHBoxLayout(banner)
@@ -186,7 +190,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         icon_label = QLabel("⚠", banner)
-        icon_label.setStyleSheet("font-size: 14pt; color: #B07900;")
+        icon_label.setStyleSheet("font-size: 14pt; color: #F2C94C;")
         layout.addWidget(icon_label)
 
         msg_label = QLabel(

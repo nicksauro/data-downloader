@@ -85,7 +85,9 @@ repos:
   # 3. Ruff — lint + format (substitui black/isort/flake8)
   # ===========================================================================
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    # v0.15.x — alinhado com o ruff dev-dep (pyproject `[project.optional-dependencies].dev`).
+    # v0.6.9 não conhecia UP047 (non-pep695-generic-function), quebrando o `[tool.ruff.lint].ignore`.
+    rev: v0.15.11
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]

@@ -3,7 +3,7 @@
 > Downloader de histórico de ativos via **ProfitDLL** (Nelogica).
 > Fundação para todos os projetos de quant/backtest/research que vierem.
 
-**Versão:** 1.1.1 (hotfix — corrige crash do app GUI ao baixar; v1.1.0 + fix UI)
+**Versão:** 1.2.0 (download robusto + períodos extensos — desde 2018)
 **Plataforma:** Windows x64 (a DLL é Windows-only)
 **Squad:** 10 agentes — vide `agents/`
 
@@ -11,15 +11,15 @@
 
 ## ✨ What's new
 
-**v1.1.1 (hotfix):** corrige o crash do app GUI ao clicar "Baixar" — duplo init da ProfitDLL (singleton por processo, Q08-E) + stdio inválido em frozen windowed (`_ensure_valid_stdio`, Q-DRIFT-39) + modo de init alinhado entre "Testar Conexão" e "Baixar". O CLI nunca foi afetado. (Story 4.19, tasks #21/#21b.)
+**v1.2.0 — download robusto + períodos extensos (BIG COUNCIL round 3):**
+- 🎯 **`translate_failures` ≈ 0** — a ProfitDLL não perde mais trades. O callback V2 traduz o trade **dentro do escopo do callback** (o handle só é válido ali — Q-DRIFT-40); antes ~0.01% dos trades eram perdidos por handle stale → access violation interna da DLL. + retry de chunk se `completeness_pct < 99.99%`.
+- 🔁 **Resume funcional** — `--resume <job_id>` (era no-op) + auto-resume + `download(resume_job_id=...)` na API; re-rodar o mesmo range é idempotente e barato (baixa só o que falta — `chunk_ledger` diário, fim da perda silenciosa do resume mensal).
+- 📅 **Períodos extensos** — baixar desde 2018: `_PARTITION_ROW_LIMIT` 5M→50M (mês movimentado não aborta mais); PeriodPicker com presets ("Tudo desde 2018" / "Ano completo: YYYY" / ...) + aviso de duração; ProgressCard com ETA / tempo decorrido / throughput / trades baixados / trades perdidos / chunks com retry; banner "Retomar download" ao reabrir o app.
+- 🧹 **Dead-code removido** — `orchestrator/broker/` (~2034 LOC, multi-process pós-ADR-022 que gravava dados falsos via mock factory); `ui/shortcuts.py` (folclore); `BTN_REPEAT_LAST` órfão.
+- ✅ Suite: ruff 0 / mypy --strict 0 (87 files) / **1194 unit + 508 integration+property, 0 fail**.
 
-**v1.1.0 (base):**
-- 🎯 **Single solid release** — 8 hotfixes (v1.0.0 → v1.0.7) consolidados + sweep BIG COUNCIL (rounds 1 e 2).
-- 📦 **Bundle 56% menor** (886MB → 387.6MB) — PySide6 lean spec drop Qt6WebEngineCore + companions.
-- ✅ **Testes subprocess do `.exe` real** — flag `--healthcheck` + `tests/integration/test_binary_exe.py` + smoke real automatizado (ADR-023: chunk count via conteúdo dos parquets).
-- 🔧 **ADR-023** — política uniforme de chunk 1 dia útil/ativo (validado em smoke real: WDOFUT 5d = 2.8M trades, 6 chunks de 1d).
-- 🎨 **UI** — `CheatSheetDialog` (Ctrl+/), onboarding banner, deep-link "Abrir Settings", `@Slot` cross-thread, QTimer leaks corrigidos, teardown Qt limpo.
-- 🏛️ **Architecture** — ADR-018/021 (frozen-mode boundary), ADR-024 (catalog em `data/_internal/`), `bundle_paths.py` central.
+**v1.1.1 (hotfix anterior):** crash do app GUI ao "Baixar" — DLL singleton (Q08-E) + stdio em frozen windowed (Q-DRIFT-39).
+**v1.1.0 (base):** consolidação v1.0.0→v1.0.7 + BIG COUNCIL rounds 1-2; bundle 56% menor; `--healthcheck`; ADR-023 (chunk 1d); ADR-018/021/024.
 
 Detalhes completos: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -306,4 +306,4 @@ A definir.
 
 *— Squad data-downloader, 2026-05-03 — fundação para o que vem*
 
-<!-- LATEST-RELEASE --> Latest release: [v1.1.1](https://github.com/nicksauro/data-downloader/releases/tag/v1.1.1) — hotfix: corrige crash do app GUI ao baixar (DLL singleton Q08-E + stdio frozen windowed). v1.1.0 + fix UI. CLI nunca foi afetado.
+<!-- LATEST-RELEASE --> Latest release: [v1.2.0](https://github.com/nicksauro/data-downloader/releases/tag/v1.2.0) — download robusto + períodos extensos (desde 2018): translate_failures≈0 (Q-DRIFT-40), resume funcional, ProgressCard com ETA/throughput, broker dead-code removido (~2034 LOC). BIG COUNCIL round 3.

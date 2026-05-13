@@ -761,3 +761,106 @@ def test_state_machine_full_cycle_observable_via_spy(
     # Filtra para só os esperados (transitions são todas as ocorridas).
     filtered = [s for s in states if s in expected_order]
     assert filtered == expected_order
+
+
+# =====================================================================
+# Wave 1B — resume DIÁRIO + fresh-path skip (chunk_ledger)
+# =====================================================================
+
+
+@pytest.mark.integration
+def test_fresh_rerun_skips_completed_days_without_resume(
+    catalog: Catalog,
+    writer: ParquetWriter,
+    fast_retry_policy: Any,
+) -> None:
+    """Wave 1B — re-rodar o MESMO range (sem --resume) NÃO re-baixa dias prontos.
+
+    Run 1: janela de 5 dias úteis; o 3º dia falha definitivamente (gap +
+    ledger=failed). Run 2: re-roda o range inteiro SEM resume — só o dia que
+    falhou é re-baixado (os 4 dias OK estão no ``chunk_ledger`` como prontos).
+    """
+    # 2026-03-02 (seg) a 2026-03-06 (sex) = 5 dias úteis.
+    start = datetime(2026, 3, 2, 9, 0, 0)
+    end = datetime(2026, 3, 6, 17, 0, 0)
+    fail_round = {"get_history_return": -2147483647}  # NL_INTERNAL_ERROR (TRANSIENT)
+
+    # Run 1 — dias 1,2 OK; dia 3 falha 3x; dias 4,5 out-of-rounds (no_trades).
+    dll1 = _FakeProfitDLL(
+        rounds=[
+            _round_with_n_trades(3, base=start.replace(day=2)),
+            _round_with_n_trades(2, base=start.replace(day=3)),
+            fail_round,
+            fail_round,
+            fail_round,
+        ]
+    )
+    config = JobConfig(
+        symbol="WDOJ26",
+        exchange="F",
+        start=start,
+        end=end,
+        chunk_timeout_seconds=5,
+        resolve_contract=False,
+    )
+    r1 = Orchestrator(dll1, catalog, writer, retry_policy=fast_retry_policy).run(config)  # type: ignore[arg-type]
+    assert r1.status == "partial"
+    # 5 dias úteis no ledger: 4 prontos (completed/no_trades) + 1 failed.
+    done_after_r1 = catalog.completed_days("WDOJ26", "F", start.date(), end.date())
+    assert len(done_after_r1) == 4  # o dia 4 (2026-03-04) que falhou NÃO conta
+
+    # Run 2 — re-roda o range inteiro SEM resume. Só 1 chunk (o dia que
+    # falhou) deve ser efetivamente baixado: a DLL recebe exatamente 1
+    # get_history call.
+    dll2 = _FakeProfitDLL(rounds=[_round_with_n_trades(5, base=start.replace(day=4))])
+    r2 = Orchestrator(dll2, catalog, writer, retry_policy=fast_retry_policy).run(config)  # type: ignore[arg-type]
+    assert dll2.get_history_calls == 1  # só o dia faltante foi re-baixado
+    assert r2.status == "completed"
+    # Agora todos os 5 dias úteis estão prontos.
+    assert len(catalog.completed_days("WDOJ26", "F", start.date(), end.date())) == 5
+
+
+@pytest.mark.integration
+def test_resume_job_id_resumes_only_missing_days(
+    catalog: Catalog,
+    writer: ParquetWriter,
+    fast_retry_policy: Any,
+) -> None:
+    """Wave 1B — ``resume_job_id`` retoma só os dias faltantes (granularidade DIÁRIA).
+
+    Run 1 cobre 3 dias úteis; o 2º falha. Run 2 com ``resume_job_id`` do run 1
+    baixa só o dia 2 (não re-baixa os dias 1 e 3).
+    """
+    start = datetime(2026, 3, 2, 9, 0, 0)  # seg
+    end = datetime(2026, 3, 4, 17, 0, 0)  # qua → 3 dias úteis
+    fail_round = {"get_history_return": -2147483647}
+
+    dll1 = _FakeProfitDLL(
+        rounds=[
+            _round_with_n_trades(2, base=start.replace(day=2)),
+            fail_round,
+            fail_round,
+            fail_round,
+            _round_with_n_trades(3, base=start.replace(day=4)),
+        ]
+    )
+    config = JobConfig(
+        symbol="WDOJ26",
+        exchange="F",
+        start=start,
+        end=end,
+        chunk_timeout_seconds=5,
+        resolve_contract=False,
+    )
+    r1 = Orchestrator(dll1, catalog, writer, retry_policy=fast_retry_policy).run(config)  # type: ignore[arg-type]
+    assert r1.status == "partial"
+    assert r1.job_id
+
+    # Resume — só o dia 2026-03-03 deve ser re-baixado.
+    dll2 = _FakeProfitDLL(rounds=[_round_with_n_trades(4, base=start.replace(day=3))])
+    r2 = Orchestrator(dll2, catalog, writer, retry_policy=fast_retry_policy).run(  # type: ignore[arg-type]
+        config, resume_job_id=r1.job_id
+    )
+    assert dll2.get_history_calls == 1
+    assert r2.status == "completed"
+    assert len(catalog.completed_days("WDOJ26", "F", start.date(), end.date())) == 3

@@ -102,6 +102,7 @@ class DownloadAdapter(QObject):
     # ------------------------------------------------------------------
 
     @Slot(str, str, object, object, object)
+    @Slot(str, str, object, object, object, object)
     def start(
         self,
         symbol: str,
@@ -109,12 +110,17 @@ class DownloadAdapter(QObject):
         start: date | datetime,
         end: date | datetime,
         data_dir: Path | None,
+        resume_job_id: str | None = None,
     ) -> None:
         """Dispara download (executa na thread do adapter).
 
         Argumentos seguem :func:`data_downloader.public_api.download`.
         Captura erros sincronamente (validação) e levantamentos no worker
         — emite via signal ``error``.
+
+        v1.2.0 Wave 1D: ``resume_job_id`` opcional — quando passado, o
+        ``public_api.download`` retoma o job existente em vez de criar um
+        novo (Wave 1B — Dex-B). Default ``None`` = comportamento clássico.
         """
         # Story v1.0.8 fix (Pichau live test 2026-05-06): breadcrumbs no
         # entry point do worker QThread. Sem isto, em windowed mode após
@@ -153,8 +159,13 @@ class DownloadAdapter(QObject):
                 end,
                 exchange=exchange,
                 data_dir=data_dir,
+                resume_job_id=resume_job_id,
             )
-            _log.info("ui.api_download_returned_handle symbol=%s", symbol)
+            _log.info(
+                "ui.api_download_returned_handle symbol=%s resume_job_id=%s",
+                symbol,
+                resume_job_id,
+            )
         except Exception as exc:
             _log.exception("ui.api_download_raised symbol=%s", symbol)
             self.error.emit(exc)

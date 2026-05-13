@@ -48,7 +48,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
@@ -119,6 +119,20 @@ _DEFAULT_RETRYABLE_DOWNLOAD_ERRORS: Final[tuple[type[BaseException], ...]] = (
     OSError,
     TimeoutError,
 )
+
+
+# === Nelo-C v1.2.0 hook (COUNCIL-38 decisão 2) — retry chunk on low completeness ===
+# Coordenado com Dex-B (dono deste arquivo): este bloco + ``_redownload_for_completeness``
+# em ``_do_download`` são a única adição da Wave 1C aqui.
+_COMPLETENESS_RETRY_THRESHOLD_PCT: Final[float] = 99.99
+"""``completeness_pct`` mínimo aceitável de um chunk (= trades / (trades +
+nl_errors) * 100). Abaixo disso re-baixa o chunk. 99.99% == nl_errors / total
+> 0.0001 (0.01%) — exatamente o limiar da RCA (ex.: 261/2.86M ≈ 0.0091%)."""
+
+_COMPLETENESS_RETRY_MAX: Final[int] = 2
+"""Máx. re-downloads por baixa completude (além da 1ª tentativa). Se o
+re-download tiver completude igual ou pior, aceita (sem loop infinito —
+classificado como AMBIGUOUS pela telemetria, não como falha)."""
 
 
 # =====================================================================
@@ -443,9 +457,20 @@ class Orchestrator:
                 contract_code=contract_code,
             )
 
-            # 4. Cache hit check (range coverage REAL — finding H8).
-            completed = self._catalog.get_completed_partitions(contract_code, config.exchange)
-            if self._is_full_cache_hit(config, completed):
+            # 4. Calcula chunks faltantes (granularidade DIÁRIA — Wave 1B).
+            #    ``_compute_chunks`` consulta ``chunk_ledger`` e remove os
+            #    dias úteis já baixados — torna re-rodar o mesmo range
+            #    idempotente e barato MESMO sem ``--resume`` (fresh-path skip).
+            #    ``resume_pending_chunks`` (granularidade mensal Story 1.5)
+            #    ainda é honrado como hint adicional no caminho resume, mas o
+            #    filtro autoritativo é o ledger diário.
+            chunks = self._compute_chunks(config, contract_code, resume_pending_chunks)
+
+            # 4b. Cache hit — TODOS os dias úteis do range já estão no ledger.
+            #    Distingue "partição existe" de "range coberto" (finding H8)
+            #    com granularidade diária (não mais o bug do "mês tocado").
+            if not chunks:
+                completed = self._catalog.get_completed_partitions(contract_code, config.exchange)
                 log.info(
                     "orchestrator.cache_hit",
                     job_id=job_id,
@@ -462,9 +487,7 @@ class Orchestrator:
                 metrics.completed_at = datetime.now(UTC)
                 # Story 2.4 — cache hit conta como job finalizado.
                 self._metrics.incr_counter("download_jobs_total", labels={"status": "cache_hit"})
-                # Cache hit pula DRAINING — direto para COMMITTED via FAILED-skip.
-                # Por simplicidade, não usa state machine no cache hit (nada para
-                # drenar); apenas marca run como concluído.
+                # Cache hit pula DRAINING — nada para drenar.
                 return JobResult(
                     job_id=job_id,
                     status="cache_hit",
@@ -474,9 +497,6 @@ class Orchestrator:
                     partitions_written=(),
                     metrics=metrics,
                 )
-
-            # 5. Calcula chunks.
-            chunks = self._compute_chunks(config, contract_code, resume_pending_chunks)
 
             # Marca job como in_progress.
             self._catalog.update_job_progress(
@@ -679,36 +699,6 @@ class Orchestrator:
             exchange=config.exchange,
         )
 
-    def _is_full_cache_hit(
-        self,
-        config: JobConfig,
-        completed_partitions: list[Partition],
-    ) -> bool:
-        """Verifica se ``[start, end]`` é subset da união de partições completas.
-
-        Granularidade mensal — alinhada a ``compute_pending_chunks`` da Story 1.5
-        (ADR-004 partition layout). Cache hit REAL = todos os meses em
-        ``[start.year/month .. end.year/month]`` têm partição registrada
-        para ``(symbol, exchange)``.
-
-        finding H8 — distingue "partição existe" de "range coberto":
-        partições isoladas nas pontas NÃO contam como cache hit.
-        """
-        if not completed_partitions:
-            return False
-        completed_keys = {(p.year, p.month) for p in completed_partitions}
-        year, month = config.start.year, config.start.month
-        end_y, end_m = config.end.year, config.end.month
-        while (year, month) <= (end_y, end_m):
-            if (year, month) not in completed_keys:
-                return False
-            if month == 12:
-                year += 1
-                month = 1
-            else:
-                month += 1
-        return True
-
     def _resolve_chunk_days_map(
         self,
         config: JobConfig,
@@ -737,70 +727,84 @@ class Orchestrator:
         contract_code: str,
         resume_pending_chunks: tuple[Partition, ...] | None,
     ) -> list[ChunkRange]:
-        """Calcula sub-chunks (granularidade dias úteis) para o run.
+        """Calcula sub-chunks (granularidade dias úteis) ainda FALTANTES.
 
-        Caminho **fresh:** chunker quebra ``[config.start, config.end]`` em
-        sub-intervalos. Story 4.16 + ADR-023 (V1.1.0+):
-        ``chunk_days_map`` é derivado de :func:`get_chunk_days` — política
-        unificada TODOS=1 dia útil. Se o caller passou
-        ``config.chunk_days_map`` explicitamente, este override do caller
-        prevalece (utilizado em testes que precisam isolar a estratégia).
+        Wave 1B — fresh-path skip + resume DIÁRIO. Algoritmo (igual para
+        fresh e resume):
 
-        Caminho **resume:** subtrai partições já completas (granularidade
-        mensal Story 1.5). Para cada mês ainda não-completo dentro do
-        range, gera sub-chunks com chunker. Garante que re-rodar é safe
-        (R5).
+        1. Chunker quebra ``[config.start, config.end]`` em sub-intervalos
+           de dias úteis B3 (ADR-023 — política unificada TODOS=1; override
+           via ``config.chunk_days_map`` para testes).
+        2. Consulta ``Catalog.completed_days(contract_code, exchange,
+           start, end)`` — dias úteis já baixados (status ``completed``/
+           ``no_trades`` no ``chunk_ledger``).
+        3. Remove da lista os chunks cujo dia já está no ledger.
+
+        Isso torna re-rodar ``download(WDOFUT, 2018-01-01, 2026-05-01)``
+        idempotente e barato (não re-baixa o que já tem) MESMO sem
+        ``--resume``, e corrige o bug do catalog mensal (Story 1.5): um mês
+        "tocado" no dia 12 NÃO conta os outros 21 dias úteis como prontos
+        — eles aparecem aqui como faltantes (perda de dados eliminada).
+
+        ``resume_pending_chunks`` (granularidade mensal Story 1.5) é mantido
+        na assinatura por compatibilidade; no caminho resume só serve como
+        sinal de que estamos retomando — o filtro autoritativo é o ledger
+        diário (que é estritamente mais fino que o set de meses completos).
         """
+        _ = resume_pending_chunks  # legado Story 1.5 — substituído pelo ledger diário
         chunk_days_map = self._resolve_chunk_days_map(config, contract_code)
 
-        if resume_pending_chunks is None:
-            return chunk_date_range(
+        all_chunks = chunk_date_range(
+            contract_code,
+            config.exchange,
+            config.start,
+            config.end,
+            chunk_days_map=chunk_days_map,
+        )
+        if not all_chunks:
+            return []
+
+        # Wave 1B — consulta o ledger DIÁRIO. ``completed_days`` é tolerante
+        # a catalog sem a tabela (DB pré-v1.2.0 que ainda não migrou) — mas
+        # o ``__init__`` do Catalog aplica migrations, então em prática a
+        # tabela existe sempre.
+        try:
+            done_days = self._catalog.completed_days(
                 contract_code,
                 config.exchange,
-                config.start,
-                config.end,
-                chunk_days_map=chunk_days_map,
+                config.start.date(),
+                config.end.date(),
             )
+        except Exception as exc:  # pragma: no cover defensive — fail-safe
+            log.warning("orchestrator.completed_days_failed", error=repr(exc))
+            done_days = set()
 
-        # Caminho resume — meses já feitos viram set; expandimos os meses
-        # faltantes em sub-chunks de dias úteis.
-        completed_keys = {(p.year, p.month) for p in resume_pending_chunks}
-        chunks: list[ChunkRange] = []
+        if not done_days:
+            return all_chunks
 
-        year, month = config.start.year, config.start.month
-        end_y, end_m = config.end.year, config.end.month
-        while (year, month) <= (end_y, end_m):
-            if (year, month) in completed_keys:
-                # mês completo — pula.
-                pass
-            else:
-                month_start = max(
-                    datetime(year, month, 1),
-                    config.start,
-                )
-                next_month = (year + 1, 1) if month == 12 else (year, month + 1)
-                # Last instant do mês = next_month_start - 1us.
-                next_dt = datetime(next_month[0], next_month[1], 1)
-                # Subtrai 1 microssegundo para ficar dentro do mês.
-                month_end_inclusive = (
-                    next_dt.replace(microsecond=next_dt.microsecond) - _ONE_MICROSECOND
-                )
-                month_end = min(month_end_inclusive, config.end)
-                chunks.extend(
-                    chunk_date_range(
-                        contract_code,
-                        config.exchange,
-                        month_start,
-                        month_end,
-                        chunk_days_map=chunk_days_map,
-                    )
-                )
-            if month == 12:
-                year += 1
-                month = 1
-            else:
-                month += 1
-        return chunks
+        # ADR-023: cada chunk = 1 dia útil → ``chunk.start.date()`` é o dia.
+        # Defesa para chunks multi-dia (N>1, configs antigas): pula só se
+        # TODOS os dias úteis do chunk já estão no ledger.
+        from data_downloader.validation.calendar_b3 import b3_business_days_range
+
+        remaining: list[ChunkRange] = []
+        for chunk in all_chunks:
+            chunk_days = b3_business_days_range(chunk.start.date(), chunk.end.date())
+            if chunk_days and all(d in done_days for d in chunk_days):
+                continue
+            remaining.append(chunk)
+        skipped = len(all_chunks) - len(remaining)
+        if skipped:
+            log.info(
+                "orchestrator.fresh_skip",
+                symbol=contract_code,
+                exchange=config.exchange,
+                total_chunks=len(all_chunks),
+                skipped_chunks=skipped,
+                remaining_chunks=len(remaining),
+                resume=resume_pending_chunks is not None,
+            )
+        return remaining
 
     def _process_chunk(
         self,
@@ -854,6 +858,53 @@ class Orchestrator:
         finally:
             unbind_context("chunk_id")
 
+    def _record_chunk_days(
+        self,
+        *,
+        contract_code: str,
+        exchange: str,
+        chunk: ChunkRange,
+        job_id: str,
+        status: str,
+        trades_count: int,
+    ) -> None:
+        """Wave 1B — persiste 1 row por dia útil deste chunk no ``chunk_ledger``.
+
+        Granularidade DIÁRIA: o ledger é a fonte de verdade para o
+        fresh-skip / resume / cache-hit. ``status`` ``completed``/``no_trades``
+        marca o dia como pronto; ``failed`` registra a tentativa (não conta
+        como pronto). Para ADR-023 (chunk = 1 dia) é 1 row; para configs
+        multi-dia, ``trades_count`` é dividido em partes iguais (best-effort
+        — auditoria fina viria do parquet). Best-effort: erro aqui só vira
+        log (não derruba o chunk — perda no ledger = re-download, não perda
+        de dados).
+        """
+        from data_downloader.validation.calendar_b3 import b3_business_days_range
+
+        try:
+            days = b3_business_days_range(chunk.start.date(), chunk.end.date())
+            if not days:
+                return
+            per_day = trades_count // len(days) if status == "completed" else 0
+            remainder = trades_count - per_day * len(days) if status == "completed" else 0
+            for i, d in enumerate(days):
+                tc = per_day + (remainder if i == len(days) - 1 else 0)
+                self._catalog.record_chunk(
+                    symbol=contract_code,
+                    exchange=exchange,
+                    chunk_date=d,
+                    job_id=job_id,
+                    status=status,
+                    trades_count=tc,
+                )
+        except Exception as exc:  # pragma: no cover defensive
+            log.warning(
+                "orchestrator.record_chunk_days_failed",
+                symbol=contract_code,
+                chunk_start=chunk.start.isoformat(),
+                error=repr(exc),
+            )
+
     def _process_chunk_inner(
         self,
         *,
@@ -882,13 +933,8 @@ class Orchestrator:
         # CircuitOpenError economiza retry inteiro + sleep.
         breaker = self._get_breaker(contract_code, config.exchange)
 
-        def _do_download() -> ChunkResult:
-            # Q02-E (Story 2.6 AC4): progress=99% reconnect NÃO levanta
-            # exception em download_chunk — retorna status='completed' OU
-            # status='timeout' (timeout duro). Apenas NL_* error codes
-            # reais ou TimeoutError contam como falha (categoria via
-            # taxonomy NL_*).
-            result = download_chunk(
+        def _download_once() -> ChunkResult:
+            return download_chunk(
                 self._dll,
                 contract_code,
                 config.exchange,
@@ -896,9 +942,49 @@ class Orchestrator:
                 chunk.end,
                 timeout=config.chunk_timeout_seconds,
             )
+
+        def _do_download() -> ChunkResult:
+            # Q02-E (Story 2.6 AC4): progress=99% reconnect NÃO levanta
+            # exception em download_chunk — retorna status='completed' OU
+            # status='timeout' (timeout duro). Apenas NL_* error codes
+            # reais ou TimeoutError contam como falha (categoria via
+            # taxonomy NL_*).
+            result = _download_once()
+            # === Nelo-C v1.2.0 hook (COUNCIL-38 decisão 2) ===
+            # Se o chunk completou mas a completude ficou abaixo do limiar
+            # (nl_errors / total > 0.01%), re-baixa o chunk (max 2 retries).
+            # Com translate-in-callback (Q-DRIFT-40) isto deveria ser raríssimo;
+            # é um cinto-e-suspensório. Mantém o melhor resultado visto (não
+            # piora). Classificado como AMBIGUOUS — não é falha do chunk.
+            if (
+                result.status == "completed"
+                and result.completeness_pct < _COMPLETENESS_RETRY_THRESHOLD_PCT
+            ):
+                best = result
+                for attempt in range(1, _COMPLETENESS_RETRY_MAX + 1):
+                    log.warning(
+                        "orchestrator.chunk_low_completeness_retry",
+                        job_id=job_id,
+                        symbol=contract_code,
+                        chunk_start=chunk.start.isoformat(),
+                        chunk_end=chunk.end.isoformat(),
+                        attempt=attempt,
+                        completeness_pct=round(best.completeness_pct, 6),
+                        nl_errors=best.translate_nl_errors,
+                        trades_count=len(best.trades),
+                        quirk="Q-DRIFT-40",
+                    )
+                    retry_result = _download_once()
+                    if retry_result.status == "completed" and (
+                        retry_result.completeness_pct > best.completeness_pct
+                    ):
+                        best = retry_result
+                    if best.completeness_pct >= _COMPLETENESS_RETRY_THRESHOLD_PCT:
+                        break
+                result = best
             if result.status == "timeout":
                 raise TimeoutError(
-                    f"download_chunk timed out for {contract_code} " f"[{chunk.start}, {chunk.end}]"
+                    f"download_chunk timed out for {contract_code} [{chunk.start}, {chunk.end}]"
                 )
             if result.status == "failed":
                 # OSError carrega ``nl_code`` para o RetryPolicy classificar
@@ -944,6 +1030,14 @@ class Orchestrator:
                 gap_end=chunk.end,
                 reason="failed_chunk",
             )
+            self._record_chunk_days(
+                contract_code=contract_code,
+                exchange=config.exchange,
+                chunk=chunk,
+                job_id=job_id,
+                status="failed",
+                trades_count=0,
+            )
             log.warning(
                 "circuit_breaker.rejected",
                 job_id=job_id,
@@ -974,6 +1068,14 @@ class Orchestrator:
                 gap_start=chunk.start,
                 gap_end=chunk.end,
                 reason="failed_chunk",
+            )
+            self._record_chunk_days(
+                contract_code=contract_code,
+                exchange=config.exchange,
+                chunk=chunk,
+                job_id=job_id,
+                status="failed",
+                trades_count=0,
             )
             log.warning(
                 "orchestrator.chunk_failed",
@@ -1013,6 +1115,14 @@ class Orchestrator:
                 gap_start=chunk.start,
                 gap_end=chunk.end,
                 reason="failed_chunk",
+            )
+            self._record_chunk_days(
+                contract_code=contract_code,
+                exchange=config.exchange,
+                chunk=chunk,
+                job_id=job_id,
+                status="failed",
+                trades_count=0,
             )
             log.warning(
                 "orchestrator.chunk_failed",
@@ -1056,6 +1166,17 @@ class Orchestrator:
                 gap_end=chunk.end,
                 reason="no_trades",
             )
+            # Wave 1B — dia útil válido mas vazio conta como "feito" no
+            # ledger (não re-baixar; mas mantém o gap registrado para
+            # auditoria de cobertura).
+            self._record_chunk_days(
+                contract_code=contract_code,
+                exchange=config.exchange,
+                chunk=chunk,
+                job_id=job_id,
+                status="no_trades",
+                trades_count=0,
+            )
             log.info(
                 "orchestrator.chunk_complete",
                 job_id=job_id,
@@ -1089,6 +1210,22 @@ class Orchestrator:
             partition,
             job_id=job_id,
         )
+        # Wave 1B — marca o(s) dia(s) útil(eis) deste chunk como prontos no
+        # ledger DIÁRIO (fonte de verdade do fresh-skip / resume / cache-hit).
+        # Granularidade diária resolve o bug do catalog mensal (Story 1.5):
+        # um mês "tocado" no dia 12 NÃO faz os outros 21 dias contarem como
+        # prontos.
+        self._record_chunk_days(
+            contract_code=contract_code,
+            exchange=config.exchange,
+            chunk=chunk,
+            job_id=job_id,
+            status="completed",
+            trades_count=len(chunk_result.trades),
+        )
+        # Wave 1C: hook de retry on low completeness aqui (Nelo-C — se
+        # ``nl_errors / total > 0.001%`` re-enfileirar o chunk antes de
+        # marcá-lo pronto).
 
         metrics.chunks_completed += 1
         # ``trades_persisted`` conta trades NOVOS deste chunk (não o total
@@ -1109,6 +1246,13 @@ class Orchestrator:
             "chunk_duration_seconds", chunk_duration, labels={"symbol": contract_code}
         )
         self._metrics.set_gauge("last_chunk_duration_seconds", chunk_duration)
+        # Nelo-C v1.2.0 (COUNCIL-38): completude do chunk pós-traduções.
+        self._metrics.observe_histogram(
+            "download_chunk_completeness_pct",
+            chunk_result.completeness_pct,
+            labels={"symbol": contract_code},
+        )
+        self._metrics.set_gauge("last_chunk_completeness_pct", chunk_result.completeness_pct)
 
         log.info(
             "orchestrator.chunk_complete",
@@ -1120,6 +1264,11 @@ class Orchestrator:
             n_trades=len(chunk_result.trades),
             partition_total_rows=write_result.row_count,
             duration_ms=int(chunk_duration * 1000),
+            # Nelo-C v1.2.0 (Q-DRIFT-40): completude = trades / (trades +
+            # nl_errors) * 100. < 99.99% já passou por retry (max 2).
+            completeness_pct=round(chunk_result.completeness_pct, 6),
+            translate_nl_errors=chunk_result.translate_nl_errors,
+            queue_dropped=chunk_result.queue_dropped,
         )
         return write_result, "success", chunk_duration, len(chunk_result.trades)
 
@@ -1257,6 +1406,3 @@ def _to_schema_trade(t: PrimitiveTradeRecord) -> SchemaTradeRecord:
         # ``TConnectorTradeType`` — id desconhecido vira None).
         trade_type_name=_trade_type_name(t.trade_type),
     )
-
-
-_ONE_MICROSECOND: Final[timedelta] = timedelta(microseconds=1)

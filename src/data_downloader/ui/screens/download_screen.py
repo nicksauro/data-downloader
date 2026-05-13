@@ -27,6 +27,7 @@ Microcopy (R17 — Uma): TODAS as strings vêm de ``microcopy_loader``.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -66,6 +67,20 @@ STATE_NORMAL = "normal"
 STATE_LOADING = "loading"
 STATE_ERROR = "error"
 STATE_SUCCESS = "success"
+
+
+def _default_data_dir() -> Path:
+    """Pasta de dados default — raiz estável do usuário, não o cwd (v1.2.0 Wave 1D).
+
+    Fallback para ``Path.cwd() / "data"`` se ``bundle_paths`` não estiver
+    disponível por algum motivo (defensivo — não deve acontecer).
+    """
+    try:
+        from data_downloader._internal.bundle_paths import user_data_dir
+
+        return user_data_dir() / "data"
+    except Exception:
+        return Path.cwd() / "data"
 
 
 class DownloadScreen(QWidget):
@@ -158,6 +173,12 @@ class DownloadScreen(QWidget):
         self._footer = QLabel(format_msg("LBL_FOOTER_SHORTCUTS"), self)
         self._footer.setProperty("role", "muted")
 
+        # v1.2.0 Wave 1D (Uma) — banner não-modal "Retomar download interrompido".
+        # Hidden até :meth:`_check_for_interrupted_download` decidir.
+        self._resume_banner = self._build_resume_banner()
+        self._resume_job_id: str | None = None
+        self._resume_job_data_dir: Path | None = None
+
         # Stack interno para os 3 estados visíveis (normal/loading/error).
         # Success é overlay (toast) sobre normal.
         self._state_stack = QStackedWidget(self)
@@ -172,6 +193,7 @@ class DownloadScreen(QWidget):
         outer.setSpacing(16)
         outer.addWidget(self._title)
         outer.addWidget(self._subtitle)
+        outer.addWidget(self._resume_banner)
         outer.addWidget(self._state_stack, stretch=1)
         outer.addWidget(self._footer)
 
@@ -190,6 +212,13 @@ class DownloadScreen(QWidget):
 
         # Default: estado normal.
         self._current_state = STATE_NORMAL
+
+        # v1.2.0 Wave 1D — ao abrir a tela, checa o catalog por jobs
+        # interrompidos (status in_progress/partial) e oferece retomar.
+        # Best-effort: qualquer falha (catalog ausente, schema antigo) é
+        # silenciada — banner simplesmente não aparece.
+        with contextlib.suppress(Exception):
+            self._check_for_interrupted_download()
 
     # ------------------------------------------------------------------
     # Public API consumida pelo MainWindow / testes
@@ -241,7 +270,10 @@ class DownloadScreen(QWidget):
         layout.addWidget(folder_label)
 
         self._folder_edit = QLineEdit(card)
-        self._folder_edit.setText(str(Path.cwd() / "data"))
+        # v1.2.0 Wave 1D (Uma): default não-relativo ao cwd de lançamento —
+        # usa ``bundle_paths.user_data_dir()`` (mesma raiz do .env / cache),
+        # garantindo que o .exe instalado grave num local estável.
+        self._folder_edit.setText(str(_default_data_dir()))
         self._folder_edit.setObjectName("dataDirEdit")
         folder_row.addWidget(self._folder_edit, stretch=1)
 
@@ -429,6 +461,134 @@ class DownloadScreen(QWidget):
 
         return card
 
+    def _build_resume_banner(self) -> QFrame:
+        """Banner não-modal "Retomar download interrompido?" (v1.2.0 Wave 1D).
+
+        Aparece ao abrir a tela se houver job ``in_progress``/``partial`` no
+        catalog. Três botões: [Retomar] / [Começar do zero] / [Descartar].
+        Hidden por default; :meth:`_check_for_interrupted_download` decide.
+        """
+        banner = QFrame(self)
+        banner.setObjectName("resumeBanner")
+        banner.setProperty("role", "warning-card")
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(12)
+
+        icon = QLabel("↻", banner)
+        icon.setStyleSheet("font-size: 14pt; color: #F2C94C;")
+        layout.addWidget(icon)
+
+        self._resume_banner_label = QLabel("", banner)
+        self._resume_banner_label.setObjectName("resumeBannerLabel")
+        self._resume_banner_label.setWordWrap(True)
+        layout.addWidget(self._resume_banner_label, stretch=1)
+
+        resume_btn = QPushButton("Retomar", banner)
+        resume_btn.setObjectName("resumeBtn")
+        resume_btn.setProperty("variant", "primary")
+        resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        resume_btn.clicked.connect(self._on_resume_clicked)
+        layout.addWidget(resume_btn)
+
+        restart_btn = QPushButton("Começar do zero", banner)
+        restart_btn.setObjectName("resumeRestartBtn")
+        restart_btn.setProperty("variant", "secondary")
+        restart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        restart_btn.clicked.connect(self._on_resume_restart_clicked)
+        layout.addWidget(restart_btn)
+
+        discard_btn = QPushButton("Descartar", banner)
+        discard_btn.setObjectName("resumeDiscardBtn")
+        discard_btn.setProperty("variant", "link")
+        discard_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        discard_btn.clicked.connect(self._on_resume_discard_clicked)
+        layout.addWidget(discard_btn)
+
+        banner.setVisible(False)
+        return banner
+
+    def _check_for_interrupted_download(self) -> None:
+        """Consulta o catalog por jobs interrompidos e mostra o banner.
+
+        Usa ``Catalog.list_jobs(statuses=("in_progress","partial"))``. Se
+        existir, popula o banner com o job mais recente. Best-effort.
+        """
+        data_dir = _default_data_dir()
+        job = None
+        plan = None
+        try:
+            from data_downloader.storage.catalog import Catalog
+
+            db_path = data_dir / "_internal" / "catalog.db"
+            if not db_path.exists():
+                return
+            catalog = Catalog(db_path=db_path, data_dir=data_dir)
+            try:
+                jobs = catalog.list_jobs(statuses=("in_progress", "partial"), limit=1)
+                if jobs:
+                    job = jobs[0]
+                    with contextlib.suppress(Exception):
+                        plan = catalog.resume_job(job.job_id)
+            finally:
+                with contextlib.suppress(Exception):
+                    catalog.close()
+        except Exception:
+            return
+        if job is None:
+            return
+        self._resume_job_id = getattr(job, "job_id", None)
+        self._resume_job_data_dir = data_dir
+        symbol = getattr(job, "symbol", "?") or "?"
+        # done/total em chunks — usa partições completas vs chunks pendentes.
+        if plan is not None:
+            done = len(getattr(plan, "completed_partitions", ()) or ())
+            pending = len(getattr(plan, "pending_chunks", ()) or ())
+            total = done + pending
+            where = f"parou em {done}/{total} chunks" if total else "parcial em disco"
+        else:
+            where = "parcial em disco"
+        self._resume_banner_label.setText(f"Retomar download de {symbol}? ({where})")
+        self._resume_banner.setVisible(True)
+
+    def _hide_resume_banner(self) -> None:
+        self._resume_banner.setVisible(False)
+
+    @Slot()
+    def _on_resume_clicked(self) -> None:
+        """Retoma o download interrompido via ``resume_job_id`` (Wave 1B — Dex-B)."""
+        if self._download_active:
+            return
+        job_id = self._resume_job_id
+        self._hide_resume_banner()
+        if not job_id:
+            return
+        symbol = self._symbol_picker.value() or "?"
+        start, end = self._period_picker.range()
+        data_dir = self._resume_job_data_dir or _default_data_dir()
+        self._download_active = True
+        self._progress_card.reset()
+        self._progress_card.set_data_dir(data_dir)
+        self._set_state(STATE_LOADING)
+        self._subtitle.setText(
+            format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE_DOWNLOADING", symbol=symbol)
+        )
+        # Despacha start com resume_job_id (6º arg do signal/slot).
+        self._request_start.emit(symbol, "F", start, end, data_dir, job_id)
+
+    @Slot()
+    def _on_resume_restart_clicked(self) -> None:
+        """Esconde o banner — usuário prefere reconfigurar e começar do zero."""
+        self._resume_job_id = None
+        self._hide_resume_banner()
+        self._set_state(STATE_NORMAL)
+
+    @Slot()
+    def _on_resume_discard_clicked(self) -> None:
+        """Esconde o banner sem ação (descarta a sugestão)."""
+        self._resume_job_id = None
+        self._hide_resume_banner()
+
     def _build_toast(self) -> QFrame:
         toast = QFrame()
         toast.setProperty("role", "toast")
@@ -494,7 +654,11 @@ class DownloadScreen(QWidget):
 
         # Transição → loading.
         self._download_active = True
+        self._hide_resume_banner()
         self._progress_card.reset()
+        # v1.2.0 Wave 1D — passa data_dir ao card para o botão "Abrir Pasta"
+        # ficar disponível durante o download.
+        self._progress_card.set_data_dir(data_dir)
         self._set_state(STATE_LOADING)
 
         # Subtitle muda para "Baixando {symbol}".
@@ -545,8 +709,6 @@ class DownloadScreen(QWidget):
         if self._last_success_path is None:
             return
         # Defensive — UI nunca cai por falha de IO/shell (suppress).
-        import contextlib
-
         with contextlib.suppress(Exception):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_success_path)))
 

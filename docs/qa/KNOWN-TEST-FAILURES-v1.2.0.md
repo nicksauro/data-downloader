@@ -1,13 +1,29 @@
-# Known Test Failures — v1.1.0 (task #10 triage)
+# Known Test Failures — v1.2.0
 
-**Owner:** Quinn (@qa)
-**Created:** 2026-05-11
-**Context:** Saída do `V1.1.0-FIX-PLAN.md` task #10 — destrancar a suite de
-integração (deadlock) + triagem dos FAILs pré-existentes.
+**Owner:** Quinn (@qa) — atualizado por Dex (@dev) na Wave 1A
+**Criado:** 2026-05-11 (como `KNOWN-TEST-FAILURES-v1.1.0.md`)
+**Renomeado/atualizado:** 2026-05-12 — v1.2.0 Wave 1A (gate fixes + storage paliativo + cleanup)
+**Context:** continuação da triagem do `V1.1.0-FIX-PLAN.md` task #10; agora rastreado sob v1.2.0 (ver `docs/qa/V1.2.0-PLAN.md`).
 
-> Os FAILs **resolvidos** nesta task não estão listados aqui (ver §"Resolvidos").
-> Os itens abaixo são os que **permanecem** após task #10, com classificação,
-> motivo de não-correção nesta task, e dono do follow-up.
+> Os FAILs **resolvidos** não estão listados como "permanecem" (ver §"Resolvidos").
+> Os itens em §"Permanecem" são os que ainda têm follow-up aberto, com classificação,
+> motivo de não-correção, e dono.
+
+---
+
+## Estado da suite — v1.2.0 Wave 1A (2026-05-12)
+
+| Item | Status |
+|------|--------|
+| Regressão `test_smoke_imports.py::test_root_package_exposes_version` (assert literal `"1.1.0"` vs `_PACKAGE_VERSION="1.1.1"`) | ✅ **RESOLVIDO** Wave 1A — assert agora deriva de `data_downloader._PACKAGE_VERSION` (não enrijece literal; sobrevive a futuros bumps). |
+| `ruff check .` → 2× `UP047` (PEP-695 reativado no ruff 0.15.x em `_internal/exception_adapter.translate_internal` e `orchestrator/retry.with_retry`) | ✅ **MITIGADO** Wave 1A — `"UP047"` adicionado a `[tool.ruff.lint].ignore` com comentário; migração PEP-695 real diferida p/ v1.3.0. |
+| Waiver `WAIVERS/test_pool_lifecycle_broker_dead_code.md` (`test_pool_lifecycle::test_start_stop_cycle`) | ✅ **OBSOLETO — removido** Wave 1A. Quinn confirmou 13/13 passam sem `@pytest.mark.skip`. (O broker em si será removido pela Wave 1B.) |
+| `_PARTITION_ROW_LIMIT` = 5M abortava download de ~1 mês de WDOFUT (~10-13M trades) | ✅ **PALIATIVO** Wave 1A — subido para 50M em `storage/parquet_writer.py`; particionamento diário real é ADR-025 (v1.2.0 Wave 2). |
+| `wal_checkpoint(TRUNCATE)` por `register_partition` podia bater `database is locked` com read-tx da UI aberta | ✅ **MITIGADO** Wave 1A — `PRAGMA busy_timeout=5000` adicionado a `apply_profile()` em `storage/sqlite_profiles.py`. |
+
+> O `1 skipped` (unit) que antes era o waiver de `test_pool_lifecycle` **não existe mais** —
+> aquele teste passa normalmente. O único skip ambiental que permanece é
+> `test_installer_build` (InnoSetup não instalado em algumas máquinas).
 
 ---
 

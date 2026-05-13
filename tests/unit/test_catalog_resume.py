@@ -194,3 +194,74 @@ def test_compute_pending_chunks_inverted_range_returns_empty() -> None:
         completed_partitions=[],
     )
     assert pending == []
+
+
+# =====================================================================
+# Wave 1B — chunk_ledger (granularidade diária)
+# =====================================================================
+
+
+@pytest.mark.unit
+def test_record_chunk_and_completed_days(catalog: Catalog) -> None:
+    """record_chunk persiste 1 row/dia; completed_days lê só completed/no_trades."""
+    from datetime import date
+
+    catalog.record_chunk(
+        symbol="WDOJ26",
+        exchange="F",
+        chunk_date=date(2018, 1, 2),
+        job_id="j1",
+        status="completed",
+        trades_count=1234,
+    )
+    catalog.record_chunk(
+        symbol="WDOJ26",
+        exchange="F",
+        chunk_date=date(2018, 1, 3),
+        job_id="j1",
+        status="no_trades",
+        trades_count=0,
+    )
+    catalog.record_chunk(
+        symbol="WDOJ26",
+        exchange="F",
+        chunk_date=date(2018, 1, 4),
+        job_id="j1",
+        status="failed",
+        trades_count=0,
+    )
+    done = catalog.completed_days("WDOJ26", "F", date(2018, 1, 1), date(2018, 1, 31))
+    assert done == {date(2018, 1, 2), date(2018, 1, 3)}  # failed NÃO conta
+    # Range filter.
+    assert catalog.completed_days("WDOJ26", "F", date(2018, 1, 3), date(2018, 1, 3)) == {
+        date(2018, 1, 3)
+    }
+    # Outro símbolo não vaza.
+    assert catalog.completed_days("WINJ26", "F", date(2018, 1, 1), date(2018, 1, 31)) == set()
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_record_chunk_upsert_idempotent(catalog: Catalog) -> None:
+    """record_chunk no mesmo (symbol, exchange, date) faz UPSERT (não duplica)."""
+    from datetime import date
+
+    catalog.record_chunk(
+        symbol="WDOJ26",
+        exchange="F",
+        chunk_date=date(2020, 5, 4),
+        job_id="j1",
+        status="failed",
+        trades_count=0,
+    )
+    catalog.record_chunk(
+        symbol="WDOJ26",
+        exchange="F",
+        chunk_date=date(2020, 5, 4),
+        job_id="j2",
+        status="completed",
+        trades_count=999,
+    )
+    done = catalog.completed_days("WDOJ26", "F", date(2020, 5, 1), date(2020, 5, 31))
+    assert done == {date(2020, 5, 4)}  # agora conta (status virou completed)
+    catalog.close()

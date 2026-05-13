@@ -22,6 +22,105 @@ implicam bumps de API, e vice-versa.
 
 ---
 
+## [1.2.0] — 2026-05-12
+
+> **Download robusto + períodos extensos.** BIG COUNCIL round 3 (6 agentes).
+> Foco: a ProfitDLL passa a traduzir ~100% dos trades; resume funcional;
+> baixar desde 2018; UX para downloads longos; remoção de dead-code.
+
+### Corrigido (Fixed)
+
+- **`translate_failures` ≈ 0 — a ProfitDLL não perdia mais trades** (Q-DRIFT-40,
+  Story 4.20). O callback V2 de trade histórico só enfileirava o `handle`
+  (`a_pTrade: Pointer`) e o `TranslateTrade` era feito depois no IngestorThread —
+  mas o handle só é válido **dentro do escopo do callback** (a DLL recicla o
+  buffer interno do pacote). Com milhões de trades enfileirados, ~0.01% dos
+  handles ficavam stale → `ConnectorMarketDataLibraryU.PopulateTradeV0` lia
+  memória liberada → access violation interna da DLL (SILENT MODE) → trade
+  perdido. Fix: o callback agora chama `TranslateTrade` **dentro do escopo**
+  (padrão do exemplo Nelogica) e enfileira o `TradeFields` já copiado, não o
+  handle. R3/ADR-005 emendado (callback V2 de trade pode chamar `TranslateTrade`
+  — ~µs, não bloqueia a ConnectorThread; demais callbacks seguem `put_nowait`
+  only). Cinto-e-suspensório: retry do chunk se `completeness_pct < 99.99%`
+  (máx. 2); métrica `download_chunk_completeness_pct` exportada.
+- **Download de períodos extensos não abortava mais em mês movimentado.** O
+  `ParquetWriter` levantava `IntegrityError` quando o parquet mensal passava de
+  5M linhas — um mês de WDOFUT (~10-13M trades) abortava o job por volta do 10º
+  dia útil. Paliativo: `_PARTITION_ROW_LIMIT` 5M → 50M (a solução definitiva,
+  parquet-por-dia / ADR-025, fica para a v1.2.1 — ver `docs/qa/V1.2.0-PLAN.md`).
+- **Resume silencioso de dados corrigido.** O catálogo registrava partições por
+  **mês**, mas os chunks são **diários** (ADR-023): se um mês caía no dia 12, o
+  mês inteiro contava como "completo" e os outros ~21 dias **não eram baixados**.
+  Fix: nova tabela `chunk_ledger` (1 row por dia útil baixado, status
+  `completed`/`no_trades`/`failed`); `CATALOG_VERSION` 1.1.0 → 1.2.0 (migração
+  automática). `resume`/cache-hit/fresh-skip passam a operar em granularidade
+  diária — re-baixar só o que falta de verdade.
+- **Multi-symbol footgun removido.** `download SYM1 SYM2 -p N>1` usava um
+  *mock factory* por default → gravava parquet com **dados falsos** silenciosamente.
+  Agora `-p N>1` é deprecado (licença Nelogica é single-session, ADR-022) →
+  cai no loop sequencial single-symbol com aviso. O dead-code do broker
+  (`orchestrator/broker/`, ~2034 LOC + 4 test files) foi removido.
+- **`busy_timeout=5000`** no perfil SQLite — `wal_checkpoint(TRUNCATE)` (por
+  `register_partition`) não falha mais com `database is locked` quando a UI tem
+  uma read-tx aberta.
+- **`get_pending_chunks`**: `WHERE job_id=? OR (...)` → `UNION` de dois SELECTs
+  indexados (+ `idx_partitions_job`) — não vira mais full scan no resume query.
+- Gate: `test_smoke_imports::test_root_package_exposes_version` agora deriva da
+  fonte (`_PACKAGE_VERSION`) em vez de enrijecer o literal — não regride a cada
+  bump de versão. `ruff` UP047 (PEP-695) adicionado ao `ignore` (migração
+  diferida para v1.3.0).
+
+### Adicionado (Added)
+
+- **`--resume <job_id>`** funcional na CLI (era no-op). + **auto-resume**: se há
+  um job incompleto pro mesmo `(symbol, exchange, range)`, retoma automaticamente;
+  ao fim de um job `partial`, imprime o hint `--resume {job_id}`.
+- **`download(symbol, start, end, *, resume_job_id=...)`** na public API.
+- **`fresh-path skip`** — re-rodar `download` do mesmo range é idempotente e
+  barato (consulta o `chunk_ledger`, baixa só os dias faltantes), com ou sem
+  `--resume`.
+- **`DownloadProgress`** += `elapsed_s`, `eta_s`, `trades_failed`, `retries`
+  (kwarg-only, defaults — SemVer-safe).
+- **UX para downloads longos** (Story 4.21): ProgressCard mostra tempo restante
+  (ETA), tempo decorrido, throughput (trades/s, chunks/h), trades baixados,
+  trades perdidos, chunks com retry; barra mostra "Calculando plano de
+  download…" quando o plano ainda não foi computado; log view limitado a 2000
+  blocos (não acumula em downloads de horas); botão "Abrir Pasta" durante o
+  download. PeriodPicker ganhou presets ("Mês corrente" / "Último ano" /
+  "Ano completo: YYYY" / "Tudo desde 2018" / "Personalizado") + aviso de duração
+  para ranges grandes ("⚠ ~N dias úteis, ~Xh-Yh de download — você pode pausar e
+  retomar"). Ao reabrir o app com um download interrompido: banner "Retomar
+  download de {symbol}? (parou em X/Y chunks)" com [Retomar]/[Começar do
+  zero]/[Descartar]. `Catalog.list_jobs()` (read-only) suporta isso.
+- `completeness_pct` por chunk logado em `download.complete` /
+  `orchestrator.chunk_complete`.
+
+### Removido (Removed)
+
+- `orchestrator/broker/` (multi-process broker — dead-code pós-ADR-022): ~2034
+  LOC + `test_pool_lifecycle.py` / `test_broker_protocol.py` /
+  `test_worker_client.py` / `test_multi_symbol_mock.py` / `test_multi_asset_mock.py`.
+- `ui/shortcuts.py` — placeholders nunca chamados (atalhos `Ctrl+R`/`Ctrl+L`/
+  `Ctrl+E`/`Ctrl+O` sem handler — folclore).
+- Microcopy `BTN_REPEAT_LAST` ("Repetir Último Download") — feature prometida
+  sem implementação.
+- Waiver `docs/qa/WAIVERS/test_pool_lifecycle_broker_dead_code.md` — obsoleto
+  (o teste passa; o broker foi removido).
+
+### Notas
+
+- Suite: ruff 0 / mypy --strict 0 (87 source files) / pytest **1194 unit + 508
+  integration+property, 0 fail** (3 skips ambientais: plataforma não-Windows).
+- ADR-005 (thread model) emendado 2026-05-12; ADR-025 (parquet-por-dia) planejado
+  para v1.2.1 — ver `docs/qa/V1.2.0-PLAN.md`.
+- `KNOWN-TEST-FAILURES-v1.1.0.md` → `KNOWN-TEST-FAILURES-v1.2.0.md`.
+- **Pendente de smoke real (Pichau, em pregão B3):** download de 1 mês WDOFUT via
+  CLI + via UI (validar `translate_failures` ≈ 0 e completeness ~100%); resume
+  real (matar o `.exe` no meio, reabrir, retomar); download de período extenso
+  por blocos.
+
+---
+
 ## [1.1.1] — 2026-05-12
 
 > **Hotfix** — corrige o crash do app GUI ao baixar histórico (a v1.1.0

@@ -287,7 +287,9 @@ L243/L324/L336/L346/L391/L435).
 # Decisão COUNCIL-03: usar ``SetHistoryTradeCallbackV2`` + ``TranslateTrade``.
 # - Callback V2 entrega ``(asset, pTrade_handle, flags)`` na ConnectorThread.
 # - ``TranslateTrade(pTrade, byref(TConnectorTrade))`` desempacota o struct
-#   FORA do callback (em IngestorThread) — lei R3 / manual §4 L4382.
+#   DENTRO do callback (v1.2.0 / COUNCIL-38 / Q-DRIFT-40 — handle transiente)
+#   e o ``TradeFields`` copiado é enfileirado; o IngestorThread só faz
+#   pós-tradução (AgentResolver / format / TradeRecord). R3 amended v1.2.0.
 # - Versões V1 (`THistoryTradeCallback` e `TProgressCallback` acima) ficam
 #   mantidas para NoopCallback do init slot.
 #
@@ -422,12 +424,14 @@ THistoryTradeCallbackV2 = WINFUNCTYPE(
     c_size_t,  # pTrade — handle opaco (passar a TranslateTrade)
     c_uint,  # flags (TC_IS_EDIT | TC_LAST_PACKET | ...)
 )
-"""V2 history trade callback (Story 1.3 / COUNCIL-03).
+"""V2 history trade callback (Story 1.3 / COUNCIL-03 + v1.2.0 COUNCIL-38).
 
-Callback recebe handle opaco (``c_size_t``) que DEVE ser passado a
-``TranslateTrade`` em IngestorThread (FORA do callback — R3). Callback faz
-APENAS ``queue.put_nowait((handle, flags))`` — ver
-``callbacks.make_history_trade_callback_v2``.
+Callback recebe handle opaco (``c_size_t``) — válido APENAS no escopo do
+callback (a DLL recicla o buffer interno do pacote ao retornar; Q-DRIFT-40).
+Por isso ``callbacks.make_history_trade_callback_v2`` chama ``TranslateTrade``
+DENTRO do callback (R3 amended v1.2.0 — ~µs, não bloqueia ConnectorThread) e
+enfileira o ``TradeFields`` JÁ COPIADO — nunca o handle (stale).
+``AgentResolver`` / format / ``TradeRecord`` ficam no IngestorThread.
 """
 
 

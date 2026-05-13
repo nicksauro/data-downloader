@@ -968,11 +968,10 @@ def integrity_validate_data(
 # =====================================================================
 
 # Module-level singletons p/ typer.Option (evita ruff B008 conforme Story 2.1).
-# Story 4.1 — `--symbol` agora aceita múltiplos valores (typer/click lista
-# de strings via repeated flag: --symbol WDOJ26 --symbol WINH26). Quando
-# múltiplos símbolos são passados E --parallel > 1, roteamos para
-# MultiSymbolMaster (Story 4.1 AC6); caso contrário usa path single-symbol
-# existente (Story 1.7b).
+# `--symbol` aceita múltiplos valores (repeated flag: --symbol WDOFUT
+# --symbol PETR4). Múltiplos símbolos são baixados SEQUENCIALMENTE, 1 por
+# vez (ADR-022 — licença single-session; o broker multi-process foi
+# removido em v1.2.0).
 _DOWNLOAD_SYMBOL_OPT = typer.Option(
     None,
     "--symbol",
@@ -999,19 +998,28 @@ _DOWNLOAD_DATA_DIR_OPT = typer.Option(
     None, "--data-dir", "-d", help="Raiz dos dados (default: ./data)."
 )
 _DOWNLOAD_RESUME_OPT = typer.Option(
-    None, "--resume", help="(Reservado V2) Continuar download por job_id."
+    None,
+    "--resume",
+    help=(
+        "Retomar um download incompleto pelo job_id (v1.2.0). Baixa apenas "
+        "os dias úteis ainda faltantes. Se omitido, um job incompleto para o "
+        "mesmo (símbolo, exchange, período) é detectado e retomado "
+        "automaticamente."
+    ),
 )
-# Story 4.1 AC6 — `--parallel N` controla número de workers do pool. N=1
-# (default) força path single-symbol existente (Story 1.7b — sem broker
-# overhead). N>1 com múltiplos símbolos usa MultiSymbolMaster.
+# `--parallel` — DEPRECADO (ADR-022): a licença Nelogica é single-session,
+# então paralelizar símbolos exigiria N processos com N inits da DLL — o que
+# não funciona (2º init falha). A flag é mantida só para compatibilidade de
+# linha-de-comando: qualquer valor > 1 é ignorado com aviso e os símbolos
+# são processados sequencialmente, 1 por vez. (Multi-symbol real = Epic
+# futuro com N processos — Q08-E.)
 _DOWNLOAD_PARALLEL_OPT = typer.Option(
     1,
     "--parallel",
     "-p",
     help=(
-        "Número de workers paralelos (Story 4.1). "
-        "1 = single-process (default — sem broker overhead). "
-        ">1 = pool persistente N workers. Requer múltiplos --symbol."
+        "DEPRECADO (ADR-022 — licença single-session). N>1 é ignorado com "
+        "aviso; múltiplos --symbol são baixados sequencialmente, 1 por vez."
     ),
     min=1,
     max=16,
@@ -1118,22 +1126,23 @@ def download_cmd(
 ) -> None:
     """Baixa histórico de trades para ``symbol(s)`` em ``[start, end]`` (HLP_DOWNLOAD).
 
-    Story 1.7b — gate de Epic 1 (MVP smoke). Compose:
-      CLI typer → public_api.download → Orchestrator (1.7a) → DLL/writer/catalog.
+    Compose: CLI typer → public_api.download → Orchestrator → DLL/writer/catalog.
 
-    Story 4.1 (AC6) — multi-symbol via ``--symbol X --symbol Y --parallel N``:
-      CLI → MultiSymbolMaster → CatalogBroker (master) + WorkerPool (N procs).
+    Múltiplos ``--symbol`` são baixados SEQUENCIALMENTE, 1 por vez
+    (ADR-022 — licença single-session). ``--resume <job_id>`` retoma um
+    download incompleto; sem ``--resume``, um job incompleto pro mesmo
+    ``(símbolo, exchange, período)`` é detectado e retomado automaticamente
+    (v1.2.0).
 
     Microcopy 100% via ``ui.microcopy_loader`` (R17 — Uma).
     Ctrl+C produz graceful shutdown (CLI_PATTERNS §7); exit code 130 (POSIX).
     """
     console = _make_console()
-    _ = resume  # placeholder V2
 
-    # ---- 1. Normaliza lista de símbolos (Story 4.1 AC6) ----
-    # Story v1.0.2 / 4.6 (Q-DRIFT-32 2026-05-05): aplicamos resolve_alias()
-    # ANTES da rota single/multi para que o cache last_symbol guarde o
-    # canônico (evita warning repetido em re-runs com cache hit).
+    # ---- 1. Normaliza lista de símbolos ----
+    # Q-DRIFT-32 2026-05-05: aplicamos resolve_alias() antes do loop para
+    # que o cache last_symbol guarde o canônico (evita warning repetido em
+    # re-runs com cache hit).
     from data_downloader.orchestrator.symbol_alias import resolve_alias
 
     symbols: list[str] = []
@@ -1153,25 +1162,26 @@ def download_cmd(
             )
             raise typer.Exit(code=2)
 
-    # ---- 1b. Routing: multi-symbol vs single-symbol ----
-    # ADR-022 (2026-05-05) — licença Nelogica é single-session (Q17-CLOSED
-    # Hipótese B confirmada por usuário). Multi-process broker (ADR-015
-    # REVOKED) não funciona — segundo init falha. Path correto é serial em
-    # 1 processo. Quando o usuário tenta `--parallel N>1` com múltiplos
-    # símbolos, emitimos warning e forçamos parallel=1; routing degrada
-    # para path single-symbol (que processa apenas symbols[0]). Para baixar
-    # múltiplos símbolos hoje, invoque a CLI sequencialmente, 1 símbolo
-    # por vez (workflow recomendado em ADR-022).
-    if parallel > 1 and len(symbols) > 1:
+    # ---- 1b. Routing: sempre single-session sequencial (ADR-022) ----
+    # A licença Nelogica é single-session (Q17-CLOSED — Hipótese B confirmada
+    # pelo usuário). O broker multi-process (ADR-015 REVOKED) não funciona:
+    # o 2º init da DLL falha. v1.2.0 removeu ``orchestrator/broker/`` (dead
+    # code ~2034 LOC + footgun: o default usava um mock factory → gravava
+    # parquet com dados FALSOS silenciosamente). ``--parallel N>1`` agora só
+    # emite aviso; se múltiplos símbolos forem passados, eles são baixados
+    # SEQUENCIALMENTE, 1 por vez (loop abaixo). ``--parallel`` é mantida só
+    # para compat de CLI.
+    if parallel > 1:
         console.print(
-            "[yellow]⚠ --parallel N>1 está desabilitado:[/yellow] licença "
-            "Nelogica é single-session (Q17-CLOSED 2026-05-05; ADR-022). "
-            "Forçando parallel=1. Para múltiplos símbolos, invoque a CLI "
-            "uma vez por símbolo (serial — sem ganho real em paralelizar).\n"
+            "[yellow]⚠ --parallel N>1 desabilitado:[/yellow] a licença Nelogica "
+            "é single-session (ADR-022) — baixando símbolos sequencialmente, "
+            "1 por vez. (Multi-symbol real = Epic futuro com N processos.)\n"
         )
-        parallel = 1
-    use_multi_symbol = parallel > 1 and len(symbols) > 1  # sempre False pós-ADR-022
-    single_symbol: str = symbols[0]  # path single-symbol usa apenas o primeiro
+    if len(symbols) > 1:
+        console.print(
+            f"[dim]{len(symbols)} símbolos enfileirados — serão baixados em "
+            f"sequência: {', '.join(symbols)}[/dim]"
+        )
 
     if start is None or end is None:
         first, today = _default_period()
@@ -1246,32 +1256,75 @@ def download_cmd(
         Path(data_dir).expanduser() if data_dir is not None else Path.cwd() / "data"
     ).resolve()
 
-    # ---- 3. Multi-symbol path (Story 4.1 AC6) ----
-    if use_multi_symbol:
-        _run_multi_symbol_download(
+    # ---- 3. Loop sequencial sobre os símbolos (ADR-022 — single-session) ----
+    # 1 símbolo (caso comum) → 1 iteração. >1 → processa em sequência. Cada
+    # iteração roda o pipeline single-symbol completo (DLL singleton process-
+    # global é reusada entre iterações). O exit code final reflete o pior
+    # status entre os símbolos.
+    worst_exit_code = 0
+    for sym_idx, single_symbol in enumerate(symbols):
+        if len(symbols) > 1:
+            console.print(f"\n[dim]── símbolo {sym_idx + 1}/{len(symbols)} ──[/dim]")
+        rc = _download_one_symbol(
             console=console,
-            symbols=symbols,
+            symbol=single_symbol,
             start_date=start_date,
             end_date=end_date,
             exchange=exchange,
-            data_dir=resolved_data_dir,
-            parallel=parallel,
+            resolved_data_dir=resolved_data_dir,
+            resume=resume if sym_idx == 0 else None,
+            metrics_port=metrics_port if sym_idx == 0 else None,
         )
-        # _run_multi_symbol_download chama typer.Exit ao final.
-        return
+        worst_exit_code = max(worst_exit_code, rc)
+    raise typer.Exit(code=worst_exit_code)
+
+
+def _download_one_symbol(
+    *,
+    console: Console,
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    exchange: str,
+    resolved_data_dir: Path,
+    resume: str | None,
+    metrics_port: int | None,
+) -> int:
+    """Executa o pipeline single-symbol e retorna um exit code (0=ok).
+
+    v1.2.0 — extraído de ``download_cmd`` para permitir o loop sequencial
+    multi-symbol (ADR-022). ``resume`` é o job_id de ``--resume`` (ou
+    ``None`` → auto-resume: se houver um job incompleto pro mesmo
+    ``(symbol, exchange, [start, end])``, ele é retomado automaticamente).
+    """
+    single_symbol = symbol
+    # ---- Auto-resume detection (v1.2.0) ----
+    # Se o usuário não passou --resume, procuramos um job incompleto
+    # (status partial/in_progress/failed/pending) pro mesmo (symbol,
+    # exchange, range). Se houver, retomamos automaticamente (em vez de
+    # registrar um job novo). Best-effort: erro de catalog não bloqueia.
+    resume_job_id = resume
+    if resume_job_id is None:
+        resume_job_id = _detect_resumable_job(
+            console=console,
+            symbol=single_symbol,
+            exchange=exchange,
+            start_date=start_date,
+            end_date=end_date,
+            data_dir=resolved_data_dir,
+        )
 
     # ---- 3b. Single-symbol header Rich (CLI_PATTERNS §2) ----
+    resume_note = f" — retomando job {resume_job_id[:8]}…" if resume_job_id else ""
     console.print(
         Panel(
             f"[bold]Baixando[/bold] [cyan]{single_symbol}[/cyan] "
-            f"({start_date.isoformat()} a {end_date.isoformat()}) — exchange={exchange}",
+            f"({start_date.isoformat()} a {end_date.isoformat()}) — "
+            f"exchange={exchange}{resume_note}",
             title="[cyan]⬇ data-downloader download[/cyan]",
             border_style="cyan",
         )
     )
-
-    # ---- 4. Início do download via public_api ----
-    from data_downloader.public_api.download import download as api_download
 
     # Story 2.4 — opt-in PrometheusExporter HTTP (lifecycle gerenciado aqui;
     # stop garantido em ``finally`` no fim do comando para liberar a porta
@@ -1288,11 +1341,16 @@ def download_cmd(
                 f"[red]✗ Não foi possível iniciar o exporter Prometheus "
                 f"em :{metrics_port}:[/red] {exc}"
             )
-            raise typer.Exit(code=2) from exc
+            metrics_exporter = None
+            return 2
         console.print(
             f"[cyan]📊 Métricas Prometheus expostas em "
             f"http://localhost:{metrics_port}/metrics[/cyan]"
         )
+
+    # Import inline — evita custo de import de public_api quando o módulo CLI
+    # é só importado (testes de smoke).
+    from data_downloader.public_api.download import download as api_download
 
     try:
         handle = api_download(
@@ -1302,13 +1360,14 @@ def download_cmd(
             exchange=exchange,
             data_dir=resolved_data_dir,
             metrics_emitter=metrics_exporter,
+            resume_job_id=resume_job_id,
         )
     except ValueError as exc:
         if metrics_exporter is not None:
             with contextlib.suppress(Exception):
                 metrics_exporter.stop()
         console.print(f"[red]✗ Erro de input:[/red] {exc}")
-        raise typer.Exit(code=2) from exc
+        return 2
 
     # ---- 5. Cancelamento graceful via SIGINT (CLI_PATTERNS §7, AC4) ----
     cancel_requested = threading.Event()
@@ -1416,7 +1475,7 @@ def download_cmd(
 
     if final_result is None:  # pragma: no cover defensive
         console.print("[red]✗ Erro interno: download não retornou resultado[/red]")
-        raise typer.Exit(code=1)
+        return 1
 
     # ---- 6. Persiste last_symbol (CLI_PATTERNS §10) ----
     _save_last_symbol(final_result.symbol)
@@ -1446,7 +1505,7 @@ def download_cmd(
                 border_style="green",
             )
         )
-        raise typer.Exit(code=0)
+        return 0
     if status == "cache_hit":
         console.print(
             Panel(
@@ -1466,7 +1525,7 @@ def download_cmd(
                 border_style="green",
             )
         )
-        raise typer.Exit(code=0)
+        return 0
     if status == "cancelled":
         console.print(
             Panel(
@@ -1486,7 +1545,7 @@ def download_cmd(
                 border_style="yellow",
             )
         )
-        raise typer.Exit(code=130)
+        return 130
     if status in ("partial", "failed"):
         # Erro humanizado via humanize_nl_error quando possível.
         # Story v1.0.2 fix B-Frozen #3 (Nelo+Aria 2026-05-05): estender o mapping
@@ -1538,12 +1597,21 @@ def download_cmd(
         console.print(
             Panel(body, title="erro", border_style="red"),
         )
+        # v1.2.0 — se o job terminou ``partial`` (alguns chunks falharam),
+        # imprime o comando para retomar só os faltantes.
+        if status == "partial" and final_result.job_id:
+            console.print(
+                f"[yellow]↻ Alguns dias falharam.[/yellow] Rode "
+                f"[bold]data-downloader download --symbol {single_symbol} "
+                f"--resume {final_result.job_id}[/bold] para tentar de novo "
+                "(ou re-rode o mesmo comando — os dias já baixados são pulados)."
+            )
         # Exit code 3 indica erro mapeado/conhecido (NL_* ou sentinel),
         # 1 = erro não mapeado.
-        raise typer.Exit(code=3 if (nl_name or sentinel_name) else 1)
+        return 3 if (nl_name or sentinel_name) else 1
     # Defensive — status desconhecido.
     console.print(f"[red]✗ Status desconhecido: {status}[/red]")  # pragma: no cover
-    raise typer.Exit(code=1)
+    return 1
 
 
 def _approx_size_mb(partitions: tuple[Path, ...]) -> float:
@@ -1565,155 +1633,67 @@ def _format_duration(seconds: float) -> str:
 
 
 # =====================================================================
-# Multi-symbol download (Story 4.1 AC6 — broker + pool)
+# Auto-resume detection (v1.2.0 Wave 1B)
 # =====================================================================
 
 
-def _run_multi_symbol_download(
+def _detect_resumable_job(
     *,
     console: Console,
-    symbols: list[str],
+    symbol: str,
+    exchange: str,
     start_date: date,
     end_date: date,
-    exchange: str,
     data_dir: Path,
-    parallel: int,
-) -> None:
-    """Executa N símbolos paralelo via :class:`MultiSymbolMaster` (Story 4.1).
+) -> str | None:
+    """Procura no catalog um job incompleto pro mesmo ``(symbol, exchange, range)``.
 
-    Args:
-        console: Rich console (microcopy + tables).
-        symbols: Lista de símbolos (>= 2; rota single-symbol cobre 1).
-        start_date / end_date: Janela inclusiva.
-        exchange: ``"F"`` ou ``"B"``.
-        data_dir: Raiz dos dados.
-        parallel: Número de workers do pool (clamp em range válido).
-
-    Notes:
-        - Usa factory de produção em ``broker._mock_worker_factory`` é OK
-          para tests; produção deve passar factory que carrega DLL real.
-          V1 default: factory mock (para evitar bloquear quando humano não
-          tem DLL — ver WAIVER 4.1-real-smoke-deferred).
-        - Resolve contract = True (default) — workers usam catalog R/O via
-          broker para resolver vigência (futuro V1.x — V1 mantém raiz =
-          contrato vigente quando passado direto).
-        - Sem cancellation handler aqui (V1) — Ctrl+C mata workers via
-          broker stop. Futuro: graceful cancel via flag compartilhada.
+    Retorna o ``job_id`` mais recente cujo ``status`` ∈ ``{pending,
+    in_progress, partial, failed}`` E cujo ``requested_start/end`` casam
+    com o range pedido. ``None`` se não houver (→ registra job novo). Em
+    modo não-interativo apenas loga; não pergunta (autônomo). Best-effort:
+    qualquer erro de catalog é suprimido (não bloqueia o download).
     """
-    from datetime import datetime
-    from datetime import time as _time
-
-    from data_downloader.orchestrator.broker.master import (
-        MultiSymbolJobConfig,
-        MultiSymbolMaster,
-    )
-    from data_downloader.orchestrator.broker.pool import PoolConfig
-    from data_downloader.storage.catalog import Catalog
-
-    console.print(
-        Panel(
-            f"[bold]Multi-symbol download[/bold] — {len(symbols)} símbolo(s) "
-            f"x {parallel} worker(s)\n"
-            f"Símbolos: [cyan]{', '.join(symbols)}[/cyan]\n"
-            f"Período: {start_date.isoformat()} a {end_date.isoformat()} — exchange={exchange}",
-            title="[cyan]⬇ data-downloader download (multi-symbol — Story 4.1)[/cyan]",
-            border_style="cyan",
-        )
-    )
-
-    # Catálogo no master (broker possui write lock — ADR-024 path).
-    db_path = data_dir / "_internal" / "catalog.db"
-    catalog = Catalog(db_path=db_path, data_dir=data_dir)
-
-    # Worker factory: V1 usa _mock_worker_factory por causa do WAIVER
-    # 4.1-real-smoke-deferred. Quando humano rodar smoke real (4.1-followup),
-    # substituir por factory que carrega DLL real (TBD em followup story).
-    factory_module = os.environ.get(
-        "DATA_DOWNLOADER_BROKER_FACTORY",
-        "data_downloader.orchestrator.broker._mock_worker_factory",
-    )
-    pool_config = PoolConfig(
-        n_workers=parallel,
-        data_dir=data_dir,
-        worker_factory_module=factory_module,
-        worker_factory_callable="create_orchestrator",
-    )
-
-    jobs = [
-        MultiSymbolJobConfig(
-            symbol=sym,
-            exchange=exchange,
-            start=datetime.combine(start_date, _time(9, 0)),
-            end=datetime.combine(end_date, _time(17, 0)),
-            resolve_contract=False,  # V1: assume símbolo já é contrato vigente
-        )
-        for sym in symbols
-    ]
-
     try:
-        with MultiSymbolMaster(catalog=catalog, pool_config=pool_config) as master:
-            outcomes = master.download_multi(jobs)
-    finally:
-        catalog.close()
+        import sqlite3 as _sqlite3
 
-    # Sumário Rich.
-    table = Table(title="Multi-symbol download — outcomes")
-    table.add_column("Symbol", style="cyan")
-    table.add_column("Status", style="bold")
-    table.add_column("Trades", justify="right")
-    table.add_column("Duration", justify="right")
-    table.add_column("Error", overflow="fold")
+        from data_downloader.public_api.download import _to_datetime  # reuse
+        from data_downloader.storage.catalog import _format_ts
 
-    n_completed = 0
-    n_failed = 0
-    for o in outcomes:
-        status_color = {
-            "completed": "[green]completed[/green]",
-            "cache_hit": "[green]cache_hit[/green]",
-            "partial": "[yellow]partial[/yellow]",
-            "failed": "[red]failed[/red]",
-            "exception": "[red]exception[/red]",
-        }.get(o.status, o.status)
-        table.add_row(
-            o.symbol,
-            status_color,
-            f"{o.trades_persisted:,}".replace(",", "."),
-            _format_duration(o.duration_seconds),
-            (o.error or "")[:80],
-        )
-        if o.status in ("completed", "cache_hit"):
-            n_completed += 1
-        else:
-            n_failed += 1
-
-    console.print(table)
-
-    if n_failed == 0:
+        start_dt = _to_datetime(start_date, end_of_day=False)
+        end_dt = _to_datetime(end_date, end_of_day=True)
+        db_path = data_dir / "_internal" / "catalog.db"
+        if not db_path.exists():
+            return None
+        conn = _sqlite3.connect(str(db_path))
+        conn.row_factory = _sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT job_id, status, started_at, requested_start, requested_end "
+                "FROM downloads "
+                "WHERE symbol = ? AND exchange = ? "
+                "AND status IN ('pending','in_progress','partial','failed') "
+                "AND requested_start = ? AND requested_end = ? "
+                "ORDER BY COALESCE(started_at, '') DESC",
+                (symbol, exchange, _format_ts(start_dt), _format_ts(end_dt)),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return None
+        job_id = str(rows[0]["job_id"])
+        status = str(rows[0]["status"])
         console.print(
-            Panel(
-                f"[bold green]✓ All {n_completed} symbols completed[/bold green]",
-                title="OK",
-                border_style="green",
-            )
+            f"[yellow]↻ Job incompleto encontrado[/yellow] "
+            f"([dim]{job_id[:8]}…[/dim], status={status}) — retomando "
+            "(baixa só os dias úteis faltantes)."
         )
-        raise typer.Exit(code=0)
-    if n_completed == 0:
-        console.print(
-            Panel(
-                f"[bold red]✗ All {n_failed} symbols failed[/bold red]",
-                title="FAIL",
-                border_style="red",
-            )
-        )
-        raise typer.Exit(code=1)
-    console.print(
-        Panel(
-            f"[yellow]⚠ Partial: {n_completed} completed, {n_failed} failed[/yellow]",
-            title="PARTIAL",
-            border_style="yellow",
-        )
-    )
-    raise typer.Exit(code=3)
+        return job_id
+    except Exception as exc:  # pragma: no cover defensive — auto-resume é opcional
+        import logging
+
+        logging.getLogger("data_downloader.cli").debug("auto-resume detection skipped: %s", exc)
+        return None
 
 
 # =====================================================================

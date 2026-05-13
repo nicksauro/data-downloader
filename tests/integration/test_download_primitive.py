@@ -348,13 +348,12 @@ def test_download_chunk_rejects_invalid_exchange_bmf() -> None:
 
 
 @pytest.mark.integration
-def test_download_chunk_translate_trade_called_per_trade_in_ingestor_thread() -> None:
-    """Test 6 — TranslateTrade chamado N vezes (1 por trade), todas em IngestorThread.
+def test_download_chunk_translate_trade_called_once_per_trade() -> None:
+    """Test 6 — TranslateTrade chamado N vezes (1 por trade).
 
-    Verificações:
-      - dll.translate_trade.call_count == n_trades
-      - Verificar que NÃO foi chamado durante callback exec (já coberto pelo
-        teste de wrapper_history). Aqui validamos contagem total.
+    v1.2.0 (COUNCIL-38 / Q-DRIFT-40): a tradução ocorre DENTRO do callback V2
+    (handle transiente), não no IngestorThread. Aqui validamos a contagem
+    total = n_trades (1 translate por trade).
     """
     base = datetime(2026, 4, 15, 9, 0, 0)
     n = 25
@@ -712,9 +711,9 @@ def test_download_chunk_subscribes_before_get_history_trades() -> None:
     # subscribe DEVE preceder get_history (ordem é crítica — manual + Nelogica).
     sub_idx = dll.call_order.index("subscribe_ticker")
     get_idx = dll.call_order.index("get_history_trades")
-    assert (
-        sub_idx < get_idx
-    ), f"subscribe_ticker deve vir ANTES de get_history_trades; call_order={dll.call_order}"
+    assert sub_idx < get_idx, (
+        f"subscribe_ticker deve vir ANTES de get_history_trades; call_order={dll.call_order}"
+    )
 
 
 @pytest.mark.integration
@@ -878,9 +877,9 @@ def test_download_chunk_subscribe_unsubscribe_full_order() -> None:
         "get_history_trades",
     ]
     actual_prefix = dll.call_order[: len(expected_prefix)]
-    assert (
-        actual_prefix == expected_prefix
-    ), f"Prefix order mismatch:\nexpected: {expected_prefix}\nactual: {actual_prefix}"
+    assert actual_prefix == expected_prefix, (
+        f"Prefix order mismatch:\nexpected: {expected_prefix}\nactual: {actual_prefix}"
+    )
     # Unsubscribe é o ÚLTIMO evento (try/finally).
     assert dll.call_order[-1] == "unsubscribe_ticker"
 

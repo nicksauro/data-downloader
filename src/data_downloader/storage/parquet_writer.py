@@ -78,8 +78,16 @@ _ROW_GROUP_SIZE: int = 100_000
 _USE_DICTIONARY: bool = True
 _WRITE_STATISTICS: bool = True
 
-# Threshold deferred (finding H6 — sub-particionamento Story 2.X).
-_PARTITION_ROW_LIMIT: int = 5_000_000
+# Threshold paliativo (finding H6 — sub-particionamento real é ADR-025
+# "parquet-per-day", planejado para v1.2.0 Wave 2 — ver docs/qa/V1.2.0-PLAN.md).
+#
+# Antes: 5_000_000 — pequeno demais; um mês de WDOFUT chega a ~10-13M trades
+# e o write abortava com IntegrityError no meio do download. Subido para 50M
+# como folga até o particionamento diário estar pronto. NÃO é um limite "de
+# verdade": é um guard de sanidade contra partições absurdas (ex: símbolo
+# errado, range de anos). Quando ADR-025 entrar, este threshold passa a ser
+# por-dia e cai para algo na casa de 1-2M.
+_PARTITION_ROW_LIMIT: int = 50_000_000
 
 
 def _check_no_field_drop(sample: TradeRecord) -> None:
@@ -275,8 +283,8 @@ class ParquetWriter:
 
         Raises:
             IntegrityError: registro inválido OU partição excede
-                ``_PARTITION_ROW_LIMIT`` (sub-particionamento é Story
-                2.X).
+                ``_PARTITION_ROW_LIMIT`` (guard paliativo; particionamento
+                diário real é ADR-025 — v1.2.0 Wave 2).
         """
         if not trades:
             # No-op semântico — não cria arquivo vazio.
@@ -338,7 +346,7 @@ class ParquetWriter:
             if projected_rows > _PARTITION_ROW_LIMIT:
                 raise IntegrityError(
                     f"Partition exceeds {_PARTITION_ROW_LIMIT:_} rows; "
-                    f"needs sub-partitioning — Story 2.X",
+                    f"needs sub-partitioning — ADR-025 (parquet-per-day)",
                     details={
                         "partition": str(partition),
                         "existing_rows": existing_table.num_rows,

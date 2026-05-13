@@ -143,11 +143,11 @@ do mês corrente. **Promessa de produto inegociável: 1 clique.**
 | 4 | (passivo) | UI popula QTableView com colunas: contract, year, month, row_count, size_mb, last_modified, schema_version. Default sort: `last_modified DESC`. | `LBL_TRADES_COUNT`, `LBL_FILES_COUNT`, `LBL_SIZE`, `LBL_LAST_UPDATE` | < 100ms |
 | 5 | Filtro: digita em busca (Ctrl+F) | `QSortFilterProxyModel.setFilterFixedString(symbol)`. Debounce 300ms. | `PLH_SEARCH_CATALOG` | < 50ms por filtro |
 | 6 | Filtro: escolhe exchange/date range no drawer "Filtros" | Aplica predicado custom no proxy model. | "Filtros" (`BTN_DETAILS` reused) | — |
-| 7 | Seleciona linha (click ou Enter) | Mostra detail panel embaixo com: pasta completa, schema_version, dll_version, checksum status, ações. | `BTN_VALIDATE_CONTRACT`, `BTN_OPEN_FOLDER`, `BTN_REPEAT_LAST`, `BTN_DELETE` | < 50ms |
+| 7 | Seleciona linha (click ou Enter) | Mostra detail panel embaixo com: pasta completa, schema_version, dll_version, checksum status, ações. | `BTN_VALIDATE_CONTRACT`, `BTN_OPEN_FOLDER`, `BTN_DELETE` | < 50ms |
 | 8 | Clica `BTN_DELETE` | Abre confirm modal destrutivo `PMT_DELETE_CONFIRM` (digitar APAGAR). | `PMT_DELETE_CONFIRM`, `BTN_DELETE_CONFIRM` | — |
 | 9 | Confirma delete | Backend remove arquivos Parquet + entrada SQLite. Toast info `SUC_DELETE_DONE`. | `SUC_DELETE_DONE` | < 1s típico |
 | 10 | Clica "Re-validar checksum" | Backend re-calcula checksum dos Parquets + compara com SQLite. Toast verde ou erro. | `TST_VALIDATION_PASSED` ou `TST_VALIDATION_FAILED` | depende do tamanho |
-| 11 | Ctrl+R | Refresh: re-roda step 2-4. | `BTN_REPEAT_LAST` reused (refresh) | — |
+| 11 | Ctrl+R | Refresh: re-roda step 2-4. | `BTN_REFRESH_CATALOG` | — |
 
 ### Decisões (if/then/else)
 

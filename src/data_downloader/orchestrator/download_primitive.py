@@ -13,13 +13,16 @@ Para 1 (símbolo, intervalo de tempo):
 
 1. Registra HistoryTradeCallbackV2 + ProgressCallback.
 2. Chama GetHistoryTrades.
-3. Drena fila de trades em **IngestorThread** (chama ``TranslateTrade``
-   FORA do callback — R3).
+3. Callback V2 traduz cada trade DENTRO do escopo do handle (TranslateTrade ~µs
+   — handle transiente, Q-DRIFT-40) e enfileira ``TradeFields``; o
+   **IngestorThread** drena a fila e faz o pós-trabalho (AgentResolver / format
+   / ``TradeRecord``).
 4. Drena fila de progresso em **ProgressMonitor thread** (detecta 99%
    reconnect — Q02-E — sem confundir com trava).
 5. Aguarda (a) progresso=100, OU (b) ``TC_LAST_PACKET`` no último trade,
    OU (c) timeout (default 1800s).
-6. Retorna ``ChunkResult`` com trades agregados + metadata.
+6. Retorna ``ChunkResult`` com trades agregados + metadata (inclui
+   ``completeness_pct`` = trades / (trades + nl_errors) * 100).
 
 Não objetivos (escopo de stories futuras):
 
@@ -28,8 +31,10 @@ Não objetivos (escopo de stories futuras):
 - Story 1.7 — chunking adaptativo, retry, multi-symbol.
 
 LEIS RESPEITADAS:
-- R3 / manual §4 L4382: callback APENAS ``put_nowait``. ``TranslateTrade``
-  em IngestorThread.
+- R3 (amended v1.2.0 / COUNCIL-38): callback faz ``TranslateTrade`` (µs,
+  obrigatório pela semântica transiente do handle — Q-DRIFT-40) +
+  ``put_nowait`` do ``TradeFields`` copiado; AgentResolver/format ficam no
+  IngestorThread. Callback NÃO faz logs/I/O.
 - R7 / Q04-E: timestamps BRT naive (parse_brt_timestamp NÃO converte UTC).
 - R8 / Q05-V: exchange ∈ ('F', 'B'); validado em ``ProfitDLL.get_history_trades``.
 - R10 / Q13-V: V2 callback (COUNCIL-03).
@@ -57,6 +62,7 @@ from data_downloader.dll.callbacks import (
 from data_downloader.dll.types import (
     TC_IS_EDIT,
     TC_LAST_PACKET,
+    TradeFields,
 )
 from data_downloader.orchestrator.timestamp import format_brt_timestamp
 
@@ -234,6 +240,36 @@ class ChunkResult:
     completo entregue do callback ao IngestorThread. ``> 0`` viola ADR-020
     invariant (volume completeness) — escala para 1.7h (chunking)."""
 
+    translate_nl_errors: int = 0
+    """# de trades para os quais ``TranslateTrade`` retornou rc!=0 (NL_*) ou
+    struct sentinela zerado (Q-DRIFT-34, ``translate_trade`` filtra → None).
+    v1.2.0 (COUNCIL-38 / Q-DRIFT-40): contado AGORA no callback V2 (translate-
+    in-callback), pois traduzir dentro do escopo do callback (handle válido)
+    derruba este número de ~0.01% para ~0 — sem handle stale → sem AV →
+    ``TranslateTrade`` não retorna mais lixo. ``completeness_pct`` =
+    ``trades_count / (trades_count + translate_nl_errors) * 100``."""
+
+    translate_invalid_price_skips: int = 0
+    """# de trades descartados por ``price <= 0`` (Q-DRIFT-38 — sentinela /
+    leilão / corruption ABI). v1.2.0: checado no callback V2 (antes de
+    enfileirar) + defense-in-depth no IngestorThread. Categoria separada de
+    ``translate_failures`` (preserva semântica histórica do agregado)."""
+
+    translate_failures: int = 0
+    """Agregado de falhas pós-tradução residuais no IngestorThread
+    (``translate_exceptions`` + ``translate_sentinel_skips`` defense-in-depth).
+    Com translate-in-callback (v1.2.0) o grosso das falhas (nl_errors) é
+    contado in-callback (ver ``translate_nl_errors``); este agregado cobre só
+    o caminho residual de defesa do ingestor (deveria ser 0 na prática)."""
+
+    completeness_pct: float = 100.0
+    """``trades_count / (trades_count + translate_nl_errors) * 100`` —
+    completude do chunk (% dos trades que a DLL anunciou e que conseguimos
+    traduzir). Logado em ``download.complete`` / ``orchestrator.chunk_complete``
+    + gauge Prometheus ``download_chunk_completeness_pct``. < 99.99% dispara
+    retry do chunk (orchestrator, max 2 retries — COUNCIL-38 decisão 2).
+    ``100.0`` quando ``trades_count + translate_nl_errors == 0`` (sem dados)."""
+
     progress_history_summary: str = field(default="")
 
 
@@ -243,23 +279,28 @@ class ChunkResult:
 
 
 class _IngestorThread(threading.Thread):
-    """Thread que drena ``trade_queue`` e chama ``TranslateTrade`` + ``AgentResolver``.
+    """Thread que drena ``trade_queue`` (já com ``TradeFields``) + ``AgentResolver``.
 
-    Lei R3: ``TranslateTrade`` e ``GetAgentName`` são chamados FORA do
-    callback (callback faz APENAS ``put_nowait((handle, flags))`` — ver
-    ``callbacks.make_history_trade_callback_v2``).
+    v1.2.0 (COUNCIL-38 / Q-DRIFT-40 — translate-in-callback): a fila agora
+    carrega ``(TradeFields, flags)`` JÁ TRADUZIDO pelo callback V2 (que chamou
+    ``TranslateTrade`` dentro do escopo do handle — válido só ali). O ingestor
+    NÃO toca handle nem chama ``TranslateTrade``: faz apenas o trabalho
+    pós-tradução — resolve nomes de corretora via :class:`AgentResolver`
+    (cache local — manual §3.1 L1707-1729), formata timestamp, monta
+    :class:`TradeRecord`, acumula em ``self.trades``.
 
-    Story 1.7b-followup (TranslateTrade complete): consome
-    :class:`data_downloader.dll.types.TradeFields` retornado por
-    :meth:`ProfitDLL.translate_trade` (nova API). Resolve nomes de
-    corretora via :class:`AgentResolver` (cache local — manual §3.1
-    L1707-1729).
+    Counters residuais (defense-in-depth — o grosso das falhas é contado
+    in-callback): ``translate_exceptions`` (exception inesperada em
+    ``_process_trade``), ``translate_sentinel_skips`` (TradeFields com
+    timestamp_ns < 0 escapou do filtro do wrapper), ``translate_invalid_price_
+    skips`` (price <= 0 escapou do filtro do callback). ``translate_failures``
+    = ``translate_exceptions + translate_sentinel_skips`` (back-compat).
     """
 
     def __init__(
         self,
         dll: ProfitDLL,
-        trade_queue: Queue[tuple[int, int]],
+        trade_queue: Queue[tuple[TradeFields, int]],
         symbol: str,
         exchange: str,
         chunk_id: str,
@@ -291,26 +332,22 @@ class _IngestorThread(threading.Thread):
         # agregados emitidos em ``_run_inner`` (cool path) após drain.
         self.trades: list[TradeRecord] = []
         self.last_packet_seen: bool = False
-        self.translate_failures: int = 0
         self.trade_edits: int = 0
-        # Nelo Council 32 telemetry split (Story 1.7g): contadores
-        # separados por causa raiz. ``translate_failures`` acima continua
-        # somando os 3 (back-compat) para diagnose use estes 3:
-        # sentinel_skips: Q-DRIFT-34 (struct zerado, timestamp_ns < 0).
-        # nl_errors: ``translate_trade`` retornou None (DLL rc < 0).
-        # exceptions: exception Python inesperada em _process_trade.
+        # v1.2.0 (COUNCIL-38 / Q-DRIFT-40): com translate-in-callback, o grosso
+        # das falhas (NL_* / sentinela do struct) é contado IN-CALLBACK (ver
+        # ``callbacks.make_history_trade_callback_v2`` → ``callback_stats``
+        # ["translate_nl_errors"]). Estes counters do ingestor cobrem apenas o
+        # caminho RESIDUAL de defense-in-depth (deveriam ficar em 0):
+        # - translate_sentinel_skips: TradeFields com timestamp_ns < 0 escapou
+        #   do filtro do wrapper (drift entre versões).
+        # - translate_exceptions: exception Python inesperada em _process_trade.
+        # - translate_invalid_price_skips: price <= 0 escapou do filtro do
+        #   callback (Q-DRIFT-38). Categoria separada (não soma em failures).
+        # ``translate_failures`` = sentinel + exceptions (back-compat agregado).
         self.translate_sentinel_skips: int = 0
-        self.translate_nl_errors: int = 0
         self.translate_exceptions: int = 0
-        # Q-DRIFT-38 (Story 4.18, Pichau live test 2026-05-06): contador de
-        # trades descartados por ``price <= 0`` (sentinela / leilão / corruption
-        # ABI esporádica). Schema v1.1.0 ``validate_record`` exige ``price > 0``
-        # — sem este guard, 1 trade ruim em 519k abortava o JOB inteiro com
-        # ``IntegrityError("price must be > 0")``. NÃO somado em
-        # ``translate_failures`` para preservar a semântica histórica desse
-        # agregado (failures = sentinel + nl_errors + exceptions); este
-        # contador é exposto separadamente em ``download.complete``.
         self.translate_invalid_price_skips: int = 0
+        self.translate_failures: int = 0
 
         # Sequência por (timestamp_ns) para preencher
         # ``sequence_within_ns`` (Sol — SCHEMA.md §2.1).
@@ -329,27 +366,23 @@ class _IngestorThread(threading.Thread):
         """Loop interno (com contextvars do parent já aplicados).
 
         R21 (HOT_PATH_RULES.md) — ``_process_trade`` é hot path
-        (per-trade @ 100-4000/s). Counters atomic (``translate_failures``,
-        ``trade_edits``, ``last_packet_seen``) são incrementados sem
+        (per-trade @ 100-4000/s). Counters atomic (``trade_edits``,
+        ``last_packet_seen``, residuais de defesa) são incrementados sem
         I/O e os logs agregados emitidos AQUI após o drain (cool path).
         """
         while not self._stop_event.is_set():
             try:
-                handle, flags = self._trade_queue.get(timeout=_INGESTOR_GET_TIMEOUT)
+                fields, flags = self._trade_queue.get(timeout=_INGESTOR_GET_TIMEOUT)
             except Empty:
                 continue
-            # Q-DRIFT-34 (Story 1.7d, Quinn @qa 2026-05-05): defense-in-depth
-            # — qualquer exception em ``_process_trade`` é contada como
-            # ``translate_failures`` e a thread continua drenando. Sem isso
-            # uma única invocação sentinela do callback V2 (struct zerado)
-            # mata o IngestorThread, callback segue empilhando handles, e
-            # o chunk termina com ``trades_count=0`` apesar do TranslateTrade
-            # ter sucesso.
+            # Defense-in-depth (Q-DRIFT-34): qualquer exception em
+            # ``_process_trade`` é contada como falha residual e a thread
+            # continua drenando — uma única entrada anômala não pode matar o
+            # IngestorThread (callback seguiria enfileirando e o chunk
+            # terminaria com trades_count baixo).
             try:
-                self._process_trade(handle, flags)
+                self._process_trade(fields, flags)
             except Exception:
-                # Nelo Council 32 telemetry split: subcounter específico
-                # + manter ``translate_failures`` como soma (back-compat).
                 self.translate_exceptions += 1
                 self.translate_failures += 1
 
@@ -357,13 +390,12 @@ class _IngestorThread(threading.Thread):
         # Garante que TC_LAST_PACKET no último trade não é perdido.
         while True:
             try:
-                handle, flags = self._trade_queue.get_nowait()
+                fields, flags = self._trade_queue.get_nowait()
             except Empty:
                 break
             try:
-                self._process_trade(handle, flags)
+                self._process_trade(fields, flags)
             except Exception:
-                # Nelo Council 32 telemetry split (drain final).
                 self.translate_exceptions += 1
                 self.translate_failures += 1
 
@@ -381,57 +413,37 @@ class _IngestorThread(threading.Thread):
                 edits_count=self.trade_edits,
             )
 
-    def _process_trade(self, handle: int, flags: int) -> None:
-        """Processa 1 trade: TranslateTrade → AgentResolver → TradeRecord → append.
+    def _process_trade(self, fields: TradeFields, flags: int) -> None:
+        """Processa 1 trade JÁ TRADUZIDO: AgentResolver → TradeRecord → append.
 
-        Story 1.7b-followup: usa nova API ``ProfitDLL.translate_trade(handle)``
-        que retorna :class:`TradeFields` (ou ``None`` em erro NL_*).
-        Resolve agent names via :class:`AgentResolver` (cache local — primeira
-        vez por broker, depois dict-hit O(1)).
+        v1.2.0 (COUNCIL-38 / Q-DRIFT-40): a fila já carrega ``TradeFields``
+        (o callback V2 chamou ``TranslateTrade`` dentro do escopo do handle —
+        ver ``callbacks.make_history_trade_callback_v2``). Aqui só fazemos o
+        pós-trabalho: resolve agent names via :class:`AgentResolver` (cache
+        local — primeira vez por broker, depois dict-hit O(1)), formata
+        timestamp, monta :class:`TradeRecord`.
+
+        Guards residuais (defense-in-depth — o callback já filtra; estes
+        deveriam ser no-op): ``timestamp_ns < 0`` (sentinela escapou) e
+        ``price <= 0`` (Q-DRIFT-38 escapou).
 
         @hot_path — per-trade @ 100-4000/s. R21: counters atomic only,
         SEM logging síncrono / json / strftime aqui. Logs agregados
         emitidos em ``_run_inner`` após drain (cool path).
         """
-        fields = self._dll.translate_trade(handle)
-        if fields is None:
-            # R21.4 — counter atomic; agregado é exposto em
-            # ``ChunkResult`` via ``ingestor.translate_failures`` e logado
-            # 1x no ``download.complete`` (cool path).
-            # Nelo Council 32 telemetry split: ``None`` significa rc<0 da
-            # DLL (NL_NOT_FOUND, NL_INVALID_ARGS, etc.) — incrementa
-            # ``translate_nl_errors`` em adição ao agregado.
-            self.translate_nl_errors += 1
-            self.translate_failures += 1
-            return
-
         timestamp_ns = fields.timestamp_ns
-        # Q-DRIFT-34 (Story 1.7d, Quinn @qa 2026-05-05): guard explícito —
-        # ``translate_trade`` agora filtra structs sentinela (TradeDate
-        # zerado), mas mantemos defense-in-depth: ``format_brt_timestamp``
-        # levanta ValueError em ``ns < 0`` e mataria a thread. Caso o
-        # wrapper deixe escapar (ex.: drift entre versões), descartamos
-        # silenciosamente como falha de tradução.
+        # Defense-in-depth (Q-DRIFT-34): ``format_brt_timestamp`` levanta
+        # ValueError em ns < 0 e mataria a thread. O callback/wrapper já
+        # filtra structs sentinela; se algo escapar, descartamos como falha
+        # residual.
         if timestamp_ns < 0:
-            # Nelo Council 32 telemetry split: este caminho é a sentinela
-            # Q-DRIFT-34 (struct zerado, FILETIME 1601-01-01 → ts < 0).
             self.translate_sentinel_skips += 1
             self.translate_failures += 1
             return
-        # Q-DRIFT-38 (Story 4.18, Pichau live test 2026-05-06):
-        # Filter trades com price <= 0 — sentinela / leilão / corruption ABI.
-        # Schema v1.1.0 (validate_record) exige price > 0 — sem guard, 1 trade
-        # ruim em 519k abortava JOB inteiro com IntegrityError. Trades válidos
-        # WDOFUT/ações nunca têm price=0; price=0 é sentinel.
+        # Defense-in-depth (Q-DRIFT-38): o callback já descarta price <= 0;
+        # mantemos o guard aqui caso a fila receba algo anômalo.
         if fields.price <= 0:
             self.translate_invalid_price_skips += 1
-            log.debug(
-                "ingestor.invalid_price_skip",
-                symbol=self._symbol,
-                price=fields.price,
-                timestamp_ns=timestamp_ns,
-                quirk="Q-DRIFT-38",
-            )
             return  # skip — não enfileira em result.trades
         timestamp_str = format_brt_timestamp(timestamp_ns)
         trade_number = fields.trade_number
@@ -651,7 +663,7 @@ def download_chunk(
 
     bind_context(chunk_id=chunk_id)
 
-    trade_queue: Queue[tuple[int, int]] = Queue(maxsize=TRADE_QUEUE_MAXSIZE)
+    trade_queue: Queue[tuple[TradeFields, int]] = Queue(maxsize=TRADE_QUEUE_MAXSIZE)
     progress_queue: Queue[int] = Queue(maxsize=PROGRESS_QUEUE_MAXSIZE)
     stop_event = threading.Event()
 
@@ -688,12 +700,20 @@ def download_chunk(
 
     # Factories já appendam em callbacks._cb_refs (anti-GC global). Wrapper
     # também guarda em self._cb_refs como cinto-e-suspensório.
-    # Story 1.7g (Q-DRIFT-37 / COUNCIL-37): contador de overflow silencioso
-    # da trade_queue. O callback incrementa em ``queue.Full``; lemos após
-    # join() das threads (sem race — stop_event sinalizado). ADR-020 Nível 4
-    # detection: se ``queue_dropped > 0``, escala para 1.7h (chunking).
-    callback_stats: dict[str, int] = {"queue_dropped": 0}
-    history_cb: Any = make_history_trade_callback_v2(trade_queue, stats=callback_stats)
+    # v1.2.0 (COUNCIL-38 / Q-DRIFT-40): o callback V2 traduz dentro do escopo
+    # do handle e incrementa estes counters in-callback (GIL-atômico):
+    #   - translate_nl_errors: TranslateTrade rc!=0 ou struct sentinela → trade
+    #     perdido (era ~0.01% com translate-no-ingestor por handle stale; agora
+    #     ~0). Entra em ``completeness_pct``.
+    #   - translate_invalid_price_skips: price <= 0 descartado (Q-DRIFT-38).
+    #   - queue_dropped: ``put_nowait`` Full (Q-DRIFT-37, ADR-020 Nível 4).
+    # Lemos após join() das threads (sem race — stop_event sinalizado).
+    callback_stats: dict[str, int] = {
+        "translate_nl_errors": 0,
+        "translate_invalid_price_skips": 0,
+        "queue_dropped": 0,
+    }
+    history_cb: Any = make_history_trade_callback_v2(trade_queue, dll, stats=callback_stats)
     progress_cb: Any = make_progress_callback(progress_queue)
 
     # Formato exato manual §3.1 L1750 — strftime determinístico.
@@ -812,6 +832,16 @@ def download_chunk(
         actual_start = _ns_to_datetime(ns_min)
         actual_end = _ns_to_datetime(ns_max)
 
+    # Counters agregados: nl_errors/invalid_price vêm do callback (translate-
+    # in-callback); o ingestor só tem os residuais de defense-in-depth.
+    trades_count = len(trades)
+    nl_errors = callback_stats["translate_nl_errors"] + ingestor.translate_sentinel_skips
+    invalid_price_skips = (
+        callback_stats["translate_invalid_price_skips"] + ingestor.translate_invalid_price_skips
+    )
+    denom = trades_count + nl_errors
+    completeness_pct = (trades_count / denom * 100.0) if denom > 0 else 100.0
+
     result = ChunkResult(
         symbol=symbol,
         exchange=exchange,
@@ -828,6 +858,10 @@ def download_chunk(
         nl_error_code=nl_code,
         subscribed=subscribed,
         queue_dropped=callback_stats["queue_dropped"],
+        translate_nl_errors=nl_errors,
+        translate_invalid_price_skips=invalid_price_skips,
+        translate_failures=ingestor.translate_failures,
+        completeness_pct=completeness_pct,
     )
 
     log.info(
@@ -835,22 +869,22 @@ def download_chunk(
         chunk_id=chunk_id,
         symbol=symbol,
         status=status,
-        trades_count=len(trades),
+        trades_count=trades_count,
         duration_seconds=round(duration, 3),
+        # v1.2.0 (COUNCIL-38 / Q-DRIFT-40): translate-in-callback. nl_errors
+        # contado no callback (handle válido → ~0); residual = ingestor.
+        translate_nl_errors=nl_errors,
+        # completude do chunk — < 99.99% dispara retry no orchestrator.
+        completeness_pct=round(completeness_pct, 6),
         translate_failures=ingestor.translate_failures,
-        # Nelo Council 32 telemetry split (Story 1.7g): subcontadores
-        # específicos em adição ao agregado para diagnose root-cause.
         translate_sentinel_skips=ingestor.translate_sentinel_skips,
-        translate_nl_errors=ingestor.translate_nl_errors,
         translate_exceptions=ingestor.translate_exceptions,
-        # Q-DRIFT-38 (Story 4.18): trades com price<=0 descartados antes do
-        # validate_record (schema v1.1.0). 1-5 hits típicos por dia — > 0 não
-        # é erro, é defesa. Se subir muito (>0.1% do volume), investigar ABI.
-        translate_invalid_price_skips=ingestor.translate_invalid_price_skips,
+        # Q-DRIFT-38: trades com price<=0 descartados antes do validate_record
+        # (schema v1.1.0). 1-5 hits típicos por dia — > 0 é defesa, não erro.
+        translate_invalid_price_skips=invalid_price_skips,
         trade_edits=ingestor.trade_edits,
-        # Story 1.7g (Q-DRIFT-37 / ADR-020 Nível 4): drops silenciosos da
-        # ``trade_queue`` no callback ConnectorThread. > 0 = volume incompleto
-        # entregue ao IngestorThread => escalar 1.7h (chunking automático).
+        # Q-DRIFT-37 / ADR-020 Nível 4: drops silenciosos da trade_queue no
+        # callback. > 0 = volume incompleto entregue ao IngestorThread.
         queue_dropped=callback_stats["queue_dropped"],
         progress_99_reconnect=monitor.reconnect_99_detected,
         last_packet_seen=ingestor.last_packet_seen,

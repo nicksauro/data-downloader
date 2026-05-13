@@ -997,3 +997,63 @@ geral (D-suavizada): "Nenhum callback ctypes registrado sem trabalho
 - Amendment relacionado: este ADR-005 amendment (b) §C
   ("Slots de callback no init") — esta sessão **inverte** a conclusão
   daquela seção.
+
+---
+
+## Amendment 2026-05-12 — R3 amended para o callback V2 de trade histórico (Q-DRIFT-40)
+
+**Status:** ACCEPTED — mini-council Nelo + Aria (COUNCIL-38 decisão 2), modo autônomo v1.2.0.
+
+**Origem:** RCA `translate_failures` (~0.01% de trades históricos perdidos —
+ex.: 261 / 2.86M). Causa raiz: o callback V2 (`make_history_trade_callback_v2`)
+fazia `put_nowait((handle, flags))` e o `TranslateTrade(handle)` era feito
+DEPOIS no `_IngestorThread`. Mas o `handle` (`a_pTrade` de
+`TConnectorTradeCallback`) só é válido **dentro do escopo do callback** — a DLL
+recicla/libera o buffer interno do pacote ao retornar. Com ~2.86M trades
+enfileirados, ~0.01% dos handles ficavam stale → `PopulateTradeV0` lia freed
+memory → access violation interna SILENT MODE → `TranslateTrade` rc!=0 →
+`translate_trade()` → `None` → trade perdido. O exemplo oficial Nelogica
+(`profitdll/Exemplo Python/main.py` L325-333, `CallbackHandlerU.pas`
+L473-497) chama `TranslateTrade` **síncrono dentro do callback** — esse é o
+contrato. Ver `docs/dll/QUIRKS.md` Q-DRIFT-40.
+
+**Decisão:** R3 ("nenhuma chamada à DLL dentro de callback; callback faz apenas
+`queue.put_nowait()`") é **amended** para o callback V2 de trade histórico
+(`SetHistoryTradeCallbackV2`):
+
+> **R3 (amended v1.2.0):** o callback V2 de trade histórico chama
+> `TranslateTrade(handle, byref(struct))` DENTRO do callback (obrigatório pela
+> semântica transiente do `handle`) e enfileira o `TradeFields` JÁ COPIADO —
+> nunca o handle. `TranslateTrade` é ~µs (a DLL só copia campos do buffer
+> interno para o struct out); não bloqueia a ConnectorThread perceptivelmente.
+> `AgentResolver` / format de timestamp / construção de `TradeRecord`
+> continuam no `_IngestorThread` (cool path). O callback continua **sem
+> logs / I/O / acesso a `self`**.
+
+**Escopo da amendment:** ESTRITAMENTE o callback V2 de trade histórico (e, por
+simetria, o trade live V2 — `SetTradeCallbackV2` — se vier a ser consumido).
+Todos os demais callbacks (state, progress, daily, tinyBook, offerBook, ...)
+permanecem sob R3 original — `put_nowait` only. INV-1 ("nenhuma chamada à DLL
+dentro de callback") é especializada do mesmo jeito: o callback V2 de trade
+pode chamar `TranslateTrade` (e somente `TranslateTrade`); nada mais.
+
+**Consequências:**
+- `translate_failures` / `nl_errors` de trade histórico esperados → ~0 (sem
+  handle stale → sem AV → `TranslateTrade` não retorna mais lixo).
+- Métrica `completeness_pct` por chunk (= trades / (trades + nl_errors) * 100)
+  logada em `download.complete` / `orchestrator.chunk_complete` + gauge
+  Prometheus `download_chunk_completeness_pct`. < 99.99% dispara retry do
+  chunk no orchestrator (max 2 retries — classificado AMBIGUOUS, não falha).
+- Os counters `translate_nl_errors` / `translate_invalid_price_skips` /
+  `queue_dropped` agora são incrementados IN-CALLBACK (dict mutável,
+  incrementos GIL-atômicos — single bytecode, não bloqueia ConnectorThread).
+  O `_IngestorThread` mantém só os counters residuais de defense-in-depth.
+
+**Cross-links:**
+- Quirk: `docs/dll/QUIRKS.md` Q-DRIFT-40.
+- Impl: `src/data_downloader/dll/callbacks.py::make_history_trade_callback_v2`,
+  `src/data_downloader/orchestrator/download_primitive.py` (`_IngestorThread`,
+  `ChunkResult`, `download_chunk`), `src/data_downloader/orchestrator/orchestrator.py`
+  (hook retry-on-completeness + gauge).
+- Evidência: `Erro.log` Pichau 2026-05-12 (COUNCIL-38 H-B); exemplo Nelogica.
+- Plano: `docs/qa/V1.2.0-PLAN.md` (Wave 1 → Nelo-C + decisão 2).

@@ -97,9 +97,9 @@ def test_state_callback_does_not_call_dll_inv1() -> None:
         cb(conn_type, result)
 
     # CORE ASSERTION (INV-1):
-    assert (
-        mock_dll.mock_calls == []
-    ), f"Callback chamou métodos do mock DLL — viola INV-1 / R3. Calls: {mock_dll.mock_calls}"
+    assert mock_dll.mock_calls == [], (
+        f"Callback chamou métodos do mock DLL — viola INV-1 / R3. Calls: {mock_dll.mock_calls}"
+    )
 
     # Side-check: queue recebeu todos os 5 eventos.
     assert real_queue.qsize() == 5
@@ -188,17 +188,57 @@ def test_cleanup_cb_refs_clears_for_test_isolation() -> None:
 
 
 # =====================================================================
-# Story 1.3 — V2 history trade callback
+# Story 1.3 + v1.2.0 (COUNCIL-38 / Q-DRIFT-40) — V2 history trade callback
+# (translate-in-callback: callback chama dll.translate_trade e enfileira
+# TradeFields copiado — nunca o handle stale)
 # =====================================================================
+
+
+def _stub_translate_dll(
+    *,
+    fields_by_handle: dict[int, object | None] | None = None,
+    default: object | None = None,
+) -> MagicMock:
+    """MagicMock de ProfitDLL com ``translate_trade(handle) -> TradeFields|None``.
+
+    ``fields_by_handle`` mapeia handle → retorno; handles ausentes usam
+    ``default``. Conta chamadas em ``.translate_trade``.
+    """
+    fields_by_handle = fields_by_handle or {}
+    dll = MagicMock()
+
+    def _tt(handle: int) -> object | None:
+        return fields_by_handle.get(handle, default)
+
+    dll.translate_trade = MagicMock(side_effect=_tt)
+    return dll
+
+
+def _tf(*, price: float = 100.0, ts_ns: int = 1_700_000_000_000_000_000, n: int = 1) -> object:
+    from data_downloader.dll.types import TradeFields
+
+    return TradeFields(
+        version=0,
+        timestamp_ns=ts_ns,
+        trade_number=n,
+        price=price,
+        quantity=1,
+        volume=price,
+        buy_agent_id=0,
+        sell_agent_id=0,
+        trade_type=1,
+    )
 
 
 @pytest.mark.unit
 def test_make_history_trade_callback_v2_returns_callable_and_appends() -> None:
     """make_history_trade_callback_v2 retorna WINFUNCTYPE-wrapped E appenda em _cb_refs."""
-    q: Queue[tuple[int, int]] = Queue(maxsize=100)
+    from data_downloader.dll.types import TradeFields
+
+    q: Queue[tuple[TradeFields, int]] = Queue(maxsize=100)
     initial = len(_cb_refs)
 
-    cb = make_history_trade_callback_v2(q)
+    cb = make_history_trade_callback_v2(q, _stub_translate_dll(default=_tf()))
 
     assert cb is not None
     assert callable(cb)
@@ -207,71 +247,82 @@ def test_make_history_trade_callback_v2_returns_callable_and_appends() -> None:
 
 
 @pytest.mark.unit
-def test_history_trade_callback_v2_only_calls_put_nowait_inv1() -> None:
-    """AC5/INV-1 — V2 history callback faz APENAS put_nowait((handle, flags)).
+def test_history_trade_callback_v2_translates_in_callback_and_enqueues_tradefields() -> None:
+    """Q-DRIFT-40 — callback chama dll.translate_trade(handle) e enfileira TradeFields.
 
-    Verificação:
-      1. mock_queue.put_nowait chamado com tupla (handle, flags) — convertidos
-         a int.
-      2. Nenhum método de mock_dll chamado (R3 — callback NÃO chama DLL).
-
-    Em Windows o trampoline WINFUNCTYPE valida tipos. Em vez de invocar via
-    trampoline (precisaria struct ctypes real), inspecionamos a função
-    Python interna via closure — semanticamente equivalente.
+    NUNCA enfileira o handle (stale após retorno do callback). O ``flags`` do
+    parâmetro do callback é propagado junto.
     """
-    from data_downloader.dll.types import TConnectorAssetIdentifier
+    from data_downloader.dll.types import TConnectorAssetIdentifier, TradeFields
 
-    mock_queue = MagicMock(spec=Queue)
-    mock_dll = MagicMock()
+    tf0 = _tf(price=5025.5, n=1)
+    tf1 = _tf(price=5025.6, n=2)
+    dll = _stub_translate_dll(fields_by_handle={12345: tf0, 99999: tf1})
+    q: Queue[tuple[TradeFields, int]] = Queue(maxsize=100)
+    cb = make_history_trade_callback_v2(q, dll)
 
-    cb = make_history_trade_callback_v2(mock_queue)
-
-    # Construir TConnectorAssetIdentifier real (struct ctypes — barato).
     asset = TConnectorAssetIdentifier(Version=0, Ticker="WDOJ26", Exchange="F", FeedType=0)
     cb(asset, 12345, 0)
     cb(asset, 99999, 2)  # flags=2 = TC_LAST_PACKET
 
-    # CORE ASSERTIONS:
-    assert mock_queue.put_nowait.call_count == 2
-    assert mock_queue.put_nowait.call_args_list[0].args == ((12345, 0),)
-    assert mock_queue.put_nowait.call_args_list[1].args == ((99999, 2),)
-    # Nenhum outro método da queue:
-    assert not mock_queue.put.called
-    assert not mock_queue.get.called
-    # CORE INV-1: callback NÃO chamou DLL:
-    assert (
-        mock_dll.mock_calls == []
-    ), f"V2 history callback chamou DLL — viola INV-1/R3. Calls: {mock_dll.mock_calls}"
+    # translate_trade chamado DENTRO do callback, 1x por trade, com o handle.
+    assert dll.translate_trade.call_count == 2
+    assert dll.translate_trade.call_args_list[0].args == (12345,)
+    assert dll.translate_trade.call_args_list[1].args == (99999,)
+    # Fila tem (TradeFields, flags) — NÃO o handle.
+    assert q.get_nowait() == (tf0, 0)
+    assert q.get_nowait() == (tf1, 2)
 
 
 @pytest.mark.unit
-def test_history_trade_callback_v2_swallows_full_silently() -> None:
-    """Callback engole queue.Full silenciosamente (não pode lançar — bloquearia ConnectorThread)."""
-    from data_downloader.dll.types import TConnectorAssetIdentifier
+def test_history_trade_callback_v2_nl_error_increments_counter_and_drops() -> None:
+    """translate_trade -> None (rc!=0/sentinela) → stats["translate_nl_errors"]+=1, nada na fila."""
+    from data_downloader.dll.types import TConnectorAssetIdentifier, TradeFields
 
-    q: Queue[tuple[int, int]] = Queue(maxsize=1)
-    cb = make_history_trade_callback_v2(q)
+    dll = _stub_translate_dll(default=None)  # toda tradução falha
+    q: Queue[tuple[TradeFields, int]] = Queue(maxsize=10)
+    stats = {"translate_nl_errors": 0, "translate_invalid_price_skips": 0, "queue_dropped": 0}
+    cb = make_history_trade_callback_v2(q, dll, stats=stats)
     asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
 
-    cb(asset, 1, 0)  # OK
-    cb(asset, 2, 0)  # raises Full INTERNAMENTE; engolido
+    cb(asset, 1, 0)
+    cb(asset, 2, 0)
 
-    # Sem exception — apenas o primeiro está na queue.
+    assert stats["translate_nl_errors"] == 2
+    assert q.qsize() == 0
+
+
+@pytest.mark.unit
+def test_history_trade_callback_v2_invalid_price_skip() -> None:
+    """Q-DRIFT-38 — price <= 0 → stats["translate_invalid_price_skips"]+=1, nada na fila."""
+    from data_downloader.dll.types import TConnectorAssetIdentifier, TradeFields
+
+    dll = _stub_translate_dll(
+        fields_by_handle={0: _tf(price=0.0), 1: _tf(price=-1.5), 2: _tf(price=5500.0)}
+    )
+    q: Queue[tuple[TradeFields, int]] = Queue(maxsize=10)
+    stats = {"translate_nl_errors": 0, "translate_invalid_price_skips": 0, "queue_dropped": 0}
+    cb = make_history_trade_callback_v2(q, dll, stats=stats)
+    asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
+
+    cb(asset, 0, 0)  # price=0 → skip
+    cb(asset, 1, 0)  # price<0 → skip
+    cb(asset, 2, 0)  # price>0 → enfileira
+
+    assert stats["translate_invalid_price_skips"] == 2
+    assert stats["translate_nl_errors"] == 0
     assert q.qsize() == 1
 
 
 @pytest.mark.unit
 def test_history_trade_callback_v2_queue_dropped_counter_on_full() -> None:
-    """Story 1.7g (Q-DRIFT-37 / COUNCIL-37): stats["queue_dropped"] incrementa em Full.
+    """Q-DRIFT-37 — stats["queue_dropped"] incrementa em queue.Full (não lança/bloqueia)."""
+    from data_downloader.dll.types import TConnectorAssetIdentifier, TradeFields
 
-    R3 invariant preservada: callback ainda não bloqueia / não lança / não chama DLL.
-    Mas ganhamos visibilidade de drops silenciosos via dict mutável GIL-atômico.
-    """
-    from data_downloader.dll.types import TConnectorAssetIdentifier
-
-    q: Queue[tuple[int, int]] = Queue(maxsize=2)
-    stats: dict[str, int] = {"queue_dropped": 0}
-    cb = make_history_trade_callback_v2(q, stats=stats)
+    dll = _stub_translate_dll(default=_tf())
+    q: Queue[tuple[TradeFields, int]] = Queue(maxsize=2)
+    stats = {"translate_nl_errors": 0, "translate_invalid_price_skips": 0, "queue_dropped": 0}
+    cb = make_history_trade_callback_v2(q, dll, stats=stats)
     asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
 
     cb(asset, 1, 0)  # OK (qsize=1)
@@ -285,14 +336,14 @@ def test_history_trade_callback_v2_queue_dropped_counter_on_full() -> None:
 
 @pytest.mark.unit
 def test_history_trade_callback_v2_stats_none_backward_compat() -> None:
-    """Sem stats (default), comportamento Story 1.3 mantido — Full engolido sem rastro."""
-    from data_downloader.dll.types import TConnectorAssetIdentifier
+    """Sem stats (default), Full/erros engolidos sem rastro — não levanta."""
+    from data_downloader.dll.types import TConnectorAssetIdentifier, TradeFields
 
-    q: Queue[tuple[int, int]] = Queue(maxsize=1)
-    cb = make_history_trade_callback_v2(q)  # stats=None default
+    dll = _stub_translate_dll(default=_tf())
+    q: Queue[tuple[TradeFields, int]] = Queue(maxsize=1)
+    cb = make_history_trade_callback_v2(q, dll)  # stats=None default
     asset = TConnectorAssetIdentifier(Version=0, Ticker="WDO", Exchange="F", FeedType=0)
 
-    # Não levanta — invariante R3 e backward-compat.
     cb(asset, 1, 0)
     cb(asset, 2, 0)
     cb(asset, 3, 0)
@@ -368,13 +419,15 @@ def test_progress_callback_swallows_full_silently() -> None:
 @pytest.mark.unit
 def test_history_v2_and_progress_callbacks_added_to_cb_refs_independently() -> None:
     """Cada factory appenda 1 ref. Múltiplas chamadas acumulam (anti-GC)."""
+    from data_downloader.dll.types import TradeFields
+
     cleanup_cb_refs()
     assert len(_cb_refs) == 0
 
-    h_q: Queue[tuple[int, int]] = Queue()
+    h_q: Queue[tuple[TradeFields, int]] = Queue()
     p_q: Queue[int] = Queue()
 
-    make_history_trade_callback_v2(h_q)
+    make_history_trade_callback_v2(h_q, _stub_translate_dll(default=_tf()))
     make_progress_callback(p_q)
 
     assert len(_cb_refs) == 2

@@ -74,6 +74,7 @@ def download(
     catalog_factory: Callable[[Path], object] | None = None,
     writer_factory: Callable[[Path], object] | None = None,
     metrics_emitter: MetricsEmitter | None = None,
+    resume_job_id: str | None = None,
 ) -> DownloadHandle:
     """Inicia download assíncrono de histórico para ``symbol`` em ``[start, end]``.
 
@@ -107,6 +108,13 @@ def download(
             orchestrator usa :class:`NullMetricsEmitter` (zero overhead).
             Lifecycle do exporter (start/stop HTTP server) é
             responsabilidade do caller.
+        resume_job_id: v1.2.0 Wave 1B — se passado, retoma um job
+            existente (registrado num run anterior) em vez de criar um
+            novo. O orchestrator consulta o ``chunk_ledger`` e baixa
+            apenas os dias úteis ainda faltantes. ``None`` (default) =
+            comportamento normal — registra novo job (que mesmo assim
+            pula dias já no ledger via fresh-skip). Adição kwarg-only no
+            fim da assinatura — não quebra SemVer (ADR-007a).
 
     Returns:
         :class:`DownloadHandle` — async handle. Use ``handle.events()`` para
@@ -204,6 +212,7 @@ def download(
                 catalog_factory=catalog_factory,
                 writer_factory=writer_factory,
                 metrics_emitter=metrics_emitter,
+                resume_job_id=resume_job_id,
             )
 
         parent_ctx.run(_go)
@@ -230,6 +239,7 @@ def _run_download_worker(
     catalog_factory: Callable[[Path], object] | None,
     writer_factory: Callable[[Path], object] | None,
     metrics_emitter: MetricsEmitter | None = None,
+    resume_job_id: str | None = None,
 ) -> None:
     """Worker: instancia componentes, roda Orchestrator.run, traduz JobResult.
 
@@ -358,14 +368,34 @@ def _run_download_worker(
 
         def _on_chunk(event: ChunkCompletedEvent) -> None:
             _trades_acc[0] += event.trades_count
+            # v1.2.0 Wave 1D (Uma/Felix long-haul UX): popula ``elapsed_s`` e
+            # ``eta_s`` do lado do worker (tem timestamps + contagem de
+            # chunks). ETA = chunks_restantes * duracao_media_por_chunk.
+            # ``trades_failed``/``retries`` ainda não vêm de
+            # ChunkCompletedEvent — TODO Dex-B/Nelo-C expõem esses campos no
+            # evento do orchestrator; até lá ficam 0 e a UI mostra "—".
+            done = event.chunk_index + 1
+            total_chunks = int(event.total_chunks or 0)
+            elapsed = max(0.0, time.monotonic() - started)
+            eta: float | None = None
+            if done > 0 and total_chunks > 0:
+                avg_per_chunk = elapsed / done
+                remaining = max(0, total_chunks - done)
+                eta = avg_per_chunk * remaining
             _emit(
                 events_queue,
                 DownloadProgress(
                     total=event.total_chunks,
-                    done=event.chunk_index + 1,
+                    done=done,
                     message="INF_CHUNK_COMPLETE",
                     trades_received=_trades_acc[0],
                     current_contract=contract_code if contract_code else symbol,
+                    elapsed_s=elapsed,
+                    eta_s=eta,
+                    # TODO(Dex-B/Nelo-C): popular a partir de ChunkCompletedEvent
+                    # (translate_failures/nl_errors + chunks com retry).
+                    trades_failed=int(getattr(event, "trades_failed", 0) or 0),
+                    retries=int(getattr(event, "retries", 0) or 0),
                 ),
             )
 
@@ -377,6 +407,7 @@ def _run_download_worker(
         # Story 4.16 — chunk_listener emite progresso fino-granular para UI.
         result_obj: JobResult = orchestrator.run(
             config,
+            resume_job_id=resume_job_id,
             cancel_event=cancel_event,
             chunk_listener=_on_chunk,
         )

@@ -16,7 +16,7 @@
 ;   AC7 — github_release.py uploada Setup.exe junto ao zip
 
 #ifndef AppVersion
-  #define AppVersion "1.1.1"
+  #define AppVersion "1.2.0"
 #endif
 
 #define AppName "data-downloader"
