@@ -32,6 +32,7 @@ Referências:
 from __future__ import annotations
 
 import atexit
+import os
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -40,7 +41,7 @@ import structlog
 if TYPE_CHECKING:
     from data_downloader.dll.wrapper import ProfitDLL
 
-__all__ = ["get_dll", "has_active_dll", "shutdown_dll"]
+__all__ = ["get_dll", "has_active_dll", "resolve_dll_init_mode", "shutdown_dll"]
 
 log: structlog.stdlib.BoundLogger = structlog.get_logger("data_downloader.dll.session")
 
@@ -49,6 +50,46 @@ log: structlog.stdlib.BoundLogger = structlog.get_logger("data_downloader.dll.se
 _LOCK = threading.Lock()
 _DLL_INSTANCE: ProfitDLL | None = None
 _ATEXIT_REGISTERED = False
+# init_kwargs com que ``_DLL_INSTANCE`` foi inicializada — usado para
+# detectar descasamentos de modo entre call sites (fix #21b).
+_DLL_INIT_KWARGS: dict[str, Any] = {}
+
+# init_kwargs que afetam o MODO de inicialização da DLL (quais callbacks são
+# registrados, signatures configuradas, etc.). Um descasamento nestes entre
+# call sites é o que causou a falha funcional do fix #21 (Test Connection
+# inicializava minimal → Download reusava a instância minimal → DLL crashava
+# internamente ao traduzir trades). Credenciais (key/user/password) NÃO
+# entram aqui — não afetam o modo.
+_MODE_AFFECTING_KWARGS = ("minimal_handshake", "register_extra_callbacks")
+
+_TRUTHY = {"1", "true", "yes"}
+
+
+def resolve_dll_init_mode() -> dict[str, Any]:
+    """Resolve o MODO de inicialização da ProfitDLL a partir do ambiente.
+
+    Fonte única da verdade compartilhada por TODOS os call sites de
+    ``get_dll`` (``public_api.download._build_real_dll`` e
+    ``ui.screens.settings_screen._TestConnectionWorker.run``) — garante que
+    Test Connection e Download SEMPRE concordem no modo, para que o singleton
+    process-global possa reusar a instância sem causar a falha funcional do
+    fix #21 (a DLL Classic não é re-inicializável — Q08-E — então uma vez
+    inicializada num modo, esse modo vale para o processo todo).
+
+    Hoje resolve apenas ``minimal_handshake`` a partir de
+    ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` (``1``/``true``/``yes``
+    case-insensitive → ``True``; ausente/qualquer outro → ``False``). O
+    default ``False`` = modo COMPLETO (registra os callbacks de trade), que é
+    o único validado para baixar histórico (smoke real WDOFUT 5d = 2.8M
+    trades). Novos kwargs que afetem o modo devem ser resolvidos aqui.
+
+    Returns:
+        ``dict`` de init_kwargs de modo, ex.: ``{"minimal_handshake": False}``.
+    """
+    minimal_handshake = (
+        os.getenv("DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE", "").strip().lower() in _TRUTHY
+    )
+    return {"minimal_handshake": minimal_handshake}
 
 
 def get_dll(*, market_only: bool = True, **init_kwargs: Any) -> ProfitDLL:
@@ -59,6 +100,14 @@ def get_dll(*, market_only: bool = True, **init_kwargs: Any) -> ProfitDLL:
     chamadas seguintes devolve a MESMA instância sem re-inicializar nem
     finalizar — a ProfitDLL Classic não tolera init→finalize→init no mesmo
     processo (Q08-E).
+
+    fix #21b: se uma chamada subsequente passar um modo de init DIFERENTE do
+    que a instância foi criada (qualquer kwarg em ``_MODE_AFFECTING_KWARGS``,
+    ex.: ``minimal_handshake``), a instância existente é devolvida no modo
+    ORIGINAL e um ``warning`` ``dll.session.mode_mismatch`` é logado — NÃO
+    re-inicializamos. Os call sites (``_build_real_dll`` / Test Connection)
+    devem usar ``resolve_dll_init_mode()`` para concordar no modo e evitar
+    isso.
 
     Se o init falhar, a exceção propaga e a instância NÃO é guardada — a
     próxima chamada tenta de novo (init nunca completou, então não houve
@@ -81,11 +130,32 @@ def get_dll(*, market_only: bool = True, **init_kwargs: Any) -> ProfitDLL:
         Instância ``ProfitDLL`` inicializada (compartilhada por todo o
         processo).
     """
-    global _DLL_INSTANCE, _ATEXIT_REGISTERED
+    global _DLL_INSTANCE, _ATEXIT_REGISTERED, _DLL_INIT_KWARGS
 
     with _LOCK:
         if _DLL_INSTANCE is not None:
-            log.debug("dll.session.reuse")
+            # fix #21b: defensivo — se uma chamada subsequente pedir um modo
+            # de init DIFERENTE do que a instância foi criada, NÃO
+            # re-inicializamos (a DLL Classic não tolera — Q08-E), mas
+            # logamos um warning claro para que o descasamento apareça no log
+            # em vez de causar a falha funcional silenciosa do fix #21
+            # (download status=failed trades=0 + PopulateTradeV0 AV na DLL).
+            requested_mode = {k: init_kwargs[k] for k in _MODE_AFFECTING_KWARGS if k in init_kwargs}
+            active_mode = {
+                k: _DLL_INIT_KWARGS[k] for k in _MODE_AFFECTING_KWARGS if k in _DLL_INIT_KWARGS
+            }
+            if requested_mode != active_mode:
+                log.warning(
+                    "dll.session.mode_mismatch",
+                    requested=requested_mode,
+                    active=active_mode,
+                    note=(
+                        "reusing existing DLL instance in its ORIGINAL mode; "
+                        "callers must agree on init mode (see resolve_dll_init_mode)"
+                    ),
+                )
+            else:
+                log.debug("dll.session.reuse")
             return _DLL_INSTANCE
 
         from data_downloader.dll.wrapper import ProfitDLL
@@ -98,6 +168,7 @@ def get_dll(*, market_only: bool = True, **init_kwargs: Any) -> ProfitDLL:
             raise NotImplementedError("get_dll só suporta market_only=True hoje")
 
         _DLL_INSTANCE = instance
+        _DLL_INIT_KWARGS = dict(init_kwargs)
         if not _ATEXIT_REGISTERED:
             atexit.register(shutdown_dll)
             _ATEXIT_REGISTERED = True
@@ -119,11 +190,12 @@ def shutdown_dll() -> None:
     fim do ``cli.py download`` (CLI). Best-effort: erros no ``finalize`` são
     logados e engolidos — não queremos quebrar o teardown.
     """
-    global _DLL_INSTANCE
+    global _DLL_INSTANCE, _DLL_INIT_KWARGS
 
     with _LOCK:
         instance = _DLL_INSTANCE
         _DLL_INSTANCE = None
+        _DLL_INIT_KWARGS = {}
 
     if instance is None:
         return

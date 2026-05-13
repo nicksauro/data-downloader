@@ -221,14 +221,26 @@ class _TestConnectionWorker(QObject):
                 # clicar "Baixar" depois, ``_build_real_dll`` reusa esta
                 # mesma instância já conectada. O finalize roda 1x no
                 # encerramento (atexit + MainWindow.closeEvent).
-                from data_downloader.dll.session import get_dll
+                # fix #21b: o modo de init DEVE ser o mesmo do Download
+                # (``resolve_dll_init_mode`` é a fonte única). A DLL Classic
+                # não é re-inicializável (Q08-E) — se o usuário clicar
+                # "Testar Conexão" e depois "Baixar", o singleton reusa esta
+                # instância no modo em que foi criada. Antes (fix #21) este
+                # call site forçava ``minimal_handshake=True`` enquanto o
+                # download usava o default ``False`` (modo completo) →
+                # download reusava a instância minimal → DLL crashava
+                # internamente ao traduzir trades (PopulateTradeV0 AV,
+                # status=failed trades=0). Test Connection só lê status/
+                # versão — não baixa nada — então ter os callbacks de trade
+                # registrados (modo completo) é inócuo aqui.
+                from data_downloader.dll.session import get_dll, resolve_dll_init_mode
 
                 dll = get_dll(
                     market_only=True,
                     key=self._key,
                     user=self._user,
                     password=self._password,
-                    minimal_handshake=True,
+                    **resolve_dll_init_mode(),
                 )
                 connected = dll.wait_market_connected(timeout=30, retry_attempts=1)
                 if connected:

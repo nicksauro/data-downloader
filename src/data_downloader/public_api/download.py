@@ -558,7 +558,7 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
     # é usado para que o usuário migre.
     import warnings as _warnings
 
-    from data_downloader.dll.session import get_dll, has_active_dll
+    from data_downloader.dll.session import get_dll, has_active_dll, resolve_dll_init_mode
     from data_downloader.public_api.exceptions import DLLInitError
 
     key = os.getenv("PROFITDLL_KEY")
@@ -598,20 +598,18 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
             trades_received=0,
         ),
     )
-    # Story 1.7d — espelho ESTRITO do probe (testa Q-DRIFT-12). Quando
-    # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` está definida como ``1``,
-    # ``true`` ou ``yes`` (case-insensitive), o init usa o caminho que
-    # espelha EXATAMENTE o probe canônico (``scripts/probe_init.py``
-    # L239-251) — pula ``_configure_dll_signatures`` em larga escala,
-    # pula ``SetEnabledLogToDebug(0)``, passa ``None`` literal nos slots
-    # 4/6/7/8 e callbacks REAIS (TDailyCallback, TProgressCallback,
-    # TTinyBookCallback) nos slots 5/9/10 do ``DLLInitializeMarketLogin``.
-    # Default ``False`` preserva o comportamento atual.
-    minimal_handshake = os.getenv("DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    # Story 1.7d / fix #21b — modo de init resolvido por
+    # ``resolve_dll_init_mode`` (fonte única, compartilhada com o
+    # "Testar Conexão" da UI). Hoje resolve ``minimal_handshake`` a partir de
+    # ``DATA_DOWNLOADER_DLL_MINIMAL_HANDSHAKE`` (``1``/``true``/``yes``
+    # case-insensitive → modo ESTRITO espelho do probe Q-DRIFT-12; ausente →
+    # ``False`` = modo COMPLETO que registra os callbacks de trade, único
+    # validado para baixar histórico). É CRÍTICO que Test Connection e
+    # Download usem o mesmo modo: a DLL Classic não é re-inicializável (Q08-E)
+    # então o singleton reusa a instância no modo em que foi criada — se os
+    # modos divergirem o download falha funcionalmente (PopulateTradeV0 AV
+    # interno na DLL — fix #21b).
+    init_mode = resolve_dll_init_mode()
     # task #21 (Nelo Q08-E): singleton process-global. A ProfitDLL Classic
     # NÃO é re-inicializável (init→finalize→init crasha em
     # ``CreateDataLoader`` — ``Erro.log`` Pichau 2026-05-12). Se a UI já
@@ -624,7 +622,7 @@ def _build_real_dll(events_queue: queue.Queue[object]) -> object:
         key=key,
         user=user,
         password=password,
-        minimal_handshake=minimal_handshake,
+        **init_mode,
     )
     if not is_fresh:
         # Reuso de instância já conectada (Test Connection). Pula o wait.
