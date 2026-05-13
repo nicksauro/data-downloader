@@ -22,11 +22,46 @@ implicam bumps de API, e vice-versa.
 
 ---
 
-## [1.1.0] — 2026-05-12
+## [1.1.1] — 2026-05-12
 
-> Esta release está em validação round 2 — ver
-> [`docs/qa/V1.1.0-FIX-PLAN.md`](docs/qa/V1.1.0-FIX-PLAN.md). Data e
-> SHA256 finais serão preenchidos antes do tag.
+> **Hotfix** — corrige o crash do app GUI ao baixar histórico (a v1.1.0
+> ficou afetada; o CLI nunca foi). Descoberto via smoke real Pichau
+> 2026-05-12. Story 4.19 + tasks #21/#21b.
+
+### Corrigido (Fixed)
+
+- **App GUI crashava ao baixar histórico** — `data_downloader.exe` abortava
+  em `Qt6Core.dll` (`0xc0000409`) ao clicar "Baixar", precedido de
+  `CreateDataLoader Failed | Access violation` no `Erro.log` da ProfitDLL
+  e `WM_LOGIN_RESULT`/`WM_VALID_LICENSE` perdidos (`ERROR_INVALID_THREAD_ID`).
+  Duas causas, ambas corrigidas:
+  1. **Duplo init da ProfitDLL no mesmo processo (Q08-E):** "Testar Conexão"
+     inicializava+finalizava a DLL; "Baixar" inicializava de novo — a DLL
+     Classic não é re-inicializável. Fix: `data_downloader/dll/session.py`
+     — `get_dll()` mantém uma instância process-global (lazy, thread-safe);
+     "Testar Conexão" e "Baixar" reusam a mesma; `finalize()` só no
+     encerramento (`atexit` + `MainWindow.closeEvent`). **Bug latente desde
+     v1.0.5** (quando "Testar Conexão" foi adicionado).
+  2. **Frozen windowed (`console=False`) → stdio inválido:** `sys.stdout`/
+     `sys.stderr` eram `None` e os handles OS de stdio ficavam inválidos →
+     a DLL Delphi crashava ao tocá-los. Fix: `ui/app.py::_ensure_valid_stdio()`
+     na 1ª linha de `main()` reabre os 3 std fds para `os.devnull` antes de
+     qualquer uso da DLL. (Q-DRIFT-39, novo.)
+- **Modo de init da DLL alinhado entre "Testar Conexão" e "Baixar"** (#21b):
+  `resolve_dll_init_mode()` é a fonte única do modo (`minimal_handshake`) —
+  os dois caminhos sempre concordam, então o singleton reusa sem descasamento;
+  `get_dll()` loga `dll.session.mode_mismatch` (warning) se algum caller pedir
+  modo divergente.
+
+### Notas
+
+- Toda a árvore da v1.1.0 está incluída (esta é v1.1.0 + hotfix UI).
+- `--healthcheck`, smoke real do `.exe` e o resto da suite (1199 unit /
+  451 integration, todos exit 0) seguem verdes.
+
+---
+
+## [1.1.0] — 2026-05-12
 
 > **Single solid release** — consolidação de 8 hotfixes (v1.0.0 → v1.0.7)
 > + sweep BIG COUNCIL pré-v1.1.0. Primeira release com testes subprocess

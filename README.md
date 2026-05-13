@@ -3,23 +3,25 @@
 > Downloader de histórico de ativos via **ProfitDLL** (Nelogica).
 > Fundação para todos os projetos de quant/backtest/research que vierem.
 
-**Versão:** 1.1.0 (single solid release — consolidação v1.0.0 → v1.0.7)
-**Status:** Em validação BIG COUNCIL round 2 — ver [`docs/qa/V1.1.0-FIX-PLAN.md`](docs/qa/V1.1.0-FIX-PLAN.md)
+**Versão:** 1.1.1 (hotfix — corrige crash do app GUI ao baixar; v1.1.0 + fix UI)
 **Plataforma:** Windows x64 (a DLL é Windows-only)
 **Squad:** 10 agentes — vide `agents/`
 
 ---
 
-## ✨ What's new in v1.1.0
+## ✨ What's new
 
-- 🎯 **Single solid release** — 8 hotfixes (v1.0.0 → v1.0.7) consolidados em um único v1.1.0 estável + sweep BIG COUNCIL.
-- 📦 **Bundle 55,6% menor** (886MB → 387.5MB) sem perder funcionalidade — PySide6 lean spec drop Qt6WebEngineCore + companions.
-- ✅ **Primeira release com testes subprocess do `.exe` real** — flag `--healthcheck` + `tests/integration/test_binary_exe.py`.
-- 🔧 **Q-DRIFT-37 mitigated** — `chunk_strategy=1d` para WINFUT previne queue overflow no callback DLL.
-- 🎨 **UI polish** — `CheatSheetDialog` (Ctrl+/), onboarding banner, deep-link "Abrir Settings", `@Slot` cross-thread em `CatalogScreen` + `MetricsAdapter`.
-- 🏛️ **Architecture** — ADR-018 (frozen-mode boundary) e ADR-021 (sys.frozen contract) ratificados; `bundle_paths.py` central.
+**v1.1.1 (hotfix):** corrige o crash do app GUI ao clicar "Baixar" — duplo init da ProfitDLL (singleton por processo, Q08-E) + stdio inválido em frozen windowed (`_ensure_valid_stdio`, Q-DRIFT-39) + modo de init alinhado entre "Testar Conexão" e "Baixar". O CLI nunca foi afetado. (Story 4.19, tasks #21/#21b.)
 
-Detalhes completos: [`CHANGELOG.md`](CHANGELOG.md) e [`docs/release-notes/v1.1.0-draft.md`](docs/release-notes/v1.1.0-draft.md).
+**v1.1.0 (base):**
+- 🎯 **Single solid release** — 8 hotfixes (v1.0.0 → v1.0.7) consolidados + sweep BIG COUNCIL (rounds 1 e 2).
+- 📦 **Bundle 56% menor** (886MB → 387.6MB) — PySide6 lean spec drop Qt6WebEngineCore + companions.
+- ✅ **Testes subprocess do `.exe` real** — flag `--healthcheck` + `tests/integration/test_binary_exe.py` + smoke real automatizado (ADR-023: chunk count via conteúdo dos parquets).
+- 🔧 **ADR-023** — política uniforme de chunk 1 dia útil/ativo (validado em smoke real: WDOFUT 5d = 2.8M trades, 6 chunks de 1d).
+- 🎨 **UI** — `CheatSheetDialog` (Ctrl+/), onboarding banner, deep-link "Abrir Settings", `@Slot` cross-thread, QTimer leaks corrigidos, teardown Qt limpo.
+- 🏛️ **Architecture** — ADR-018/021 (frozen-mode boundary), ADR-024 (catalog em `data/_internal/`), `bundle_paths.py` central.
+
+Detalhes completos: [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -304,4 +306,4 @@ A definir.
 
 *— Squad data-downloader, 2026-05-03 — fundação para o que vem*
 
-<!-- LATEST-RELEASE --> Latest release: [v1.1.0](https://github.com/nicksauro/data-downloader/releases/tag/v1.1.0) — single solid release (consolidação v1.0.0 → v1.0.7 + BIG COUNCIL round 2). Smoke real WDOFUT 5d PASS (2.878.062 trades, 6 chunks 1d — ADR-023).
+<!-- LATEST-RELEASE --> Latest release: [v1.1.1](https://github.com/nicksauro/data-downloader/releases/tag/v1.1.1) — hotfix: corrige crash do app GUI ao baixar (DLL singleton Q08-E + stdio frozen windowed). v1.1.0 + fix UI. CLI nunca foi afetado.
