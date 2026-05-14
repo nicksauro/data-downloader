@@ -106,3 +106,67 @@ def test_progress_card_handles_winfut_per_day_chunks(progress_card) -> None:
     subtitle = progress_card._subtitle.text()
     assert "5/5" in subtitle
     assert "100.0" in subtitle
+
+
+# =====================================================================
+# v1.3.0 Wave 2B — CTA "Ver no Catálogo" no success_card
+# =====================================================================
+
+
+def test_view_catalog_cta_hidden_in_normal_state(progress_card):
+    """CTA "Ver no Catálogo" não aparece no state normal."""
+    progress_card.set_state("normal")
+    assert progress_card._view_catalog_btn.isVisible() is False
+
+
+def test_view_catalog_cta_visible_only_in_complete_state(progress_card):
+    """CTA "Ver no Catálogo" só aparece no state='complete' (success)."""
+    progress_card.set_state("complete")
+    # Visibility só é True quando widget está mostrado (.show()) — em testes
+    # offscreen, basta verificar que setVisible foi chamado com True.
+    # Esta heurística é o padrão Quinn:
+    assert progress_card._view_catalog_btn.isVisibleTo(progress_card) is True
+
+    progress_card.set_state("normal")
+    assert progress_card._view_catalog_btn.isVisibleTo(progress_card) is False
+
+    progress_card.set_state("reconnecting")
+    assert progress_card._view_catalog_btn.isVisibleTo(progress_card) is False
+
+    progress_card.set_state("cancelling")
+    assert progress_card._view_catalog_btn.isVisibleTo(progress_card) is False
+
+
+def test_view_catalog_cta_emits_signal_with_symbol(progress_card, qtbot):
+    """Click no CTA emite view_catalog_requested(symbol)."""
+    received: list = []
+    progress_card.view_catalog_requested.connect(received.append)
+
+    progress_card.set_symbol("WDOJ26")
+    progress_card.set_state("complete")
+
+    progress_card._view_catalog_btn.click()
+    qtbot.wait(50)
+
+    assert received == ["WDOJ26"]
+
+
+def test_view_catalog_cta_emits_empty_symbol_when_unset(progress_card, qtbot):
+    """Se ``set_symbol`` nunca foi chamado, signal carrega string vazia."""
+    received: list = []
+    progress_card.view_catalog_requested.connect(received.append)
+
+    progress_card.set_state("complete")
+    progress_card._view_catalog_btn.click()
+    qtbot.wait(50)
+
+    assert received == [""]
+
+
+def test_reset_hides_view_catalog_cta(progress_card):
+    """reset() esconde o CTA mesmo se previamente estava em complete state."""
+    progress_card.set_state("complete")
+    assert progress_card._view_catalog_btn.isVisibleTo(progress_card) is True
+
+    progress_card.reset()
+    assert progress_card._view_catalog_btn.isVisibleTo(progress_card) is False

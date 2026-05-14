@@ -30,7 +30,7 @@ from data_downloader.validation.calendar_b3 import (
     is_holiday,
 )
 
-REAL_DAT_PATH = Path("profitdll/DLLs/Win64/holidays.dat")
+REAL_DAT_PATH = Path(__file__).resolve().parents[2] / "profitdll/DLLs/Win64/holidays.dat"
 
 
 @pytest.fixture(autouse=True)

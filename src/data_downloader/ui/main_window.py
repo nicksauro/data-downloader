@@ -32,7 +32,7 @@ import contextlib
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, Qt, Slot
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -75,6 +75,24 @@ class MainWindow(QMainWindow):
         self.resize(1024, 700)
         self.setMinimumSize(960, 640)
 
+        # v1.3.0 Wave 2D (Uma): plugar o ícone do projeto na janela principal
+        # (taskbar Windows + Alt-Tab + title bar). O .ico vive em
+        # ``ui/assets/icon.ico`` (versionado) e é bundleado em ``_internal/
+        # assets/icon.ico`` pelo PyInstaller spec (datas tuple). Resolução
+        # cobre ambos os layouts via :func:`bundle_paths.asset_path`. Falha
+        # silenciosa (cosmético): janela abre sem ícone custom se asset
+        # ausente — mesmo padrão de ``app.py`` para o QSS.
+        from data_downloader._internal.bundle_paths import asset_path
+
+        for _rel in ("assets/icon.ico", "ui/assets/icon.ico"):
+            try:
+                _icon_path = asset_path(_rel)
+            except FileNotFoundError:
+                continue
+            with contextlib.suppress(Exception):
+                self.setWindowIcon(QIcon(str(_icon_path)))
+            break
+
         # Layout: sidebar (esq) + (banner onboarding + stack) central + status
         # bar (inferior). Wave 3 v1.1.0 (Uma): banner é coluna direita acima
         # do stack — visible apenas quando credenciais ausentes (discoverability
@@ -112,6 +130,30 @@ class MainWindow(QMainWindow):
 
         # Status bar.
         self._build_status_bar()
+
+        # v1.3.0 Wave 4B (Uma+Felix) — storage indicator wiring. Precisa
+        # rodar APÓS ``_build_status_bar`` (cria ``_storage_indicator``) E
+        # APÓS ``_build_screens`` (cria settings_screen/catalog_adapter).
+        self._wire_storage_indicator()
+
+        # v1.3.0 Wave 2A (Dex) — DLL session adapter como single source of
+        # truth. Antes da Wave 2A, ``settings_screen.dll_status_changed``
+        # SÓ era emitido pelo ``_TestConnectionWorker`` no Test Connection
+        # manual, e o download via ``get_dll()`` NÃO notificava — statusbar
+        # ficava desincronizado durante o download (Bug 3 Pichau). Agora
+        # o singleton ``dll.session`` emite estados para o adapter, que
+        # roteia ao ``_on_dll_status_changed`` (mesmo handler usado pelo
+        # Test Connection — coexistem sem conflito).
+        with contextlib.suppress(Exception):
+            from data_downloader.ui.adapters.dll_session_adapter import (
+                get_dll_session_adapter,
+            )
+
+            self._dll_session_adapter = get_dll_session_adapter()
+            self._dll_session_adapter.session_state_changed.connect(
+                self._on_dll_status_changed,
+                Qt.ConnectionType.QueuedConnection,
+            )
 
         # Atalhos globais.
         self._register_global_shortcuts()
@@ -253,7 +295,15 @@ class MainWindow(QMainWindow):
         download_screen = DownloadScreen(self)
         self._add_screen(SCREEN_DOWNLOAD, download_screen)
 
-        catalog_screen = CatalogScreen(parent=self)
+        # Bug 2 fix (v1.3.0): passar `data_dir` explícito alinhado com DownloadScreen
+        # e SettingsScreen — antes CatalogScreen caía em `Path.cwd()/data` (ex.:
+        # `System32\data` quando o .exe é lançado pelo atalho do Setup) e ficava
+        # vazio mesmo com downloads concluídos. `default_data_dir()` é o single
+        # source of truth em `bundle_paths`. `set_data_dir` (já wireado via
+        # `settings.data_dir_changed`) continua atualizando em runtime se mudar.
+        from data_downloader._internal.bundle_paths import default_data_dir
+
+        catalog_screen = CatalogScreen(data_dir=default_data_dir(), parent=self)
         self._add_screen(SCREEN_CATALOG, catalog_screen)
 
         settings_screen = SettingsScreen(self)
@@ -284,11 +334,21 @@ class MainWindow(QMainWindow):
             )
         # Hotfix v1.1.0 2026-05-07 (Felix+Uma — Pichau "não aparece quando
         # baixou, ta feio"): CTA "Ver no Catálogo" do success card do
-        # DownloadScreen navega ao Catalog. Se ``CatalogScreen`` ganhar
-        # ``set_filter_symbol(symbol)`` no futuro, o symbol carregado pelo
-        # signal alimenta o filtro automaticamente (TODO follow-up).
+        # DownloadScreen navega ao Catalog. v1.3.0 Wave 2B — agora
+        # ``CatalogScreen.set_filter_symbol`` existe e é aplicado em
+        # ``_on_open_catalog_for_symbol``, completando o flow proposto
+        # por Uma ("Catálogo pós-download").
         with contextlib.suppress(Exception):
             download_screen.open_catalog_requested.connect(self._on_open_catalog_for_symbol)
+        # v1.3.0 Wave 2B — também conecta o CTA do ProgressCard (success
+        # sub-state). Por enquanto o success real vive no DownloadScreen
+        # (``_success_card``); o ProgressCard ganhou o CTA como redundância
+        # — Wave 2C decidirá unificação. Best-effort: se o widget não tem
+        # o sinal (ex.: monkey-patch de testes), ignora silenciosamente.
+        progress_card = getattr(download_screen, "_progress_card", None)
+        if progress_card is not None and hasattr(progress_card, "view_catalog_requested"):
+            with contextlib.suppress(Exception):
+                progress_card.view_catalog_requested.connect(self._on_open_catalog_for_symbol)
 
     def _add_screen(self, screen_id: str, widget: QWidget) -> None:
         idx = self._stack.addWidget(widget)
@@ -341,6 +401,21 @@ class MainWindow(QMainWindow):
         )
         self._metrics_adapter.start()
 
+        # v1.3.0 Wave 4B (Uma+Felix) — Storage indicator (free/used GB).
+        # Motivação Pax (BIG COUNCIL): usuário baixando 7 anos histórico
+        # (~15-100 GB) hoje não tem visibilidade do consumo do SSD —
+        # antes ``ERR_DISK_FULL`` aparecia no chunk N+1 sem aviso prévio.
+        # Indicator vive na direita (permanent widget), antes da label
+        # de versão. Atualiza a cada 30s + ao receber ``partition_registered``
+        # (wired abaixo nos signals).
+        from data_downloader._internal.bundle_paths import default_data_dir
+        from data_downloader.ui.widgets.storage_indicator import StorageIndicator
+
+        self._storage_indicator = StorageIndicator(self)
+        bar.addPermanentWidget(self._storage_indicator)
+        with contextlib.suppress(Exception):
+            self._storage_indicator.set_data_dir(default_data_dir())
+
         # Versão app (direita).
         #
         # Story v1.0.8 fix (Pichau live test 2026-05-06): antes a status bar
@@ -362,6 +437,36 @@ class MainWindow(QMainWindow):
         version_label.setProperty("role", "muted")
         version_label.setObjectName("appVersionLabel")
         bar.addPermanentWidget(version_label)
+
+    def _wire_storage_indicator(self) -> None:
+        """v1.3.0 Wave 4B — conecta StorageIndicator aos signals de runtime.
+
+        Triggers:
+            - ``settings_screen.data_dir_changed`` → ``indicator.set_data_dir``
+              (re-aponta + restart timer).
+            - ``catalog_adapter.partition_registered`` → ``indicator.refresh``
+              (re-poll imediato após download completar partition/chunk).
+
+        Roda APÓS ``_build_screens`` + ``_build_status_bar`` — ambos os
+        endpoints precisam existir. Idempotente em re-call (best-effort
+        suppress de duplicate connect).
+        """
+        indicator = getattr(self, "_storage_indicator", None)
+        if indicator is None:
+            return
+        settings_screen = self._screens.get(SCREEN_SETTINGS)
+        if settings_screen is not None and hasattr(settings_screen, "data_dir_changed"):
+            with contextlib.suppress(Exception):
+                settings_screen.data_dir_changed.connect(indicator.set_data_dir)
+        catalog_screen = self._screens.get(SCREEN_CATALOG)
+        if catalog_screen is not None:
+            catalog_adapter = getattr(catalog_screen, "_adapter", None)
+            if catalog_adapter is not None and hasattr(catalog_adapter, "partition_registered"):
+                with contextlib.suppress(Exception):
+                    catalog_adapter.partition_registered.connect(
+                        lambda *_args: indicator.refresh(),
+                        Qt.ConnectionType.QueuedConnection,
+                    )
 
     def set_metrics_exporter(self, exporter: object | None) -> None:
         """Liga (ou desliga) consumo de métricas do PrometheusExporter.
@@ -499,24 +604,59 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def _on_dll_status_changed(self, status: str, version: str = "—") -> None:
-        """Atualiza statusbar com novo DLL status (vindo de SettingsScreen).
+        """Atualiza statusbar com novo DLL status.
 
-        Fix B-1 (Pichau-bug): assinatura agora aceita ``version`` real ao
-        invés de hardcodar ``"?"``. SettingsScreen emite a versão resolvida
-        (string da DLL real ou ``"—"`` quando não-conectado), eliminando
-        o placeholder fantasma na statusbar.
+        Conectado a 2 fontes (ambas usam a MESMA assinatura ``(state,
+        version)``):
 
-        ``version`` mantém default ``"—"`` para chamadas legadas (testes
-        antigos que invocam ``_on_dll_status_changed("connected")`` sem
-        passar o segundo argumento — preserva compat sem mascarar bug).
+        1. ``settings_screen.dll_status_changed`` — emitido pelo
+           ``_TestConnectionWorker`` no Test Connection manual. Estados
+           legados: ``"connected"`` / ``"testing"`` / ``"disconnected"`` /
+           ``"not_configured"``.
+        2. ``ui.adapters.dll_session_adapter.session_state_changed`` —
+           Wave 2A v1.3.0 (Bug 3 fix): emitido pelo singleton
+           ``dll.session`` a cada transição real (init, shutdown, run
+           do orchestrator, reconnect). Estados novos:
+           ``"idle"``/``"connecting"``/``"connected"``/``"downloading"``/
+           ``"reconnecting"``/``"error"``.
+
+        Os 2 sets coexistem (último a chamar ganha — Test Connection
+        manual sobrepõe transitoriamente o estado da session, mas a
+        session emite ``connected`` logo após e re-sincroniza).
+
+        Args:
+            status: estado da DLL (ver enums acima).
+            version: string da versão DLL ou ``"—"``/symbol em
+                ``downloading``. Default ``"—"`` para compat com chamadas
+                legadas single-arg dos testes pré-Wave 2A.
         """
+        # Wave 2A — mapeia estados novos + legados em (text, qss_status).
+        # ``qss_status`` ∈ {connected, connecting, disconnected, downloading,
+        # reconnecting, idle} — o style.qss define cores; estados novos não
+        # mapeados caem em "disconnected" (cinza) por defesa.
         if status == "connected":
             text = format_msg("LBL_STATUSBAR_DLL_CONNECTED", version=version or "—")
             qss_status = "connected"
-        elif status == "testing":
+        elif status in ("connecting", "testing"):
             text = format_msg("LBL_STATUSBAR_DLL_CONNECTING")
             qss_status = "connecting"
+        elif status == "downloading":
+            # ``version`` aqui é o symbol (set_downloading passa symbol);
+            # fallback ``"—"`` quando ausente.
+            text = format_msg("LBL_STATUSBAR_DLL_DOWNLOADING", symbol=version or "—")
+            qss_status = "downloading"
+        elif status == "reconnecting":
+            text = format_msg("LBL_STATUSBAR_DLL_RECONNECTING")
+            qss_status = "reconnecting"
+        elif status == "idle":
+            text = format_msg("LBL_STATUSBAR_DLL_IDLE")
+            qss_status = "idle"
+        elif status == "error":
+            text = format_msg("LBL_STATUSBAR_DLL_ERROR")
+            qss_status = "disconnected"
         else:
+            # ``disconnected`` / ``not_configured`` / desconhecido → estado
+            # neutro "desconectada" (preserva compat com testes legados).
             text = format_msg("LBL_STATUSBAR_DLL_DISCONNECTED")
             qss_status = "disconnected"
         self._dll_status_label.setText(text)
@@ -572,6 +712,14 @@ class MainWindow(QMainWindow):
             if screen_adapter is not None and hasattr(screen_adapter, "shutdown"):
                 with contextlib.suppress(Exception):
                     screen_adapter.shutdown()
+        # v1.3.0 Wave 2A (Dex) — desliga observer do DllSessionAdapter
+        # ANTES de ``shutdown_dll`` para evitar que o ``idle`` emitido no
+        # finalize tente marshalar ``QMetaObject.invokeMethod`` sobre
+        # ``self`` já em teardown.
+        session_adapter = getattr(self, "_dll_session_adapter", None)
+        if session_adapter is not None:
+            with contextlib.suppress(Exception):
+                session_adapter.shutdown()
         # task #21 (Q08-E): finaliza o singleton ProfitDLL process-global
         # UMA vez no encerramento da UI. ``shutdown_dll`` é idempotente e
         # best-effort (também registrado via ``atexit``). A ProfitDLL

@@ -133,7 +133,8 @@ def test_write_metadata_includes_schema_version(data_dir: Path, partition: Parti
     assert md.get(b"dll_version") == b"4.0.0.34"
     assert md.get(b"chunk_id") == b"abc"
     assert md.get(b"compression") == b"snappy"
-    assert md.get(b"row_group_size") == b"100000"
+    # ADR-025 v1.3.0 Wave 3 (Pyro): row_group 100k → 1M.
+    assert md.get(b"row_group_size") == b"1000000"
     assert b"created_at" in md
     assert b"first_ts_ns" in md
     assert b"last_ts_ns" in md

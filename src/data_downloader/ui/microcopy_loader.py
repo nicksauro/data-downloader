@@ -404,7 +404,33 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     ),
     "INF_GRACEFUL_SHUTDOWN": MicrocopyEntry(
         msg_type="info",
-        title="Drenando fila + commitando parcial...",
+        title="Cancelando — aguardando dia atual terminar (até ~60s)",
+    ),
+    "BTN_CANCELLING": MicrocopyEntry(
+        msg_type="button",
+        title="Cancelando…",
+    ),
+    # v1.3.0 Wave 2C (Uma — ProgressCard polish 2026-05-13): label exibida
+    # sobre a barra indeterminada quando o orchestrator ainda não calculou
+    # o total de chunks (DownloadProgress.total == -1). Substitui o cinza
+    # mudo da barra em modo busy, dando feedback explícito ao usuário.
+    "INF_CALCULATING_PLAN": MicrocopyEntry(
+        msg_type="info",
+        title="Calculando plano de download…",
+    ),
+    # v1.3.0 Wave 2C — microcopy do título dominante do ProgressCard.
+    # "Baixando {symbol}" vira a manchete H1 do card (20px bold). O
+    # contract_value antes era pareado inline; agora vira protagonista.
+    "LBL_PROGRESS_TITLE_DOWNLOADING": MicrocopyEntry(
+        msg_type="label",
+        title="Baixando {symbol}",
+    ),
+    # v1.3.0 Wave 2C — hint contextual durante cancelling. Aparece abaixo
+    # do botão CANCELAR enquanto state="cancelling" para reforçar que o
+    # app não travou (apenas drenando o dia atual da DLL).
+    "LBL_CANCELLING_HINT": MicrocopyEntry(
+        msg_type="label",
+        title="Não fechei o app — aguardando dia atual terminar.",
     ),
     "INF_RESUMING": MicrocopyEntry(
         msg_type="info",
@@ -549,8 +575,32 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     ),
     "LBL_STATUSBAR_DLL_DISCONNECTED": MicrocopyEntry(msg_type="label", title="✗ DLL: desconectada"),
     "LBL_STATUSBAR_DLL_CONNECTING": MicrocopyEntry(msg_type="label", title="↻ DLL: conectando..."),
+    # v1.3.0 Wave 2A (Uma — 5 estados visuais)
+    "LBL_STATUSBAR_DLL_IDLE": MicrocopyEntry(msg_type="label", title="DLL: aguardando"),
+    "LBL_STATUSBAR_DLL_DOWNLOADING": MicrocopyEntry(
+        msg_type="label", title="↓ DLL: baixando · {symbol}"
+    ),
+    "LBL_STATUSBAR_DLL_RECONNECTING": MicrocopyEntry(
+        msg_type="label", title="↻ DLL: reconectando..."
+    ),
+    "LBL_STATUSBAR_DLL_ERROR": MicrocopyEntry(msg_type="label", title="✗ DLL: desconectada"),
     "LBL_STATUSBAR_APP_VERSION": MicrocopyEntry(msg_type="label", title="v{version}"),
     "LBL_STATUSBAR_SHORTCUTS": MicrocopyEntry(msg_type="label", title="Ctrl+/"),
+    # v1.3.0 Wave 4B (Uma+Felix) — Storage indicator na statusbar.
+    # Motivação Pax: usuário baixando 7 anos histórico (~15-100 GB) sem
+    # visibilidade do consumo do SSD. Indicator mostra free/used + tooltip
+    # com path + pct; cor semântica (verde/amarelo/vermelho) por threshold
+    # (>=20 / 5-20 / <5 GB). Format pt-BR (separador `.` milhar, `,` decimal).
+    "LBL_STORAGE_INDICATOR": MicrocopyEntry(
+        msg_type="label", title="💾 {free} GB livres · {used} GB usados"
+    ),
+    "TIP_STORAGE_INDICATOR": MicrocopyEntry(
+        msg_type="label", title="Pasta: {path}\n{pct}% usado de {total} GB"
+    ),
+    "WAR_STORAGE_LOW": MicrocopyEntry(
+        msg_type="warning",
+        title="Espaço crítico — libere disco antes do próximo download",
+    ),
     "LBL_NAV_BADGE_DOWNLOADING": MicrocopyEntry(msg_type="label", title="↻"),
     # §17b.2 — CatalogScreen (Story 3.2)
     "LBL_CATALOG_SCREEN_TITLE": MicrocopyEntry(msg_type="label", title="Catálogo"),
@@ -818,6 +868,60 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     ),
     "BTN_CHECK_FOR_UPDATES": MicrocopyEntry(msg_type="button", title="Verificar atualizações"),
     "BTN_DOWNLOAD_UPDATE_MANUAL": MicrocopyEntry(msg_type="button", title="Baixar manualmente"),
+    # =================================================================
+    # §17b.8 — Onboarding wizard (v1.3.0 Wave 4A — Uma/Felix)
+    # =================================================================
+    # Wizard de 3 telas exibido no 1º launch quando ~/.data-downloader/.env
+    # está ausente. Reduz TTFD eliminando o fluxo manual "abra Settings →
+    # preencha 3 campos → Save" que afasta usuário não-dev. Microcopy
+    # alinhada com EMP_SETTINGS_DLL_FIRST_RUN_* (tom acolhedor + ação clara).
+    "LBL_ONBOARDING_TITLE": MicrocopyEntry(msg_type="label", title="Bem-vindo ao data-downloader"),
+    "LBL_ONBOARDING_SUBTITLE": MicrocopyEntry(
+        msg_type="label",
+        title="Vamos configurar suas credenciais ProfitDLL em ~30s.",
+    ),
+    "LBL_ONBOARDING_CREDS_TITLE": MicrocopyEntry(msg_type="label", title="Credenciais ProfitDLL"),
+    "LBL_ONBOARDING_CREDS_HINT_KEY": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "Chave de API ProfitDLL. Encontre em: Login Nelogica → Painel → "
+            "Minha conta → Chave de API."
+        ),
+    ),
+    "LBL_ONBOARDING_CREDS_HINT_USER": MicrocopyEntry(
+        msg_type="label",
+        title="Usuário Nelogica (mesmo login que você usa no ProfitChart).",
+    ),
+    "LBL_ONBOARDING_CREDS_HINT_PASS": MicrocopyEntry(
+        msg_type="label",
+        title="Senha Nelogica (mesma senha que você usa no ProfitChart).",
+    ),
+    "LBL_ONBOARDING_DONE_TITLE": MicrocopyEntry(msg_type="label", title="Tudo pronto!"),
+    "LBL_ONBOARDING_DONE_SUBTITLE": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "Você já pode baixar histórico no menu Download (Ctrl+D). "
+            "Use 'Testar Conexão' em Settings se quiser validar primeiro."
+        ),
+    ),
+    "BTN_ONBOARDING_START": MicrocopyEntry(msg_type="button", title="Começar →"),
+    "BTN_ONBOARDING_NEXT": MicrocopyEntry(msg_type="button", title="Próximo →"),
+    "BTN_ONBOARDING_BACK": MicrocopyEntry(msg_type="button", title="← Voltar"),
+    "BTN_ONBOARDING_SKIP": MicrocopyEntry(msg_type="button", title="Pular"),
+    "BTN_ONBOARDING_OPEN_DOWNLOAD": MicrocopyEntry(msg_type="button", title="Abrir Download"),
+    "WAR_ONBOARDING_SKIPPED": MicrocopyEntry(
+        msg_type="warning",
+        title="Configuração pulada",
+        detail=(
+            "Você pode configurar depois em Settings — mas o app não vai baixar sem credenciais."
+        ),
+    ),
+    "PLH_ONBOARDING_KEY": MicrocopyEntry(msg_type="placeholder", title="ex: ABC123XYZ..."),
+    "PLH_ONBOARDING_USER": MicrocopyEntry(msg_type="placeholder", title="seu_usuario_nelogica"),
+    "PLH_ONBOARDING_PASS": MicrocopyEntry(msg_type="placeholder", title="••••••••"),
+    "LBL_ONBOARDING_LABEL_KEY": MicrocopyEntry(msg_type="label", title="PROFITDLL_KEY"),
+    "LBL_ONBOARDING_LABEL_USER": MicrocopyEntry(msg_type="label", title="PROFITDLL_USER"),
+    "LBL_ONBOARDING_LABEL_PASS": MicrocopyEntry(msg_type="label", title="PROFITDLL_PASS"),
 }
 
 

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  data_downloader.svg — Master icon (256x256), Uma v1.3.0 Wave 2D.
+  Concept: candle (market symbol) fused with a download arrow.
+  The candle wick extends downward and terminates in a solid
+  triangle (arrowhead) — "market data flowing down to disk".
+
+  Palette (matches src/data_downloader/ui/assets/style.qss):
+    - bg deep-navy    : #1A1F2E
+    - body cyan       : #3DD0E1 (top) → #4F8CFF (bottom, gradient)
+    - wick / arrow    : #E8E8EA (text.primary)
+
+  Scales cleanly from 16px (silhouette: body + arrow) to 256px
+  (gradient body + rounded corners visible).
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     width="256" height="256">
+  <defs>
+    <linearGradient id="bodyGradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3DD0E1"/>
+      <stop offset="100%" stop-color="#4F8CFF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background: deep-navy rounded square (radius 28 ~= 11%). -->
+  <rect x="0" y="0" width="256" height="256" rx="28" ry="28" fill="#1A1F2E"/>
+
+  <!-- Candle wick (upper half): thin vertical line from y=40 to y=88. -->
+  <rect x="124" y="40" width="8" height="48" rx="3" ry="3" fill="#E8E8EA"/>
+
+  <!-- Candle body: cyan-to-primary gradient, ~50% of canvas height. -->
+  <rect x="80" y="80" width="96" height="100" rx="6" ry="6"
+        fill="url(#bodyGradient)"/>
+
+  <!-- Candle wick (lower half) — extends below body and morphs into arrow shaft. -->
+  <rect x="124" y="172" width="8" height="32" rx="3" ry="3" fill="#E8E8EA"/>
+
+  <!-- Download arrowhead (triangle pointing down) — replaces bottom tip of wick. -->
+  <polygon points="100,200 156,200 128,228" fill="#E8E8EA"/>
+</svg>

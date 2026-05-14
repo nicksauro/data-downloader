@@ -186,6 +186,36 @@ def main() -> int:
         with contextlib.suppress(OSError):
             app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
 
+    # v1.3.0 Wave 4A (Uma/Felix): 1º launch detection — se
+    # ``~/.data-downloader/.env`` está ausente ou incompleto, exibe o
+    # OnboardingWizard modal ANTES da MainWindow. Reduz TTFD eliminando
+    # o passo manual "Settings → preencher 3 campos → Save" que afasta
+    # usuário não-dev. Banner amarelo em main_window segue como
+    # segurança redundante caso usuário clique "Pular".
+    #
+    # Recarrega ``bootstrap_env`` após accept para garantir que os.environ
+    # reflita o .env recém-escrito antes da MainWindow ler credenciais
+    # no construtor (banner check, DLL status, etc).
+    try:
+        from data_downloader.ui.screens.onboarding_wizard import (
+            OnboardingWizard,
+            is_onboarding_needed,
+        )
+
+        if is_onboarding_needed():
+            wizard = OnboardingWizard()
+            if wizard.exec() == OnboardingWizard.DialogCode.Accepted:
+                # User concluiu — re-carrega .env (idempotente).
+                with contextlib.suppress(Exception):
+                    from data_downloader._env_loader import bootstrap_env
+
+                    bootstrap_env()
+            # Skip (reject) → segue para MainWindow; banner amarelo
+            # cobre o caso até o usuário ir em Settings manualmente.
+    except Exception:
+        # Best-effort — wizard nunca deve impedir a abertura da UI.
+        pass
+
     # Import deferido para evitar custo se main() não for chamado (ex.:
     # ``import data_downloader.ui.app`` em REPL para inspeção).
     from data_downloader.ui.main_window import MainWindow

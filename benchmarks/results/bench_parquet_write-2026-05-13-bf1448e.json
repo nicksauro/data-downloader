@@ -1,0 +1,183 @@
+{
+  "benchmark": "bench_parquet_write",
+  "version": "1.0.0",
+  "git_sha": "bf1448e",
+  "git_dirty": false,
+  "date": "2026-05-13T21:58:16Z",
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 58 Stepping 9, GenuineIntel",
+    "cpu_cores_physical": 4,
+    "cpu_cores_logical": 8,
+    "ram_gb": 16.0,
+    "os": "Windows 10 10.0.19045",
+    "machine": "AMD64"
+  },
+  "python": {
+    "version": "3.14.3",
+    "implementation": "CPython"
+  },
+  "dependencies": {
+    "pyarrow": "23.0.1",
+    "duckdb": "1.5.2",
+    "psutil": "7.2.2"
+  },
+  "dll_version": "mock-1.0",
+  "config": {
+    "n_trades_per_run": 1000000,
+    "n_runs_per_scenario": 3,
+    "matrix_size": 8
+  },
+  "scenarios": [
+    {
+      "row_group_size": 10000,
+      "compression": "snappy",
+      "n_runs": 3,
+      "trades_per_sec_p50": 712497.7520695922,
+      "trades_per_sec_p95": 696882.7941712864,
+      "trades_per_sec_min": 695147.7988492524,
+      "trades_per_sec_stddev": 14131.57828415124,
+      "mb_per_sec_p50": 26.691142626945012,
+      "peak_rss_delta_mb_max": 9.555968,
+      "peak_traced_mb_max": 0.008189,
+      "disk_size_mb": 37.461371,
+      "p50_ms": 1403.5132,
+      "p95_ms": 1435.04002,
+      "p99_ms": 1437.842404
+    },
+    {
+      "row_group_size": 50000,
+      "compression": "snappy",
+      "n_runs": 3,
+      "trades_per_sec_p50": 793315.0199205368,
+      "trades_per_sec_p95": 789377.4530102437,
+      "trades_per_sec_min": 788939.9455757667,
+      "trades_per_sec_stddev": 3609.0441071044806,
+      "mb_per_sec_p50": 29.526705879170347,
+      "peak_rss_delta_mb_max": 15.44192,
+      "peak_traced_mb_max": 0.006495,
+      "disk_size_mb": 37.219396,
+      "p50_ms": 1260.5333,
+      "p95_ms": 1266.82457,
+      "p99_ms": 1267.383794
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "n_runs": 3,
+      "trades_per_sec_p50": 854186.4446419702,
+      "trades_per_sec_p95": 841729.4276912407,
+      "trades_per_sec_min": 840345.3146967152,
+      "trades_per_sec_stddev": 8097.215763298916,
+      "mb_per_sec_p50": 31.15049774298316,
+      "peak_rss_delta_mb_max": 1.241088,
+      "peak_traced_mb_max": 0.006463,
+      "disk_size_mb": 36.468031,
+      "p50_ms": 1170.7046,
+      "p95_ms": 1188.0587600000001,
+      "p99_ms": 1189.6013520000001
+    },
+    {
+      "row_group_size": 250000,
+      "compression": "snappy",
+      "n_runs": 3,
+      "trades_per_sec_p50": 901898.9211214536,
+      "trades_per_sec_p95": 900414.2756529232,
+      "trades_per_sec_min": 900249.3150453087,
+      "trades_per_sec_stddev": 8521.121741300101,
+      "mb_per_sec_p50": 30.100402995494925,
+      "peak_rss_delta_mb_max": 26.038272,
+      "peak_traced_mb_max": 0.006439,
+      "disk_size_mb": 33.374475,
+      "p50_ms": 1108.7717,
+      "p95_ms": 1110.60023,
+      "p99_ms": 1110.762766
+    },
+    {
+      "row_group_size": 1000000,
+      "compression": "snappy",
+      "n_runs": 3,
+      "trades_per_sec_p50": 1106770.4802620213,
+      "trades_per_sec_p95": 1086813.5474835788,
+      "trades_per_sec_min": 1084596.1105081963,
+      "trades_per_sec_stddev": 17069.765145961508,
+      "mb_per_sec_p50": 33.927562093420946,
+      "peak_rss_delta_mb_max": 0.196608,
+      "peak_traced_mb_max": 0.006415,
+      "disk_size_mb": 30.65456,
+      "p50_ms": 903.5297,
+      "p95_ms": 920.15495,
+      "p99_ms": 921.63275
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 1,
+      "n_runs": 3,
+      "trades_per_sec_p50": 774200.3613502767,
+      "trades_per_sec_p95": 765863.9165994457,
+      "trades_per_sec_min": 764937.6449604646,
+      "trades_per_sec_stddev": 7654.674081813936,
+      "mb_per_sec_p50": 20.43770114209263,
+      "peak_rss_delta_mb_max": 0.16384,
+      "peak_traced_mb_max": 0.006383,
+      "disk_size_mb": 26.398465,
+      "p50_ms": 1291.6553,
+      "p95_ms": 1305.73202,
+      "p99_ms": 1306.983284
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "compression_level": 3,
+      "n_runs": 3,
+      "trades_per_sec_p50": 675844.2257457586,
+      "trades_per_sec_p95": 675029.143586352,
+      "trades_per_sec_min": 674938.5789019734,
+      "trades_per_sec_stddev": 8531.71521523597,
+      "mb_per_sec_p50": 16.355581652153923,
+      "peak_rss_delta_mb_max": 0.02048,
+      "peak_traced_mb_max": 0.006359,
+      "disk_size_mb": 24.200224,
+      "p50_ms": 1479.6309,
+      "p95_ms": 1481.4177599999998,
+      "p99_ms": 1481.576592
+    },
+    {
+      "row_group_size": 100000,
+      "compression": "none",
+      "n_runs": 3,
+      "trades_per_sec_p50": 932457.0971827301,
+      "trades_per_sec_p95": 931491.7859815286,
+      "trades_per_sec_min": 931384.5291813951,
+      "trades_per_sec_stddev": 6112.828054801869,
+      "mb_per_sec_p50": 53.71419201566826,
+      "peak_rss_delta_mb_max": 0,
+      "peak_traced_mb_max": 0.006335,
+      "disk_size_mb": 57.605001,
+      "p50_ms": 1072.4354,
+      "p95_ms": 1073.5469,
+      "p99_ms": 1073.6457
+    }
+  ],
+  "summary": {
+    "winner_raw": {
+      "row_group_size": 1000000,
+      "compression": "snappy",
+      "trades_per_sec_p50": 1106770.4802620213
+    },
+    "snappy_winner": {
+      "row_group_size": 1000000,
+      "trades_per_sec_p50": 1106770.4802620213,
+      "disk_size_mb": 30.65456
+    },
+    "production_writer_p50_trades_per_sec": 1106770.4802620213,
+    "vs_target": {
+      "target_metric": "trades_per_sec (production writer)",
+      "target_value": 100000,
+      "measured_value": 1106770.4802620213,
+      "delta_pct": 1006.7704802620212
+    },
+    "verdict": "PASS"
+  },
+  "notes": "Synthetic write throughput. Matrix: raw pq.write_table; production scenario uses data_downloader.storage.ParquetWriter (validate + dedup + fsync + SHA256)."
+}

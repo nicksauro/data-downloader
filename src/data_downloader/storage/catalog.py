@@ -38,7 +38,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -73,7 +73,11 @@ _LOG = logging.getLogger(__name__)
 #   útil baixado — granularidade DIÁRIA, resolve o "mês tocado conta como
 #   completo" sem mexer no layout parquet mensal) + `idx_partitions_job`
 #   (resume query indexada).
-CATALOG_VERSION: str = "1.2.0"
+# v1.3.0 (ADR-025 — parquet-per-day híbrido + auto-compact): adiciona
+#   coluna `partitions.day` (NULL = mensal compactado, NOT NULL = diário),
+#   índice `idx_partitions_symbol_ymd`, tabela `compactions` (rastreio
+#   atômico do estado da compactação mensal).
+CATALOG_VERSION: str = "1.3.0"
 
 # DDL inicial — schema v1.0.0 (SCHEMA.md §5.1..5.7).
 # Nota: ``_schema_meta`` usa o formato chave/valor (SCHEMA.md §5.1)
@@ -241,17 +245,128 @@ _DDL_V1_2_0_DELTAS: tuple[str, ...] = (
 )
 
 
+# DDL delta v1.2.0 → v1.3.0 — ADR-025 parquet-per-day híbrido.
+#
+# ``partitions.day`` (NULL = mensal compactado, NOT NULL = diário 1..31).
+# Permite que múltiplas rows convivam para o mesmo (symbol, year, month):
+# 1 mensal + 0..N diários DURANTE o mês corrente; após auto-compact, só
+# o mensal sobrevive (compact_month executa DELETE dos diários +
+# UPSERT mensal). ``idx_partitions_symbol_ymd`` cobre lookups
+# ``is_month_complete`` + reconcile mais granular.
+#
+# ``compactions`` rastreia atomicamente operações de compactação: cada
+# (symbol, exchange, year, month) tem no máximo 1 row in-flight com
+# ``started_at`` mas sem ``completed_at`` — o reconcile usa essa marca
+# para detectar crashes no meio da compactação (ADR-025 §2.4) e
+# decidir completar OU reverter.
+_DDL_V1_3_0_DELTAS: tuple[str, ...] = (
+    # SQLite não suporta ADD COLUMN com CHECK constraint em ALTER, mas
+    # aceita ADD COLUMN com default NULL. CHECK fica embutido no schema
+    # criado for fresh DBs via _DDL_V1_0_0 — não no ALTER. Para DBs
+    # migrados, a validação fica em Python (register_partition).
+    "ALTER TABLE partitions ADD COLUMN day INTEGER NULL",
+    "CREATE INDEX IF NOT EXISTS idx_partitions_symbol_ymd ON partitions(symbol, year, month, day)",
+    """
+    CREATE TABLE IF NOT EXISTS compactions (
+        symbol         TEXT NOT NULL,
+        exchange       TEXT NOT NULL,
+        year           INTEGER NOT NULL,
+        month          INTEGER NOT NULL CHECK(month BETWEEN 1 AND 12),
+        started_at     TIMESTAMP NOT NULL,
+        completed_at   TIMESTAMP,
+        error          TEXT,
+        PRIMARY KEY (symbol, exchange, year, month)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_compactions_inflight "
+    "ON compactions(symbol, exchange) WHERE completed_at IS NULL",
+)
+
+
 # Registry de migrações ordenadas por versão.
 # Cada entry = (versao_destino, lista de DDL statements).
 MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("1.0.0", _DDL_V1_0_0),
     ("1.1.0", _DDL_V1_1_0_DELTAS),
     ("1.2.0", _DDL_V1_2_0_DELTAS),
+    ("1.3.0", _DDL_V1_3_0_DELTAS),
 )
 
 
 # Idade mínima (segundos) para considerar um arquivo .tmp.* órfão (AC7).
 _ORPHAN_TMP_MAX_AGE_DEFAULT: int = 300
+
+
+# ----------------------------------------------------------------------
+# v1.3.0 Wave 2B — observer pattern (CatalogScreen auto-refresh)
+# ----------------------------------------------------------------------
+#
+# CatalogScreen (UI) precisa atualizar a tabela de partições em runtime
+# enquanto o orchestrator persiste novos arquivos. Antes da Wave 2B o
+# usuário precisava fechar/reabrir a screen (ou Ctrl+R) — agora um
+# callback puro-Python permite ao CatalogAdapter (Qt-side) receber
+# notificações cross-thread e reemitir como signal Qt na MainThread.
+#
+# Design (Aria — keep it boring):
+#   - Observer = ``Callable[[str, int, int], None]`` (symbol, year, month).
+#   - Module-state list (process-wide) — único Catalog vivo por processo,
+#     ADR-024.
+#   - register/unregister são idempotentes (registrar 2x = uma entrada).
+#   - ``register_partition`` e ``record_chunk`` notificam APÓS o commit
+#     SQLite, com try/except por callback (observer não derruba write).
+#   - NÃO importar Qt aqui — backend permanece puro.
+PartitionObserver = Callable[[str, int, int], None]
+_PARTITION_OBSERVERS: list[PartitionObserver] = []
+
+
+def register_partition_observer(callback: PartitionObserver) -> None:
+    """Registra ``callback(symbol, year, month)`` para receber notificações.
+
+    Disparado após ``Catalog.register_partition`` (granularidade mensal —
+    partições parquet) e ``Catalog.record_chunk`` (granularidade diária —
+    chunk_ledger; ``year``/``month`` derivados de ``chunk_date``). Re-registro
+    do mesmo callable é no-op (anti-duplicata).
+
+    O callback roda DENTRO da thread que chamou ``register_partition`` —
+    consumidores Qt (ex.: :class:`CatalogAdapter`) devem usar mecanismos
+    cross-thread (``QTimer.singleShot``/``QMetaObject.invokeMethod``) para
+    re-emitir signals na MainThread.
+
+    Exceções no callback são capturadas e logadas — observer NUNCA
+    derruba o write do catálogo.
+
+    Args:
+        callback: Callable que aceita ``(symbol, year, month)``.
+    """
+    if callback not in _PARTITION_OBSERVERS:
+        _PARTITION_OBSERVERS.append(callback)
+
+
+def unregister_partition_observer(callback: PartitionObserver) -> None:
+    """Remove um observer previamente registrado. Idempotente."""
+    with contextlib.suppress(ValueError):
+        _PARTITION_OBSERVERS.remove(callback)
+
+
+def _notify_partition_observers(symbol: str, year: int, month: int) -> None:
+    """Dispatch interno — chamado pelo ``Catalog`` após commit. Best-effort.
+
+    Cada observer roda em try/except isolado: uma falha não impede que os
+    outros sejam notificados, e nunca propaga para o caller (que é o write
+    SQLite — derrubá-lo geraria perda de dados).
+    """
+    if not _PARTITION_OBSERVERS:
+        return
+    # Snapshot — observer pode chamar unregister durante notificação.
+    for cb in tuple(_PARTITION_OBSERVERS):
+        try:
+            cb(symbol, year, month)
+        except Exception as exc:
+            # Best-effort dispatch — observer NUNCA derruba o write do catálogo.
+            _LOG.warning(
+                "catalog.partition_observer.failed",
+                extra={"err": str(exc), "symbol": symbol, "year": year, "month": month},
+            )
 
 
 def _utcnow_iso() -> str:
@@ -281,6 +396,13 @@ def _row_to_job(row: sqlite3.Row) -> Job:
 
 def _row_to_partition(row: sqlite3.Row) -> Partition:
     """Adapta linha SQLite -> ``Partition``."""
+    # ADR-025 v1.3.0: coluna ``day`` adicionada em v1.3.0; rows pré-migração
+    # têm ``day=NULL``. ``sqlite3.Row`` lança IndexError se a coluna não
+    # existir (catálogo pré-migração lendo Row do schema antigo) — defensive.
+    try:
+        day = row["day"]
+    except (IndexError, KeyError):  # pragma: no cover defensive
+        day = None
     return Partition(
         partition_path=row["partition_path"],
         symbol=row["symbol"],
@@ -295,6 +417,7 @@ def _row_to_partition(row: sqlite3.Row) -> Partition:
         file_size_bytes=row["file_size_bytes"],
         written_at=_parse_ts(row["written_at"]),
         job_id=row["job_id"],
+        day=day,
     )
 
 
@@ -529,6 +652,16 @@ class Catalog:
         cada DDL versionado em ``MIGRATIONS`` cuja versão > atual. Cada
         migration roda em transação própria; falha = rollback dessa
         versão (versões anteriores permanecem aplicadas).
+
+        Idempotência ADR-025 (v1.3.0): ``ALTER TABLE ... ADD COLUMN`` não
+        aceita ``IF NOT EXISTS``; antes de aplicar, checamos se a coluna
+        já existe via ``PRAGMA table_info`` e pulamos o ALTER. Necessário
+        porque DBs criados *fresh* em v1.3.0 já têm a coluna pelo bootstrap
+        (registry roda as 4 migrations em sequência sobre DB vazio: a
+        v1.0.0 cria ``partitions`` sem ``day``; v1.3.0 ADD COLUMN aplica
+        normal). Para DBs migrados de v1.2.0 também funciona — coluna
+        ainda não existe. Para re-runs de v1.3.0+ (no-op no loop pela
+        comparação semver), o guard nem é exercitado.
         """
         conn = self._conn_or_raise()
         # Bootstrap: garantir _schema_meta antes de qualquer leitura.
@@ -542,6 +675,9 @@ class Catalog:
                 continue
             with self._transaction():
                 for stmt in ddl_statements:
+                    # Idempotente: pula ADD COLUMN se a coluna já existe.
+                    if _is_add_column_stmt(stmt) and _column_exists(conn, stmt):
+                        continue
                     conn.execute(stmt)
                 # Atualiza meta dentro da mesma transação.
                 conn.execute(
@@ -730,6 +866,7 @@ class Catalog:
         partition: PartitionKey,
         *,
         job_id: str | None = None,
+        day: int | None = None,
     ) -> None:
         """Registra (UPSERT) uma partição escrita pelo writer.
 
@@ -766,6 +903,13 @@ class Catalog:
         now = _utcnow_iso()
         pid = os.getpid()
 
+        # ADR-025 v1.3.0: ``day`` derivado em prioridade da ``PartitionKey``
+        # (fonte canônica do layout); caller pode sobrescrever via kwarg
+        # ``day`` se quiser registrar uma partição mensal a partir de uma
+        # PartitionKey diária (uso raro — defensivo). NULL = mensal
+        # compactado; NOT NULL = diário parcial.
+        resolved_day = day if day is not None else partition.day
+
         # Fase 1 — pending commit (AC13).
         with self._transaction():
             conn = self._conn_or_raise()
@@ -798,10 +942,10 @@ class Catalog:
             conn.execute(
                 """
                 INSERT INTO partitions(
-                    partition_path, symbol, exchange, year, month,
+                    partition_path, symbol, exchange, year, month, day,
                     row_count, first_ts_ns, last_ts_ns, schema_version,
                     checksum_sha256, file_size_bytes, written_at, job_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(partition_path) DO UPDATE SET
                     row_count = excluded.row_count,
                     first_ts_ns = excluded.first_ts_ns,
@@ -809,6 +953,7 @@ class Catalog:
                     schema_version = excluded.schema_version,
                     checksum_sha256 = excluded.checksum_sha256,
                     file_size_bytes = excluded.file_size_bytes,
+                    day = excluded.day,
                     written_at = excluded.written_at,
                     job_id = COALESCE(excluded.job_id, partitions.job_id)
                 """,
@@ -818,6 +963,7 @@ class Catalog:
                     partition.exchange,
                     partition.year,
                     partition.month,
+                    resolved_day,
                     write_result.row_count,
                     write_result.first_ts_ns,
                     write_result.last_ts_ns,
@@ -839,6 +985,11 @@ class Catalog:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error as exc:
             _LOG.warning("catalog.wal_checkpoint.failed", extra={"err": str(exc)})
+
+        # v1.3.0 Wave 2B — notifica observers (CatalogScreen auto-refresh).
+        # APÓS o commit/checkpoint para que listeners que re-consultem o
+        # catálogo enxerguem a partition recém-gravada.
+        _notify_partition_observers(partition.symbol, partition.year, partition.month)
 
     def register_gap(
         self,
@@ -937,6 +1088,11 @@ class Catalog:
                 ),
             )
 
+        # v1.3.0 Wave 2B — notifica observers (granularidade diária). UI usa
+        # ``(year, month)`` derivados do ``chunk_date`` para coalescer múltiplos
+        # chunks do mesmo mês num único refresh (debounce 500ms no adapter).
+        _notify_partition_observers(symbol, chunk_date.year, chunk_date.month)
+
     def completed_days(
         self,
         symbol: str,
@@ -975,6 +1131,211 @@ class Catalog:
             except ValueError:  # pragma: no cover defensive — corrupted row
                 continue
         return out
+
+    # ------------------------------------------------------------------
+    # ADR-025 Wave 3 — auto-compactação mensal (parquet-per-day híbrido)
+    # ------------------------------------------------------------------
+
+    def is_month_complete(
+        self,
+        symbol: str,
+        exchange: str,
+        year: int,
+        month: int,
+    ) -> bool:
+        """``True`` se TODOS os dias úteis B3 de ``(year, month)`` estão no ledger.
+
+        ADR-025 §2.3 / Wave 3: gate da auto-compactação mensal. Usa
+        :func:`b3_business_days_range` (que respeita feriados B3 — dez/2024
+        com Natal vira 21 dias úteis, não 22) e checa que cada dia útil
+        tem row em ``chunk_ledger`` com ``status IN ('completed','no_trades')``.
+
+        Args:
+            symbol: Contrato vigente (ex.: ``"WDOJ26"``).
+            exchange: ``"F"`` ou ``"B"``.
+            year: Ano (4 dígitos).
+            month: Mês 1..12.
+
+        Returns:
+            ``True`` se mês está completo no ledger; ``False`` caso contrário.
+        """
+        from calendar import monthrange
+
+        from data_downloader.validation.calendar_b3 import b3_business_days_range
+
+        last_day = monthrange(year, month)[1]
+        first = date(year, month, 1)
+        last = date(year, month, last_day)
+        business_days = set(b3_business_days_range(first, last))
+        if not business_days:
+            # Mês sem dia útil (extremamente improvável; defensivo) — nada
+            # a compactar.
+            return False
+
+        done = self.completed_days(symbol, exchange, first, last)
+        return business_days.issubset(done)
+
+    def maybe_compact_month(
+        self,
+        symbol: str,
+        exchange: str,
+        year: int,
+        month: int,
+        *,
+        dll_version: str = "",
+    ) -> bool:
+        """Compacta o mês se ``is_month_complete``; idempotente; atômico (ADR-025).
+
+        Pipeline:
+
+        1. Checa ``is_month_complete`` — se False, no-op.
+        2. INSERT em ``compactions`` (started_at=now, completed_at=NULL).
+        3. Chama :func:`compact_month` (lê diários → write mensal atômico → DELETE diários).
+        4. UPSERT na tabela ``partitions``: row mensal (day=NULL) + DELETE
+           das rows diárias do mesmo ``(symbol, exchange, year, month)``.
+        5. UPDATE ``compactions`` completed_at=now.
+
+        Crash entre passos 3 e 5: ``reconcile`` detecta ``compactions``
+        in-flight e completa (se ``MM.parquet`` íntegro) OU reverte
+        (se inconsistente) — ver ADR-025 §2.4.
+
+        Idempotência: se ``compact_month`` retorna ``None`` (no-op — já
+        compactado, sem diários), apenas garante que o estado SQLite
+        reflete a realidade (UPSERT mensal se necessário).
+
+        Args:
+            symbol: Contrato vigente.
+            exchange: ``"F"`` ou ``"B"``.
+            year: Ano.
+            month: Mês 1..12.
+            dll_version: Versão DLL p/ metadata (best-effort).
+
+        Returns:
+            ``True`` se compactou (executou IO); ``False`` se no-op
+            (mês incompleto OU já compactado).
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return False
+
+        if not self.is_month_complete(symbol, exchange, year, month):
+            return False
+
+        # Import lazy para evitar ciclo (parquet_writer já importa schema).
+        from data_downloader.storage.parquet_writer import compact_month
+
+        now = _utcnow_iso()
+        # Marca início da compactação (idempotente — UPSERT).
+        try:
+            with self._transaction():
+                conn = self._conn_or_raise()
+                conn.execute(
+                    """
+                    INSERT INTO compactions(
+                        symbol, exchange, year, month, started_at, completed_at, error
+                    ) VALUES (?, ?, ?, ?, ?, NULL, NULL)
+                    ON CONFLICT(symbol, exchange, year, month) DO UPDATE SET
+                        started_at = excluded.started_at,
+                        completed_at = NULL,
+                        error = NULL
+                    """,
+                    (symbol, exchange, year, month, now),
+                )
+        except sqlite3.Error as exc:
+            _LOG.warning(
+                "catalog.maybe_compact_month.tracker_failed",
+                extra={"err": str(exc), "symbol": symbol, "year": year, "month": month},
+            )
+
+        try:
+            result = compact_month(
+                self.data_dir,
+                exchange=exchange,
+                symbol=symbol,
+                year=year,
+                month=month,
+                dll_version=dll_version,
+            )
+        except Exception as exc:
+            with contextlib.suppress(sqlite3.Error), self._transaction():
+                conn = self._conn_or_raise()
+                conn.execute(
+                    "UPDATE compactions SET error = ? "
+                    "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ?",
+                    (str(exc), symbol, exchange, year, month),
+                )
+            _LOG.warning(
+                "catalog.maybe_compact_month.failed",
+                extra={"err": str(exc), "symbol": symbol, "year": year, "month": month},
+            )
+            return False
+
+        # Persistir estado SQLite ATOMICAMENTE:
+        # - DELETE rows diárias do (symbol, exchange, year, month) em partitions
+        # - UPSERT row mensal (day=NULL) se compact_month executou
+        # - UPDATE compactions completed_at
+        finished = _utcnow_iso()
+        with self._transaction():
+            conn = self._conn_or_raise()
+            conn.execute(
+                "DELETE FROM partitions WHERE symbol = ? AND exchange = ? "
+                "AND year = ? AND month = ? AND day IS NOT NULL",
+                (symbol, exchange, year, month),
+            )
+            if result is not None:
+                rel_path = relative_partition_path(result.path, self.data_dir)
+                conn.execute(
+                    """
+                    INSERT INTO partitions(
+                        partition_path, symbol, exchange, year, month, day,
+                        row_count, first_ts_ns, last_ts_ns, schema_version,
+                        checksum_sha256, file_size_bytes, written_at, job_id
+                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    ON CONFLICT(partition_path) DO UPDATE SET
+                        row_count = excluded.row_count,
+                        first_ts_ns = excluded.first_ts_ns,
+                        last_ts_ns = excluded.last_ts_ns,
+                        schema_version = excluded.schema_version,
+                        checksum_sha256 = excluded.checksum_sha256,
+                        file_size_bytes = excluded.file_size_bytes,
+                        day = NULL,
+                        written_at = excluded.written_at
+                    """,
+                    (
+                        rel_path,
+                        symbol,
+                        exchange,
+                        year,
+                        month,
+                        result.row_count,
+                        result.first_ts_ns,
+                        result.last_ts_ns,
+                        self._get_meta("parquet_schema_min_supported") or "1.0.0",
+                        result.checksum_sha256,
+                        result.file_size_bytes,
+                        finished,
+                    ),
+                )
+            conn.execute(
+                "UPDATE compactions SET completed_at = ? "
+                "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ?",
+                (finished, symbol, exchange, year, month),
+            )
+
+        _LOG.info(
+            "catalog.maybe_compact_month.success",
+            extra={
+                "symbol": symbol,
+                "exchange": exchange,
+                "year": year,
+                "month": month,
+                "rows": result.row_count if result is not None else 0,
+                "noop": result is None,
+            },
+        )
+
+        if result is not None:
+            _notify_partition_observers(symbol, year, month)
+        return result is not None
 
     def get_completed_partitions(self, symbol: str, exchange: str) -> list[Partition]:
         """Lista partições registradas para ``(symbol, exchange)``.
@@ -1223,6 +1584,19 @@ class Catalog:
         if self.data_dir is None:  # pragma: no cover defensive
             return ReconcileReport()
 
+        # ADR-025 §2.4 — antes de comparar drift, resolve compactações
+        # in-flight (crash entre write {MM}.parquet e DELETE diários).
+        # Faz isso ANTES da varredura de disk_paths para que o estado
+        # filesystem reflita a decisão (cleanup ou revert).
+        if auto_correct:
+            try:
+                self._recover_inflight_compactions()
+            except Exception as exc:  # pragma: no cover  defensive
+                _LOG.warning(
+                    "catalog.reconcile.recover_inflight_failed",
+                    extra={"err": str(exc)},
+                )
+
         history_root = self.data_dir / "history"
         catalog_paths = self._list_catalog_partition_paths()
 
@@ -1263,6 +1637,159 @@ class Catalog:
             drift_c=tuple(drift_c),
             auto_corrected_paths=tuple(auto_corrected),
         )
+
+    def _recover_inflight_compactions(self) -> None:
+        """Resolve compactações in-flight (ADR-025 §2.4).
+
+        Crash entre write ``{MM}.parquet`` e DELETE diários deixa rows em
+        ``compactions`` com ``started_at`` mas sem ``completed_at``. Para
+        cada uma:
+
+        - Se ``{MM}.parquet`` íntegro (row_count >= sum(daily.row_count)):
+          completa cleanup (DELETE diários + UPDATE compactions.completed_at).
+          O Parquet mensal já foi escrito atomicamente — completar é seguro.
+        - Caso contrário (`MM.parquet` inexistente OU menor que diários):
+          REVERTE — deleta o `{MM}.parquet` se existir, marca
+          ``compactions.error='reverted'`` para inspeção humana.
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return
+
+        conn = self._conn_or_raise()
+        try:
+            rows = conn.execute(
+                "SELECT symbol, exchange, year, month FROM compactions WHERE completed_at IS NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Tabela ainda não existe (DB pré-v1.3.0 sem migrations
+            # aplicadas) — no-op.
+            return
+
+        for r in rows:
+            symbol = str(r["symbol"])
+            exchange = str(r["exchange"])
+            year = int(r["year"])
+            month = int(r["month"])
+            self._resolve_inflight_compaction(symbol, exchange, year, month)
+
+    def _resolve_inflight_compaction(
+        self, symbol: str, exchange: str, year: int, month: int
+    ) -> None:
+        """Aplica a política ADR-025 §2.4 para uma compactação in-flight."""
+        if self.data_dir is None:  # pragma: no cover defensive
+            return
+
+        monthly_partition = PartitionKey(exchange=exchange, symbol=symbol, year=year, month=month)
+        from data_downloader.storage.partition import resolve_partition_path
+
+        monthly_path = resolve_partition_path(monthly_partition, self.data_dir)
+        month_dir = monthly_path.with_suffix("")  # {MM}/ directory.
+
+        # Coleta diários remanescentes (file system).
+        daily_paths: list[Path] = []
+        if month_dir.is_dir():
+            for p in sorted(month_dir.glob("*.parquet")):
+                if ".tmp." in p.name:
+                    continue
+                daily_paths.append(p)
+
+        # Soma row_count das rows em ``partitions`` para os diários
+        # remanescentes (cheaper than re-reading parquet).
+        conn = self._conn_or_raise()
+        daily_rows_in_catalog = conn.execute(
+            "SELECT COALESCE(SUM(row_count), 0) AS total FROM partitions "
+            "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ? "
+            "AND day IS NOT NULL",
+            (symbol, exchange, year, month),
+        ).fetchone()
+        daily_total_rows = int(daily_rows_in_catalog["total"]) if daily_rows_in_catalog else 0
+
+        monthly_rows = 0
+        monthly_exists = monthly_path.is_file()
+        if monthly_exists:
+            try:
+                import pyarrow.parquet as pq
+
+                md = pq.read_metadata(monthly_path).metadata
+                if md is not None and b"row_count" in md:
+                    monthly_rows = int(md[b"row_count"].decode())
+                else:
+                    monthly_rows = int(pq.read_metadata(monthly_path).num_rows)
+            except Exception as exc:  # pragma: no cover defensive
+                _LOG.warning(
+                    "catalog.recover_inflight.metadata_read_failed",
+                    extra={"path": str(monthly_path), "err": str(exc)},
+                )
+                monthly_rows = -1
+
+        # Política ADR-025 §2.4.
+        # - Completa cleanup se monthly_rows >= daily_total_rows (e file íntegro).
+        # - Reverte caso contrário.
+        if monthly_exists and monthly_rows >= daily_total_rows and monthly_rows > 0:
+            # Completa cleanup — deleta diários (file + catalog).
+            for p in daily_paths:
+                try:
+                    p.unlink()
+                except OSError as exc:
+                    _LOG.warning(
+                        "catalog.recover_inflight.daily_unlink_failed",
+                        extra={"path": str(p), "err": str(exc)},
+                    )
+            try:
+                if month_dir.is_dir() and not any(month_dir.iterdir()):
+                    month_dir.rmdir()
+            except OSError:
+                pass
+            with self._transaction():
+                c = self._conn_or_raise()
+                c.execute(
+                    "DELETE FROM partitions WHERE symbol = ? AND exchange = ? "
+                    "AND year = ? AND month = ? AND day IS NOT NULL",
+                    (symbol, exchange, year, month),
+                )
+                c.execute(
+                    "UPDATE compactions SET completed_at = ? "
+                    "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ?",
+                    (_utcnow_iso(), symbol, exchange, year, month),
+                )
+            _LOG.info(
+                "catalog.recover_inflight.completed_cleanup",
+                extra={"symbol": symbol, "year": year, "month": month},
+            )
+        else:
+            # Reverte — deleta {MM}.parquet (se inconsistente) e mantém diários.
+            if monthly_exists:
+                try:
+                    monthly_path.unlink()
+                except OSError as exc:
+                    _LOG.warning(
+                        "catalog.recover_inflight.monthly_unlink_failed",
+                        extra={"path": str(monthly_path), "err": str(exc)},
+                    )
+            with self._transaction():
+                c = self._conn_or_raise()
+                # Remove a row mensal do partitions se existir (drift seria
+                # capturado depois, mas explícito é melhor).
+                c.execute(
+                    "DELETE FROM partitions WHERE symbol = ? AND exchange = ? "
+                    "AND year = ? AND month = ? AND day IS NULL",
+                    (symbol, exchange, year, month),
+                )
+                c.execute(
+                    "UPDATE compactions SET error = 'reverted', completed_at = ? "
+                    "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ?",
+                    (_utcnow_iso(), symbol, exchange, year, month),
+                )
+            _LOG.warning(
+                "catalog.recover_inflight.reverted",
+                extra={
+                    "symbol": symbol,
+                    "year": year,
+                    "month": month,
+                    "monthly_rows": monthly_rows,
+                    "daily_total_rows": daily_total_rows,
+                },
+            )
 
     def _list_catalog_partition_paths(self) -> dict[str, str]:
         """Retorna ``{partition_path: checksum_sha256}`` de ``partitions``."""
@@ -1350,17 +1877,27 @@ class Catalog:
             )
             return False
 
-        # Extrai (exchange, symbol, year, month) do path relativo.
-        # Formato esperado: "{exchange}/{symbol}/{year}/{month}.parquet"
+        # Extrai (exchange, symbol, year, month, [day]) do path relativo.
+        # ADR-025 v1.3.0: 2 layouts aceitos:
+        #   - mensal: "{exchange}/{symbol}/{year}/{MM}.parquet"  (4 parts)
+        #   - diário: "{exchange}/{symbol}/{year}/{MM}/{DD}.parquet"  (5 parts)
         parts = rel_path.split("/")
-        if len(parts) != 4 or not parts[3].endswith(".parquet"):
-            _LOG.warning("catalog.auto_register.invalid_layout", extra={"path": rel_path})
-            return False
+        day: int | None = None
         try:
-            exchange = parts[0]
-            symbol = parts[1]
-            year = int(parts[2])
-            month = int(parts[3].removesuffix(".parquet"))
+            if len(parts) == 4 and parts[3].endswith(".parquet"):
+                exchange = parts[0]
+                symbol = parts[1]
+                year = int(parts[2])
+                month = int(parts[3].removesuffix(".parquet"))
+            elif len(parts) == 5 and parts[4].endswith(".parquet"):
+                exchange = parts[0]
+                symbol = parts[1]
+                year = int(parts[2])
+                month = int(parts[3])
+                day = int(parts[4].removesuffix(".parquet"))
+            else:
+                _LOG.warning("catalog.auto_register.invalid_layout", extra={"path": rel_path})
+                return False
         except ValueError:
             _LOG.warning("catalog.auto_register.parse_failed", extra={"path": rel_path})
             return False
@@ -1381,10 +1918,10 @@ class Catalog:
             conn.execute(
                 """
                 INSERT INTO partitions(
-                    partition_path, symbol, exchange, year, month,
+                    partition_path, symbol, exchange, year, month, day,
                     row_count, first_ts_ns, last_ts_ns, schema_version,
                     checksum_sha256, file_size_bytes, written_at, job_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(partition_path) DO UPDATE SET
                     row_count = excluded.row_count,
                     first_ts_ns = excluded.first_ts_ns,
@@ -1392,6 +1929,7 @@ class Catalog:
                     schema_version = excluded.schema_version,
                     checksum_sha256 = excluded.checksum_sha256,
                     file_size_bytes = excluded.file_size_bytes,
+                    day = excluded.day,
                     written_at = excluded.written_at
                 """,
                 (
@@ -1400,6 +1938,7 @@ class Catalog:
                     exchange,
                     year,
                     month,
+                    day,
                     row_count,
                     first_ts,
                     last_ts,
@@ -1419,8 +1958,42 @@ def _semver_le(a: str, b: str) -> bool:
     return pa <= pb
 
 
+def _is_add_column_stmt(stmt: str) -> bool:
+    """``True`` se ``stmt`` é um ``ALTER TABLE ... ADD COLUMN ...`` (ADR-025)."""
+    s = stmt.strip().upper()
+    return s.startswith("ALTER TABLE") and "ADD COLUMN" in s
+
+
+def _column_exists(conn: sqlite3.Connection, alter_stmt: str) -> bool:
+    """Verifica via ``PRAGMA table_info`` se a coluna do ``ALTER`` já existe.
+
+    Parser leve: extrai ``<table>`` e ``<column>`` do statement
+    ``ALTER TABLE <table> ADD COLUMN <column> <rest...>``. NÃO é parser
+    SQL completo — assume o formato dos statements do registry.
+    """
+    # Tokenize na ordem esperada (case-insensitive).
+    tokens = alter_stmt.replace("(", " ( ").replace(",", " , ").split()
+    upper = [t.upper() for t in tokens]
+    try:
+        i_table = upper.index("TABLE")
+        table = tokens[i_table + 1]
+        i_col = upper.index("COLUMN")
+        column = tokens[i_col + 1]
+    except (ValueError, IndexError):  # pragma: no cover  defensive
+        return False
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:  # pragma: no cover defensive
+        return False
+    existing = {str(r[1]) for r in rows}
+    return column in existing
+
+
 __all__ = [
     "CATALOG_VERSION",
     "MIGRATIONS",
     "Catalog",
+    "PartitionObserver",
+    "register_partition_observer",
+    "unregister_partition_observer",
 ]

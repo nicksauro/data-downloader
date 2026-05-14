@@ -16,7 +16,7 @@
 ;   AC7 — github_release.py uploada Setup.exe junto ao zip
 
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #define AppVersion "1.3.0"
 #endif
 
 #define AppName "data-downloader"
@@ -47,6 +47,13 @@ DisableProgramGroupPage=yes
 DisableDirPage=auto
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
+; v1.3.0 Wave 2D (Uma): ícone do projeto plugado em todos os surface areas.
+; SetupIconFile = ícone do executável do próprio installer (data-downloader-
+; Setup-vX.Y.Z.exe) — Windows Explorer + dialog do setup.
+; UninstallDisplayIcon = ícone na Add/Remove Programs (Control Panel). Aponta
+; para {app}\{#AppExeName} (o .exe instalado já carrega o ícone embedded via
+; PyInstaller spec).
+SetupIconFile=assets\data_downloader.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName} {#AppVersion}
 SetupLogging=yes
@@ -75,7 +82,12 @@ Source: "..\dist\data_downloader\*"; DestDir: "{app}"; Flags: ignoreversion recu
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
 Name: "{group}\{#AppName} (CLI)"; Filename: "{app}\{#AppCliExeName}"; WorkingDir: "{app}"; Comment: "Linha de comando explicita"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+; Bug 6 fix (v1.3.0): `{commondesktop}` requer admin (read-only sem elevação) e
+; o setup é `PrivilegesRequired=lowest` → atalho falhava silenciosamente.
+; `{autodesktop}` resolve para `{userdesktop}` em per-user ou `{commondesktop}`
+; se elevado — InnoSetup 6+ constante moderna. `IconFilename` herda o ícone
+; embutido no .exe (PyInstaller spec template, v1.3.0 Wave 2D).
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#AppExeName}"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

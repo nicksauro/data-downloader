@@ -45,6 +45,7 @@ LEIS RESPEITADAS:
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from dataclasses import dataclass, field
@@ -417,6 +418,35 @@ class Orchestrator:
 
         metrics = OrchestratorMetrics(started_at=datetime.now(UTC))
 
+        # ADR-025 v1.3.0 Wave 3 (Pyro defesa 30-90h custo zero):
+        # ``gc.freeze`` move TODOS os objetos vivos atuais para a geração
+        # "permanente" — GC não os varre mais. Para um download longo
+        # (30-50h por símbolo por 7 anos), o módulo já tem milhões de
+        # objects-of-record (B3 calendar, schemas pyarrow, etc.) que nunca
+        # mudam; congelá-los reduz pausas de gc full-collection (que
+        # tipicamente cresceriam com o número de objects vivos).
+        # No-op semântico — apenas perf, sem risco funcional.
+        import contextlib as _contextlib_freeze
+
+        with _contextlib_freeze.suppress(Exception):
+            gc.freeze()
+
+        # v1.3.0 Wave 2A (Dex) — emite estado ``downloading`` ao iniciar o
+        # run + lança state_monitor daemon que reage a desconexões da DLL
+        # entre chunks (Aria P1 #4 — reconnect-without-reinit). ``pause_event``
+        # é cooperativo: o loop checa entre chunks (mesma semântica do
+        # ``cancel_event`` — graceful drain do chunk em andamento, próximo
+        # chunk aguarda). State_monitor é encerrado no ``finally``.
+        pause_event = threading.Event()  # set = orchestrator pausa entre chunks
+        monitor_stop = threading.Event()
+        monitor_thread: threading.Thread | None = None
+        try:
+            from data_downloader.dll.session import set_downloading
+
+            set_downloading(config.symbol)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         # 1. Resolve job_id (novo ou resume).
         job_id, resume_pending_chunks = self._resolve_job(config, resume_job_id)
         sm = JobStateMachine(job_id=job_id)
@@ -506,6 +536,16 @@ class Orchestrator:
                 dll_version=self._safe_dll_version(),
             )
 
+            # v1.3.0 Wave 2A (Aria P1 #4) — Lança state_monitor daemon
+            # após resolver chunks (DLL inicializada e estável). Monitora
+            # ``self._dll._state_queue`` por eventos MARKET_DATA !=
+            # CONNECTED durante o run; reage com pause_event + emite
+            # estado ``reconnecting``.
+            monitor_thread = self._start_state_monitor(
+                pause_event=pause_event,
+                stop_event=monitor_stop,
+            )
+
             # 6. Loop chunks.
             # Story 2.4: gauge active_downloads = 1 enquanto job ativo
             # (cool path — set 1x antes do loop, 0 ao final no finally).
@@ -528,6 +568,31 @@ class Orchestrator:
                     )
                     break
 
+                # v1.3.0 Wave 2A (Aria P1 #4) — pause cooperativo. Se o
+                # state_monitor detectou MARKET_DATA != CONNECTED, aguarda
+                # reconexão antes de iniciar o próximo chunk. Limitação:
+                # reconnect só funciona ENTRE chunks (chunk em andamento
+                # não é interrompido — chunk_timeout 1800s segura). NUNCA
+                # chamamos Initialize de novo (Q08-E).
+                if pause_event.is_set():
+                    log.info(
+                        "orchestrator.pause_waiting_reconnect",
+                        job_id=job_id,
+                        chunks_completed=metrics.chunks_completed,
+                    )
+                    # Poll cooperativo — também respeita cancel_event.
+                    while pause_event.is_set():
+                        if cancel_event is not None and cancel_event.is_set():
+                            break
+                        time.sleep(0.5)
+                    if cancel_event is not None and cancel_event.is_set():
+                        # Cancel chegou durante pause — sai do loop.
+                        log.info(
+                            "orchestrator.cancel_during_pause",
+                            job_id=job_id,
+                        )
+                        break
+
                 result, event_status, chunk_duration, chunk_trades = self._process_chunk(
                     job_id=job_id,
                     config=config,
@@ -537,6 +602,16 @@ class Orchestrator:
                 )
                 if result is not None:
                     partitions_written.append(result.path)
+
+                # ADR-025 v1.3.0 Wave 3 (Pyro): gc.collect entre chunks
+                # libera memória do chunk anterior (pa.Table com ~500k
+                # rows, queues, etc.) — defesa preventiva contra crescimento
+                # de heap em downloads de 30-90h. Custo: ~10-50ms (vs
+                # ~100s/chunk de B3 download — overhead < 0.1%).
+                import contextlib as _contextlib_gc
+
+                with _contextlib_gc.suppress(Exception):
+                    gc.collect()
 
                 # Story 4.16 — emite ChunkCompletedEvent (cool path, 1x por
                 # chunk — R21 OK). Listener é best-effort: exceções suprimidas
@@ -638,6 +713,30 @@ class Orchestrator:
             self._handle_fatal_error(sm, job_id, exc)
             raise
         finally:
+            # v1.3.0 Wave 2A — encerra state_monitor e emite estado final
+            # para a UI (``connected`` se a DLL ainda tá viva, ``idle`` se
+            # ``shutdown_dll`` já rodou). Cleanup ordenado: stop_event
+            # primeiro, depois join curto (monitor poll é 0.5s, então 1.5s
+            # cobre folga).
+            monitor_stop.set()
+            if monitor_thread is not None:
+                import contextlib as _contextlib
+
+                with _contextlib.suppress(Exception):
+                    monitor_thread.join(timeout=1.5)
+            # Estado final: volta pra ``connected`` se DLL ainda ativa,
+            # ``idle`` caso contrário (DLL foi finalize'd durante o run —
+            # raro mas possível em cancel agressivo).
+            try:
+                from data_downloader.dll.session import _set_state, has_active_dll
+
+                if has_active_dll():
+                    _set_state("connected", self._safe_dll_version())
+                else:
+                    _set_state("idle", "")
+            except Exception:  # pragma: no cover defensive
+                pass
+
             # Story 2.9 — Limpa contextvars no fim do job (sucesso, cache_hit
             # ou erro). Evita contaminação cross-job se o mesmo thread roda
             # múltiplos jobs sequencialmente (ADR-010 AC2).
@@ -1191,12 +1290,18 @@ class Orchestrator:
 
         # Converte TradeRecord (dataclass orchestrator) → TradeRecord
         # (TypedDict storage) e escreve.
+        # ADR-025 v1.3.0: layout HÍBRIDO — chunks são DIÁRIOS (ADR-023),
+        # então gravamos em ``{ex}/{sym}/{YYYY}/{MM}/{DD}.parquet`` com
+        # ``day=chunk.start.day``. Auto-compact agrega tudo num único
+        # ``{MM}.parquet`` quando o mês fecha (todos os dias úteis B3
+        # daquele mês baixados).
         trade_records = [_to_schema_trade(t) for t in chunk_result.trades]
         partition = PartitionKey(
             exchange=config.exchange,
             symbol=contract_code,
             year=chunk.start.year,
             month=chunk.start.month,
+            day=chunk.start.day,
         )
         write_result = self._writer.write(
             trade_records,
@@ -1205,6 +1310,7 @@ class Orchestrator:
             chunk_id=chunk_result.chunk_id,
         )
         # Register no catalog (two-phase commit emulado — Story 1.5 AC13).
+        # ``day`` flui implicitamente via partition.day → coluna SQL.
         self._catalog.register_partition(
             write_result,
             partition,
@@ -1223,6 +1329,26 @@ class Orchestrator:
             status="completed",
             trades_count=len(chunk_result.trades),
         )
+        # ADR-025 v1.3.0 Wave 3 — auto-compactação mensal ao fechar o mês.
+        # ``maybe_compact_month`` é idempotente e cheap (1 SQL query)
+        # quando o mês está incompleto. Best-effort: erro aqui só vira
+        # log (compactação roda no boot via reconcile como safety net).
+        try:
+            self._catalog.maybe_compact_month(
+                symbol=contract_code,
+                exchange=config.exchange,
+                year=chunk.start.year,
+                month=chunk.start.month,
+                dll_version=self._safe_dll_version(),
+            )
+        except Exception as exc:  # pragma: no cover defensive
+            log.warning(
+                "orchestrator.maybe_compact_month_failed",
+                symbol=contract_code,
+                year=chunk.start.year,
+                month=chunk.start.month,
+                error=repr(exc),
+            )
         # Wave 1C: hook de retry on low completeness aqui (Nelo-C — se
         # ``nl_errors / total > 0.001%`` re-enfileirar o chunk antes de
         # marcá-lo pronto).
@@ -1358,6 +1484,122 @@ class Orchestrator:
             return str(self._dll.dll_version)
         except (AttributeError, RuntimeError):
             return "unknown"
+
+    # ------------------------------------------------------------------
+    # v1.3.0 Wave 2A — State monitor (Aria P1 #4: reconnect-without-reinit)
+    # ------------------------------------------------------------------
+
+    def _start_state_monitor(
+        self,
+        *,
+        pause_event: threading.Event,
+        stop_event: threading.Event,
+    ) -> threading.Thread | None:
+        """Spawna daemon thread que reage a desconexões DLL durante o run.
+
+        Lê ``self._dll._state_queue`` (não-destrutivo — apenas observa). Se
+        receber ``(conn_type, result)`` indicando MARKET_DATA != CONNECTED,
+        seta ``pause_event`` (orchestrator pausa entre chunks) e emite
+        estado ``reconnecting`` para a UI. Quando o queue volta a reportar
+        ``MARKET_CONNECTED``, limpa ``pause_event`` e emite ``connected``
+        de volta — orchestrator retoma na próxima iteração.
+
+        IMPORTANTE: NUNCA chama ``Initialize`` (Q08-E — DLL Classic não
+        tolera re-init no mesmo processo). O reconnect aqui é apenas
+        cooperativo: aguarda a DLL reportar reconexão e retoma. Se a DLL
+        nunca se reconectar, o ``chunk_timeout`` (1800s default) eventualmente
+        cancela o chunk em andamento.
+
+        Falha graceful: se a DLL não expõe ``_state_queue`` (mock de teste,
+        DLL custom), retorna ``None`` e o monitor é skipado. Reconnect
+        passa a depender apenas do timeout natural do chunk.
+
+        Args:
+            pause_event: Set quando desconexão detectada (orchestrator
+                pausa entre chunks). Clear quando MARKET_CONNECTED.
+            stop_event: Set para encerrar o monitor (cleanup no ``finally``
+                do run).
+
+        Returns:
+            Thread daemon iniciada, ou ``None`` se DLL não suporta.
+        """
+        state_queue = getattr(self._dll, "_state_queue", None)
+        if state_queue is None:
+            log.debug("orchestrator.state_monitor.unsupported_dll")
+            return None
+
+        # Constantes locais — evita import do módulo wrapper só pra isso.
+        # ``MARKET_DATA == 2``, ``MARKET_CONNECTED == 4`` (data_downloader.dll.types).
+        from data_downloader.dll.types import MARKET_CONNECTED, MARKET_DATA
+
+        # Sinaliza versão atual (cacheada em ``_dll.dll_version`` se já
+        # acessada — usa ``unknown`` se mock).
+        version = self._safe_dll_version()
+
+        def _monitor() -> None:
+            log.info("orchestrator.state_monitor.start")
+            try:
+                from data_downloader.dll.session import _set_state
+            except Exception:
+                _set_state = None  # type: ignore[assignment]
+
+            while not stop_event.is_set():
+                try:
+                    conn_type, result = state_queue.get(timeout=0.5)
+                except Exception:
+                    # Empty / timeout — continua polling. Esse é o caso
+                    # normal: state_queue só recebe eventos em transições
+                    # do servidor; ficamos parados na maior parte do tempo.
+                    continue
+
+                log.info(
+                    "orchestrator.state_monitor.event",
+                    conn_type=conn_type,
+                    result=result,
+                )
+
+                if conn_type != MARKET_DATA:
+                    # Outros canais (LOGIN/ROTEAMENTO) — não afetam o
+                    # download de histórico market data; ignoramos.
+                    continue
+
+                if result != MARKET_CONNECTED:
+                    # MARKET_DATA caiu (e.g. CONNECTING=1 / WAITING=2 /
+                    # DISCONNECTED=0). Pausa orchestrator + emite
+                    # reconnecting para a UI.
+                    if not pause_event.is_set():
+                        pause_event.set()
+                        if _set_state is not None:
+                            import contextlib as _ctx
+
+                            with _ctx.suppress(Exception):
+                                _set_state("reconnecting", "")
+                        log.warning(
+                            "orchestrator.state_monitor.pause",
+                            reason=f"MARKET_DATA/{result}",
+                        )
+                else:
+                    # MARKET_DATA voltou para CONNECTED. Limpa pause e
+                    # emite ``connected`` para a UI (statusbar volta ao
+                    # verde "DLL: conectada"). Próximo chunk roda.
+                    if pause_event.is_set():
+                        pause_event.clear()
+                        if _set_state is not None:
+                            import contextlib as _ctx
+
+                            with _ctx.suppress(Exception):
+                                _set_state("connected", version)
+                        log.info("orchestrator.state_monitor.resume")
+
+            log.info("orchestrator.state_monitor.stop")
+
+        thread = threading.Thread(
+            target=_monitor,
+            name="orchestrator-state-monitor",
+            daemon=True,
+        )
+        thread.start()
+        return thread
 
 
 # =====================================================================

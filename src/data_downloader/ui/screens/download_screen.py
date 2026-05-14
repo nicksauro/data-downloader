@@ -70,15 +70,17 @@ STATE_SUCCESS = "success"
 
 
 def _default_data_dir() -> Path:
-    """Pasta de dados default — raiz estável do usuário, não o cwd (v1.2.0 Wave 1D).
+    """Pasta de dados default — delegada a ``bundle_paths.default_data_dir``.
 
-    Fallback para ``Path.cwd() / "data"`` se ``bundle_paths`` não estiver
-    disponível por algum motivo (defensivo — não deve acontecer).
+    v1.3.0 Bug 2 fix: a fonte canônica está em ``bundle_paths.default_data_dir``
+    (single source of truth para UI inteira — DownloadScreen, CatalogScreen,
+    SettingsScreen). Esta função é mantida como wrapper local com fallback
+    defensivo para preservar back-compat de testes que mockam este símbolo.
     """
     try:
-        from data_downloader._internal.bundle_paths import user_data_dir
+        from data_downloader._internal.bundle_paths import default_data_dir
 
-        return user_data_dir() / "data"
+        return default_data_dir()
     except Exception:
         return Path.cwd() / "data"
 

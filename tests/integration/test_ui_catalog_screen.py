@@ -288,3 +288,130 @@ def test_state_changed_signal_emitted(catalog_screen, qtbot):
     catalog_screen._set_state("loading")
 
     assert states[-3:] == ["normal", "error", "loading"]
+
+
+# =====================================================================
+# v1.3.0 Wave 2B — auto-refresh via partition_registered signal
+# =====================================================================
+
+
+def test_partition_registered_signal_triggers_refresh(catalog_screen, qtbot):
+    """Adapter emite ``partition_registered`` → CatalogScreen dispara refresh.
+
+    Validates the auto-refresh flow: a worker grava no catálogo, observer
+    notifica o adapter (debounce 500ms), adapter re-emite o signal Qt, e
+    a CatalogScreen pede um novo ``list_partitions``.
+    """
+    # Inicializa state como NORMAL (não LOADING) para que o slot
+    # _on_partition_registered não faça early-return.
+    partitions = (_make_partition(symbol="WDOJ26"),)
+    catalog_screen._on_partitions_loaded(partitions)
+    qtbot.wait(50)
+    assert catalog_screen.current_state() == "normal"
+
+    list_calls: list = []
+    catalog_screen._request_list.connect(lambda d: list_calls.append(d))
+
+    # Simula sinal vindo do adapter (já debounced).
+    catalog_screen._on_partition_registered("WDOJ26", 2026, 3)
+    qtbot.waitUntil(lambda: len(list_calls) > 0, timeout=2000)
+
+    assert len(list_calls) >= 1
+
+
+def test_partition_registered_during_loading_is_skipped(catalog_screen, qtbot):
+    """Se a tela já está em LOADING, o auto-refresh pula (refresh inflight)."""
+    catalog_screen._set_state("loading")
+    list_calls: list = []
+    catalog_screen._request_list.connect(lambda d: list_calls.append(d))
+
+    catalog_screen._on_partition_registered("WDOJ26", 2026, 3)
+    qtbot.wait(100)
+
+    # Nenhum novo refresh disparado — o anterior está em vôo.
+    assert list_calls == []
+
+
+def test_adapter_partition_registered_signal_exists(catalog_screen):
+    """Smoke: ``CatalogAdapter`` expõe o signal ``partition_registered``."""
+    assert hasattr(catalog_screen._adapter, "partition_registered")
+
+
+def test_observer_to_signal_end_to_end(catalog_screen, qtbot):
+    """End-to-end: register_partition no catalog → signal Qt no adapter.
+
+    NÃO usa um Catalog real (que abriria SQLite + criaria parquet stub) —
+    apenas dispara o observer module-state diretamente para validar o pipe
+    observer → debounce → signal Qt em isolamento.
+    """
+    # Estado normal (não loading).
+    catalog_screen._on_partitions_loaded((_make_partition(),))
+    qtbot.wait(50)
+
+    received: list = []
+    catalog_screen._adapter.partition_registered.connect(lambda s, y, m: received.append((s, y, m)))
+
+    # Dispara o callback puro Python (mesmo path do Catalog real).
+    from data_downloader.storage.catalog import _notify_partition_observers
+
+    _notify_partition_observers("WDOJ26", 2026, 3)
+    # Debounce 500ms — espera com folga.
+    qtbot.waitUntil(lambda: len(received) > 0, timeout=2000)
+    assert received == [("WDOJ26", 2026, 3)]
+
+
+def test_observer_debounce_coalesces_rapid_events(catalog_screen, qtbot):
+    """Eventos rápidos (< 500ms) são coalescidos em 1 emissão (last-wins)."""
+    catalog_screen._on_partitions_loaded((_make_partition(),))
+    qtbot.wait(50)
+
+    received: list = []
+    catalog_screen._adapter.partition_registered.connect(lambda s, y, m: received.append((s, y, m)))
+
+    from data_downloader.storage.catalog import _notify_partition_observers
+
+    # Burst — 5 eventos rapidamente. Debounce deve coalescer em 1.
+    _notify_partition_observers("WDOJ26", 2026, 1)
+    _notify_partition_observers("WDOJ26", 2026, 2)
+    _notify_partition_observers("WDOJ26", 2026, 3)
+    _notify_partition_observers("WDOJ26", 2026, 4)
+    _notify_partition_observers("WDOJ26", 2026, 5)
+
+    qtbot.waitUntil(lambda: len(received) >= 1, timeout=2000)
+    # Aguarda janela debounce expirar pra garantir que não vem mais nada.
+    qtbot.wait(700)
+
+    # Last-write-wins → o último evento (month=5) vence.
+    assert received == [("WDOJ26", 2026, 5)]
+
+
+# =====================================================================
+# v1.3.0 Wave 2B — set_filter_symbol (Uma proposal "Catálogo pós-download")
+# =====================================================================
+
+
+def test_set_filter_symbol_applies_search(catalog_screen, qtbot):
+    """``set_filter_symbol(s)`` preenche o campo de busca + aplica filtro."""
+    partitions = (
+        _make_partition(symbol="WDOJ26"),
+        _make_partition(symbol="WINJ26"),
+    )
+    catalog_screen._on_partitions_loaded(partitions)
+    qtbot.wait(50)
+
+    catalog_screen.set_filter_symbol("WIN")
+    qtbot.wait(50)
+
+    assert catalog_screen._search_edit.text() == "WIN"
+    # Proxy filtra para 1 row apenas.
+    assert catalog_screen._proxy.rowCount() == 1
+
+
+def test_set_filter_symbol_empty_is_noop(catalog_screen, qtbot):
+    """``set_filter_symbol("")`` não muda nada (idempotente em entrada vazia)."""
+    catalog_screen._search_edit.setText("WDO")
+    qtbot.wait(20)
+    catalog_screen.set_filter_symbol("")
+    qtbot.wait(20)
+    # Não sobrescreve filtro existente quando arg vazio.
+    assert catalog_screen._search_edit.text() == "WDO"

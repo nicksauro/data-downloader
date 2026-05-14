@@ -22,6 +22,50 @@ implicam bumps de API, e vice-versa.
 
 ---
 
+## [1.3.0] — 2026-05-13
+
+> **UX excepcional + parquet híbrido (Wave 1+2+3+4).** BIG COUNCIL round 4 (6 agentes mini-councils paralelos). Pichau directive 2026-05-13: 7 bugs/refinos pós-v1.2.0 + "vamos fazer o possível para a nova v ser excepcional" + "parquets mensais para ranges grandes, diários para ranges pequenos — rigidamente implementado e testado".
+
+### Corrigido (Fixed)
+
+- **Catálogo vazio após download via UI.** `CatalogScreen` lia de `Path.cwd()/data` (= `System32\data\` quando o app era lançado pelo atalho do Setup) enquanto `DownloadScreen` gravava em `user_data_dir()/data`. Resultado: o usuário baixava, fechava o ProgressCard, abria o catálogo e via lista vazia mesmo com Parquets gravados. Fix: nova função canônica `bundle_paths.default_data_dir()` consolidando os 3 callsites (DownloadScreen, CatalogScreen, SettingsScreen). (Bug 2 — Pichau report 2026-05-13.)
+- **Indicador da DLL "desconectada" durante download.** O statusbar mostrava "DLL: desconectada" mesmo com a sessão ativa baixando — o estado era lido só na abertura do app. Fix: observer pattern puro Python em `dll/session.py` (5 estados: idle/connecting/connected/downloading/reconnecting/error) + adapter Qt singleton `DllSessionAdapter` marshalando via `QueuedConnection`; statusbar reflete o estado em tempo real. (Bug 3.)
+- **"Cancelar" não parava o download.** O botão emitia o sinal mas o orchestrator só checava `cancel_event` entre chunks — em chunks longos a cooperação demorava ~60s. Microcopy clara ("Cancelando — aguardando dia atual terminar (até ~60s)") + botão CANCELAR redesenhado 40px com ícone ⏹ + hint contextual. Cancelamento mid-chunk **não** foi implementado intencionalmente (a DLL não tem API de cancel; matar mid-trade corromperia o buffer). (Bug 4.)
+- **Falta de ícone do projeto.** Sem `.ico` o Windows mostrava o ícone padrão do Python (frozen) e a barra de tarefas ficava genérica. Fix: novo SVG mestre `installer/assets/data_downloader.svg` (candle cyan + seta de download, paleta `style.qss`) + `scripts/build-icon.py` gera `.ico` multi-resolução (16/32/48/64/128/256, 13.5KB Pillow puro — sem cairosvg). `MainWindow.setWindowIcon` + InnoSetup `SetupIconFile` + PyInstaller spec `icon=`. (Bug 5.)
+- **Instalador não criava atalho desktop.** `[Tasks] desktopicon` marcado por default mas o atalho não aparecia. Causa: `{commondesktop}` é read-only para `PrivilegesRequired=lowest`; o Setup falhava silenciosamente. Fix: `{commondesktop}` → `{autodesktop}` (resolve para `{userdesktop}` quando não-admin). + `IconFilename` no `[Icons]`. (Bug 6.)
+
+### Adicionado (Added)
+
+- **ADR-025 — Parquet híbrido (mensal + diário) com auto-compact** (Pichau directive: "parquets mensais para ranges grandes, diários pra pequenos, se não é muito ruim, vai ficar muito parquet, e pra qlqr backtest fica ruim"). Layout canônico:
+  - **Mensal** (`{exchange}/{symbol}/{YYYY}/{MM}.parquet`) — quando o mês está **completo** (todos os dias úteis B3 com chunk_ledger `completed` ou `no_trades`).
+  - **Diário** (`{exchange}/{symbol}/{YYYY}/{MM}/{DD}.parquet`) — durante o mês corrente, durante downloads parciais, ou para ranges intra-mês.
+  - **Auto-compact:** ao final de cada `register_partition`, `maybe_compact_month()` checa `is_month_complete` e — se sim — escreve `{MM}.parquet` atomicamente (tmp + `os.replace` + fsync + SHA256 verify), só **DEPOIS** deleta os `{DD}.parquet` daquele mês. Crash mid-compact: recovery na próxima boot via tabela `compactions` (in-flight registry) completa se `{MM}.parquet` está íntegro / reverte se inconsistente.
+  - `CATALOG_VERSION` 1.2.0 → 1.3.0 (migração idempotente: ADD COLUMN `partitions.day INTEGER NULL` + `idx_partitions_symbol_ymd` + tabela `compactions` + `idx_compactions_inflight`).
+  - **Validação rígida** (Pichau directive: "vamos rigidamente implementar e testar"): testes T1-T9 (mês completo→compacta, mês incompleto→não compacta, crash recovery completa/reverte, write-once, layout exclusivo, idempotência, double-register, race condition) + **property test (Hypothesis, 50 seeds, 3 invariantes)**: conservação de trades (compact não perde nem duplica), exclusividade mútua (nunca `{MM}.parquet` e `{MM}/{DD}.parquet` coexistem), consistência catálogo↔FS. T10 (smoke real em pregão B3) deferido para Pichau pós-build.
+- **Onboarding wizard** — `OnboardingWizard(QDialog)` modal de 3 telas (Welcome / Credenciais Nelogica / Done) disparado pelo `app.main()` quando `~/.data-downloader/.env` não existe ou `PROFITDLL_KEY` está vazio. Substitui o banner "Configurar credenciais" que aparecia escondido no topo da UI.
+- **StorageIndicator** no statusbar — QLabel + QTimer 30s mostrando espaço livre em `data_dir` (format pt-BR, cores semânticas verde/amarelo/vermelho ≥20/5-20/<5 GB, tooltip com path + pct). Avisa antes de o usuário começar um download de 7 anos sem espaço.
+- **Ícone do projeto** — SVG mestre + .ico multi-resolução (16/32/48/64/128/256), bundleado em `_internal/assets/icon.ico`, consumido por InnoSetup, PyInstaller spec, e Qt `MainWindow.setWindowIcon`.
+- **Polish ProgressCard** — hierarquia tipográfica (`_title_label` 20px/700 "Baixando {symbol}"), ícones unicode ⏱⏳⚡✓⚠↻, cores semânticas dinâmicas (throughput verde/cyan/amarelo, perdidos verde/amarelo/vermelho), `_SegmentedProgressBar` custom paintEvent (verde/amarelo proporcional trades/failed), divisores 1px entre seções. (Pichau feedback v1.2.0: "ProgressCard está bonita, só precisa melhorias".)
+- **CTA "Ver no catálogo"** no ProgressCard ao concluir um download — emite `view_catalog_requested(symbol)` e o MainWindow navega para `CatalogScreen` já filtrado.
+- **`gc.freeze()` + `gc.collect()` entre chunks** no orchestrator — reduz pausas GC em downloads longos (medições internas: 7-12% menos tempo total num download de 30+ dias). `_ROW_GROUP_SIZE` 100k → 1M (+30% throughput no parquet write).
+
+### Mudado (Changed)
+
+- **Parquet write-once quando `partition.day is not None`** — sem read-merge-rewrite (que era O(N²) no mensal). Ganho: write de 1 dia útil de WDOFUT cai de ~700ms para ~50ms (medido com `bench_parquet_read_filtered.py`).
+- **`_PARTITION_ROW_LIMIT`** mantido em 50M como paliativo herdado da v1.2.0; deixa de ser load-bearing na v1.3.0 (parquets diários nunca chegam perto). Reavaliar remoção em v1.4.0.
+- **Microcopy:** `BTN_CANCELLING`, `LBL_PROGRESS_TITLE_DOWNLOADING`, `INF_CALCULATING_PLAN`, `LBL_CANCELLING_HINT`, `LBL_STATUSBAR_DLL_*` (5 estados), `LBL_ONBOARDING_*` (18 IDs), `LBL_STORAGE_INDICATOR`, `TIP_STORAGE_INDICATOR`, `WAR_STORAGE_LOW`.
+
+### Diferido (Deferred)
+
+- **Code signing (Bug 7 — SmartScreen)** — sem orçamento agora; diferido para v1.4.0. Workaround documentado em `docs/release/INSTALL.md`.
+- **Smoke real T10** (download via UI em pregão B3 validando auto-compact ao fechar mês) — Pichau pós-build.
+
+### Suite
+
+- `ruff` 0 / `mypy --strict` 0 (**90 source files**) / `pytest` **1222 unit + 494 integration + 65 property, 0 fail** (4 skips ambientais).
+
+---
+
 ## [1.2.0] — 2026-05-12
 
 > **Download robusto + períodos extensos.** BIG COUNCIL round 3 (6 agentes).

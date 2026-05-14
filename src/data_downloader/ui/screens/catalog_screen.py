@@ -241,6 +241,11 @@ class CatalogScreen(QWidget):
 
         self._data_dir = Path(data_dir) if data_dir is not None else Path.cwd() / "data"
 
+        # v1.3.0 Wave 2B — estado para preservar seleção/scroll entre refreshs
+        # disparados pelo signal partition_registered (auto-refresh).
+        self._pending_restore_selection: str | None = None
+        self._pending_restore_scroll: int = 0
+
         # Adapter (QThread bridge).
         self._adapter = CatalogAdapter(self)
         self._adapter.connect_to(
@@ -249,6 +254,9 @@ class CatalogScreen(QWidget):
             on_validated=self._on_validated,
             on_reconciled=self._on_reconciled,
             on_error=self._on_error,
+            # v1.3.0 Wave 2B — auto-refresh quando catalog registra
+            # partition/chunk em runtime (debounced 500ms no adapter).
+            on_partition_registered=self._on_partition_registered,
         )
         # Conexões cross-thread (D1).
         self._request_list.connect(
@@ -393,6 +401,21 @@ class CatalogScreen(QWidget):
         """Atualiza data_dir (chamado por SettingsScreen ao mudar pasta)."""
         self._data_dir = Path(data_dir)
         self.refresh()
+
+    def set_filter_symbol(self, symbol: str) -> None:
+        """v1.3.0 Wave 2B — pre-aplica filtro por símbolo na tabela.
+
+        Chamado pelo MainWindow após o CTA "Ver no Catálogo" do success card
+        do DownloadScreen — abre o catálogo já filtrado pelo símbolo recém-
+        baixado (Uma proposal — Catálogo pós-download).
+
+        Args:
+            symbol: Código do contrato (ex.: ``"WDOJ26"``). Vazio = no-op.
+        """
+        if not symbol:
+            return
+        self._search_edit.setText(symbol)
+        # ``_on_filter_changed`` será chamado pelo ``textChanged`` do QLineEdit.
 
     def handle_escape(self) -> bool:
         """Esc — limpa filtros se algum ativo, senão no-op."""
@@ -642,7 +665,7 @@ class CatalogScreen(QWidget):
             + format_msg("LBL_DETAIL_CHECKSUM_VALID", prefix=prefix)
         )
         self._detail_rowcount.setText(
-            f"{format_msg('LBL_DETAIL_ROW_COUNT')}: " f"{partition.row_count:,}".replace(",", ".")
+            f"{format_msg('LBL_DETAIL_ROW_COUNT')}: {partition.row_count:,}".replace(",", ".")
         )
 
     def _on_validate_clicked(self) -> None:
@@ -719,6 +742,31 @@ class CatalogScreen(QWidget):
             self._set_state(STATE_NORMAL)
             self._update_post_filter_state()
 
+        # v1.3.0 Wave 2B — restaura seleção/scroll após auto-refresh (debounce).
+        # Best-effort: se o partition selecionado sumiu (foi apagado, por
+        # exemplo), apenas mantemos a tabela sem seleção forçada.
+        self._restore_pending_selection()
+
+    def _restore_pending_selection(self) -> None:
+        """Após reload (auto-refresh) tenta re-selecionar a row e restaurar scroll."""
+        selected_path = self._pending_restore_selection
+        scroll_value = self._pending_restore_scroll
+        self._pending_restore_selection = None
+        self._pending_restore_scroll = 0
+        if not selected_path:
+            return
+        # Procura no model (source) — depois mapeia via proxy.
+        for source_row, partition in enumerate(self._model.partitions()):
+            if partition.partition_path == selected_path:
+                proxy_idx = self._proxy.mapFromSource(self._model.index(source_row, 0))
+                if proxy_idx.isValid():
+                    self._table.setCurrentIndex(proxy_idx)
+                break
+        # Restaura scroll (clamp interno do QScrollBar lida com out-of-range).
+        scroll_bar = self._table.verticalScrollBar()
+        if scroll_bar is not None:
+            scroll_bar.setValue(scroll_value)
+
     @Slot(str)
     def _on_deleted(self, rel_path: str) -> None:
         # Encontra symbol pelo path para microcopy do toast.
@@ -760,6 +808,43 @@ class CatalogScreen(QWidget):
             variant="success",
             duration_ms=4000,
         )
+        self.refresh()
+
+    @Slot(str, int, int)
+    def _on_partition_registered(self, symbol: str, year: int, month: int) -> None:
+        """v1.3.0 Wave 2B — adapter avisou que catalog registrou uma partition.
+
+        Re-popula a tabela preservando seleção e scroll position do usuário.
+        Debounce de 500ms vive no adapter; aqui só re-consultamos o disco.
+        Se a tela está em STATE_LOADING (refresh anterior em vôo), apenas
+        ignoramos — o list_partitions inflight já trará os dados frescos.
+        """
+        # No-op se já estamos refazendo: refresh() vai trazer os dados novos.
+        if self._current_state == STATE_LOADING:
+            return
+        self._refresh_preserve_selection()
+
+    def _refresh_preserve_selection(self) -> None:
+        """Refresh que tenta preservar o partition_path selecionado + scroll.
+
+        Caso simples (Uma pode polir): guardamos o partition_path atual e o
+        scroll y; após o reload, re-selecionamos a row equivalente (se ainda
+        existir) e restauramos o scroll. Sem isso, durante um download a
+        tabela perderia foco a cada notificação (UX ruim).
+        """
+        # Captura estado pré-refresh.
+        selected_path: str | None = None
+        partition = self._selected_partition()
+        if partition is not None:
+            selected_path = partition.partition_path
+        scroll_value = self._table.verticalScrollBar().value()
+
+        # Guarda para restaurar pós-loaded.
+        self._pending_restore_selection = selected_path
+        self._pending_restore_scroll = scroll_value
+
+        # Refresh padrão — set_state(LOADING) será ignorado pelo slot
+        # _on_partition_registered (early-return acima) se outra mensagem chegar.
         self.refresh()
 
     @Slot(object)

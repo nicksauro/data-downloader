@@ -71,10 +71,16 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
 
 if TYPE_CHECKING:
     from data_downloader.storage.catalog_models import Partition, ReconcileReport
+
+
+# v1.3.0 Wave 2B — debounce intervals.
+# 500ms coalesce chunks rápidos (1 partition/dia em downloads longos pode
+# disparar dezenas de eventos/segundo) num único reload — Aria directive.
+_DEBOUNCE_MS: int = 500
 
 
 __all__ = ["CatalogAdapter"]
@@ -106,6 +112,15 @@ class CatalogAdapter(QObject):
     validated = Signal(str, bool)
     reconciled = Signal(object)
     error = Signal(object)
+    # v1.3.0 Wave 2B — observer pattern bridge.
+    # Catalog (backend, puro Python) chama ``register_partition_observer``
+    # com callback; aqui agendamos via ``QTimer.singleShot`` (afinidade
+    # MainThread — singleShot agenda no event loop da thread em que o
+    # adapter vive, que é o adapter QThread; mas re-emit do signal usa
+    # Qt.QueuedConnection do conector externo). Debounce de 500ms coalesce
+    # múltiplos eventos em runtime (download que registra 1 partition/chunk
+    # a alta frequência não thrash a UI).
+    partition_registered = Signal(str, int, int)
 
     def __init__(self, parent: QObject | None = None) -> None:
         # D2 (COUNCIL-23): NÃO passar parent ao super — QObjects com parent
@@ -115,8 +130,36 @@ class CatalogAdapter(QObject):
         self._owner = parent
         self._thread = QThread()
         self._thread.setObjectName("catalog-adapter")
+
+        # v1.3.0 Wave 2B — observer pattern. Last-write-wins coalescing:
+        # mantemos APENAS o último (symbol, year, month) recebido durante
+        # a janela de debounce; quando o timer dispara, emitimos o signal
+        # Qt para o(s) listener(s) (CatalogScreen).
+        #
+        # IMPORTANTE: o ``QTimer`` é parented em ``self`` mas criado ANTES
+        # de ``moveToThread`` — Qt move a árvore inteira (adapter + children)
+        # para a thread correta numa única operação. Inverter a ordem (criar
+        # o QTimer DEPOIS do moveToThread) deixaria o timer órfão na
+        # MainThread, e ``QTimer.start()`` falharia com "Timers cannot be
+        # started from another thread".
+        self._pending_partition: tuple[str, int, int] | None = None
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(_DEBOUNCE_MS)
+        self._debounce_timer.timeout.connect(self._emit_pending_partition)
+
+        # Move adapter + filhos (incluindo o QTimer) para a thread alocada.
         self.moveToThread(self._thread)
         self._thread.start()
+
+        # Registra o callback puro-Python (catalog.py — module-state).
+        # Marcamos o método bound para podermos chamar
+        # ``unregister_partition_observer(self._on_partition_event)``
+        # no shutdown (mesma identidade — re-register é no-op).
+        with contextlib.suppress(Exception):
+            from data_downloader.storage.catalog import register_partition_observer
+
+            register_partition_observer(self._on_partition_event)
 
     # ------------------------------------------------------------------
     # Public slots — chamados via signal Queued do MainThread.
@@ -186,11 +229,83 @@ class CatalogAdapter(QObject):
 
     def shutdown(self) -> None:
         """Encerra a thread limpa. Chamar no fechamento da janela."""
+        # v1.3.0 Wave 2B — desliga observer ANTES de quit da thread, evitando
+        # callbacks chegando enquanto o timer/QObject destrói.
+        with contextlib.suppress(Exception):
+            from data_downloader.storage.catalog import unregister_partition_observer
+
+            unregister_partition_observer(self._on_partition_event)
+        with contextlib.suppress(Exception):
+            # Para o timer (pode estar pendente); se já parou, no-op.
+            self._debounce_timer.stop()
         try:
             self._thread.quit()
             self._thread.wait(2000)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # v1.3.0 Wave 2B — observer bridge (debounce + last-write-wins)
+    # ------------------------------------------------------------------
+
+    def _on_partition_event(self, symbol: str, year: int, month: int) -> None:
+        """Callback puro Python invocado pelo Catalog (qualquer thread).
+
+        Reside na adapter QThread? NÃO — roda na thread que chamou
+        ``register_partition`` (tipicamente a worker thread do orchestrator,
+        que NÃO é Qt; nos testes, a MainThread). Por isso usamos
+        ``QMetaObject.invokeMethod`` (Qt.QueuedConnection) para marshall a
+        chamada para o event loop da thread do adapter. ``QMetaObject.invoke
+        Method`` com ``QueuedConnection`` é o padrão canônico Qt para essa
+        marshall cross-thread (mais robusto que ``QTimer.singleShot`` com
+        receptor explícito, que em algumas versões PySide6 6.11+ ignora o
+        receptor e dispara no event loop da thread chamadora — race
+        observada em test offscreen).
+
+        Last-write-wins: o último evento da janela vence. Para granularidade
+        diária (chunk_ledger), múltiplos chunks do mesmo mês são coalescidos
+        — UI re-popula a tabela uma vez só.
+        """
+        # Atualiza estado em uma operação atômica (Python GIL — set/get de
+        # uma referência é thread-safe). Não usamos lock pois o pior caso
+        # é perder 1 evento de coalescing, mas o timer dispara mesmo assim
+        # e o reload re-consulta o catalog (sempre source-of-truth).
+        self._pending_partition = (symbol, year, month)
+        # Marshall para o event loop do adapter via QueuedConnection — único
+        # mecanismo seguro quando este callback é invocado de uma thread
+        # que NÃO é a do adapter (caso normal: worker thread do orchestrator).
+        with contextlib.suppress(Exception):
+            QMetaObject.invokeMethod(
+                self, "_arm_debounce_timer", Qt.ConnectionType.QueuedConnection
+            )
+
+    @Slot()
+    def _arm_debounce_timer(self) -> None:
+        """Re-arma o debounce timer no event loop do adapter. Thread-affined.
+
+        Importante: este slot é invocado via ``QMetaObject.invokeMethod``
+        com ``QueuedConnection``, o que garante execução no event loop da
+        thread do adapter (``self._thread``). Sem essa marshall,
+        ``self._debounce_timer.start()`` falharia com "Timers cannot be
+        started from another thread".
+        """
+        if self._debounce_timer.isActive():
+            # Já armado — só atualiza o "pending" (já feito em
+            # _on_partition_event). Reseta o timer para coalescer novos
+            # eventos dentro da mesma janela de 500ms.
+            self._debounce_timer.stop()
+        self._debounce_timer.start()
+
+    @Slot()
+    def _emit_pending_partition(self) -> None:
+        """Timer fired — emite o signal Qt com o último evento pendente."""
+        pending = self._pending_partition
+        self._pending_partition = None
+        if pending is None:
+            return
+        symbol, year, month = pending
+        # Emit Qt signal — listeners (CatalogScreen) recebem via Queued.
+        self.partition_registered.emit(symbol, year, month)
 
     # ------------------------------------------------------------------
     # Helper para conexão de signals (idêntico ao DownloadAdapter).
@@ -203,8 +318,15 @@ class CatalogAdapter(QObject):
         on_validated: object | None = None,
         on_reconciled: object | None = None,
         on_error: object | None = None,
+        on_partition_registered: object | None = None,
     ) -> None:
-        """Conecta sinais usando ``Qt.QueuedConnection`` (R11)."""
+        """Conecta sinais usando ``Qt.QueuedConnection`` (R11).
+
+        v1.3.0 Wave 2B — ``on_partition_registered(symbol, year, month)``
+        recebe notificações debounced (500ms) quando o catálogo registra
+        uma nova partition/chunk em runtime. CatalogScreen liga este sinal
+        ao :meth:`refresh` para auto-atualização durante downloads.
+        """
         if on_partitions is not None:
             self.partitions_loaded.connect(on_partitions, Qt.ConnectionType.QueuedConnection)
         if on_deleted is not None:
@@ -215,6 +337,10 @@ class CatalogAdapter(QObject):
             self.reconciled.connect(on_reconciled, Qt.ConnectionType.QueuedConnection)
         if on_error is not None:
             self.error.connect(on_error, Qt.ConnectionType.QueuedConnection)
+        if on_partition_registered is not None:
+            self.partition_registered.connect(
+                on_partition_registered, Qt.ConnectionType.QueuedConnection
+            )
 
     # ------------------------------------------------------------------
     # Internal — operações de catálogo (rodam dentro da thread do adapter).

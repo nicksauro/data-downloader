@@ -72,21 +72,18 @@ from data_downloader.storage.schema import (
 
 _LOG = logging.getLogger(__name__)
 
-# Configuração Parquet (ADR-002).
+# Configuração Parquet (ADR-002 + ADR-025).
 _COMPRESSION: str = "snappy"
-_ROW_GROUP_SIZE: int = 100_000
+# v1.3.0 ADR-025 / Wave 3 (Pyro bench bf1448e): row_group 100k → 1M
+# (+30% throughput, -16% on-disk). Diários (~500k rows) cabem em 1 row group;
+# mensais compactados (~10M rows) viram ~10 row groups (vs 100 antes).
+_ROW_GROUP_SIZE: int = 1_000_000
 _USE_DICTIONARY: bool = True
 _WRITE_STATISTICS: bool = True
 
-# Threshold paliativo (finding H6 — sub-particionamento real é ADR-025
-# "parquet-per-day", planejado para v1.2.0 Wave 2 — ver docs/qa/V1.2.0-PLAN.md).
-#
-# Antes: 5_000_000 — pequeno demais; um mês de WDOFUT chega a ~10-13M trades
-# e o write abortava com IntegrityError no meio do download. Subido para 50M
-# como folga até o particionamento diário estar pronto. NÃO é um limite "de
-# verdade": é um guard de sanidade contra partições absurdas (ex: símbolo
-# errado, range de anos). Quando ADR-025 entrar, este threshold passa a ser
-# por-dia e cai para algo na casa de 1-2M.
+# Threshold de sanidade — partições diárias (~500k rows) ficam muito longe
+# disto; mensais compactados (~10-13M rows WDOFUT) também. Limit é guard
+# contra partições absurdas (símbolo errado, ano errado), não política.
 _PARTITION_ROW_LIMIT: int = 50_000_000
 
 
@@ -335,13 +332,21 @@ class ParquetWriter:
         # 5. dedup vectorizado (DuckDB ROW_NUMBER particionado pela chave).
         deduped_new_table = dedup_table_vectorized(new_table)
 
-        # 6. Path + merge se já existe.
+        # 6. Path + (talvez) merge.
+        # ADR-025 v1.3.0: para partições DIÁRIAS (``partition.day is not None``)
+        # o writer é write-once — re-baixar o mesmo dia simplesmente
+        # sobrescreve atomicamente (idempotente em granularidade diária; o
+        # caller controla a deduplicação via chunk_ledger antes de chamar).
+        # Para partições MENSAIS legacy (``day is None``) o caminho antigo
+        # de read-merge-rewrite é preservado — usado pela compactação e
+        # por re-downloads de meses já compactados.
         path = resolve_partition_path(partition, self.data_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        if path.exists():
+        is_daily = partition.day is not None
+
+        if not is_daily and path.exists():
             existing_table = _read_existing_table(path)
-            # Threshold deferred (finding H6).
             projected_rows = existing_table.num_rows + deduped_new_table.num_rows
             if projected_rows > _PARTITION_ROW_LIMIT:
                 raise IntegrityError(
@@ -355,13 +360,22 @@ class ParquetWriter:
                         "limit": _PARTITION_ROW_LIMIT,
                     },
                 )
-            # Union e re-dedup. Existing primeiro (preserva ordem; dedup
-            # mantém primeira ocorrência — INV-2).
             merged_pre = pa.concat_tables(
                 [existing_table, deduped_new_table], promote_options="default"
             )
             table = dedup_table_vectorized(merged_pre)
         else:
+            # Caminho diário (write-once) OU caminho mensal novo (não existe).
+            if deduped_new_table.num_rows > _PARTITION_ROW_LIMIT:
+                raise IntegrityError(
+                    f"Partition exceeds {_PARTITION_ROW_LIMIT:_} rows; "
+                    f"needs sub-partitioning — ADR-025 (parquet-per-day)",
+                    details={
+                        "partition": str(partition),
+                        "new_rows": deduped_new_table.num_rows,
+                        "limit": _PARTITION_ROW_LIMIT,
+                    },
+                )
             table = deduped_new_table
 
         # 7. Ordena por (timestamp_ns, sequence_within_ns) — INV-3.
@@ -438,7 +452,167 @@ class ParquetWriter:
         )
 
 
+def compact_month(
+    data_dir: Path,
+    *,
+    exchange: str,
+    symbol: str,
+    year: int,
+    month: int,
+    dll_version: str = "",
+) -> WriteResult | None:
+    """Consolida partições diárias ``{DD}.parquet`` num único ``{MM}.parquet`` (ADR-025).
+
+    Operação atômica:
+
+    1. Lista os ``{DD}.parquet`` em ``{data_dir}/history/{ex}/{sym}/{YYYY}/{MM}/``.
+    2. Lê cada um como ``pa.Table``, concatena em ordem cronológica
+       (paths são string-ordered = data-ordered dado padding 2-dig).
+    3. Dedup defensivo (não custa nada — chunks vêm de
+       ``ParquetWriter.write`` já dedup'd; é seguro vs re-runs misturando
+       artefatos).
+    4. Sort por ``(timestamp_ns, sequence_within_ns)``.
+    5. Escreve ``{MM}.parquet.tmp.{uuid}``, fsync, SHA256, ``os.replace``
+       atômico para ``{MM}.parquet``.
+    6. DELETE batch dos ``{DD}.parquet`` consumidos.
+
+    Idempotência (ADR-025 §2.3): se ``{MM}.parquet`` já existe E não há
+    ``{DD}.parquet`` em ``{MM}/`` → no-op (retorna ``None``). Se ambos
+    existem (crash entre rename e cleanup): completa o cleanup deletando
+    os diários.
+
+    Args:
+        data_dir: Raiz dos dados.
+        exchange: ``"F"`` ou ``"B"``.
+        symbol: Código do contrato.
+        year: Ano.
+        month: Mês 1..12.
+        dll_version: Versão da DLL no momento da compactação (metadata).
+
+    Returns:
+        :class:`WriteResult` se compactou (ou completou cleanup); ``None``
+        se no-op (já compactado, ou nenhum diário no mês).
+
+    Raises:
+        IntegrityError: dados corrompidos (ex.: linhas com timestamp_ns
+            inconsistente) — compactação aborta sem deletar diários.
+    """
+    monthly_partition = PartitionKey(exchange=exchange, symbol=symbol, year=year, month=month)
+    monthly_path = resolve_partition_path(monthly_partition, data_dir)
+    month_dir = monthly_path.with_suffix("")  # remove .parquet → diretório {MM}/
+
+    daily_paths: list[Path] = []
+    if month_dir.is_dir():
+        for p in sorted(month_dir.glob("*.parquet")):
+            if ".tmp." in p.name:
+                continue
+            daily_paths.append(p)
+
+    if not daily_paths:
+        # No-op: ou já está compactado, ou não havia diários.
+        return None
+
+    # Lê e concatena (preserve schema canônico — _read_existing_table
+    # impõe schema v1.1.0 inclusive sobre eventuais escritos legacy).
+    tables: list[pa.Table] = [_read_existing_table(p) for p in daily_paths]
+    combined = pa.concat_tables(tables, promote_options="default")
+    # Dedup defensivo (cheap — INV-2 garante 1ª ocorrência preservada).
+    combined = dedup_table_vectorized(combined)
+    combined = combined.sort_by(
+        [("timestamp_ns", "ascending"), ("sequence_within_ns", "ascending")]
+    )
+
+    metadata = _build_metadata(combined, dll_version=dll_version, chunk_id=None)
+    combined = combined.replace_schema_metadata(metadata)
+
+    monthly_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = monthly_path.with_name(f"{monthly_path.name}.tmp.{uuid.uuid4().hex}")
+
+    try:
+        with pq.ParquetWriter(
+            tmp_path,
+            combined.schema,
+            compression=_COMPRESSION,
+            use_dictionary=_USE_DICTIONARY,
+            write_statistics=_WRITE_STATISTICS,
+        ) as writer:
+            writer.write_table(combined, row_group_size=_ROW_GROUP_SIZE)
+
+        fd = os.open(str(tmp_path), os.O_RDWR)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        checksum = compute_sha256_streaming(tmp_path)
+        file_size = tmp_path.stat().st_size
+
+        _fsync_directory(monthly_path.parent)
+        os.replace(tmp_path, monthly_path)
+        _fsync_directory(monthly_path.parent)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                _LOG.warning(
+                    "compact_month.tmp_cleanup_failed",
+                    extra={"tmp": str(tmp_path)},
+                )
+        raise
+
+    # Cleanup: DELETE diários (best-effort — orfãos seriam capturados por
+    # reconcile e re-tentados num boot futuro).
+    for p in daily_paths:
+        try:
+            p.unlink()
+        except OSError as exc:
+            _LOG.warning(
+                "compact_month.daily_cleanup_failed",
+                extra={"path": str(p), "err": str(exc)},
+            )
+
+    # Diretório {MM}/ provavelmente está vazio agora — tenta rmdir (no-op
+    # se há outros arquivos, ex.: tmp residual).
+    try:
+        if month_dir.is_dir() and not any(month_dir.iterdir()):
+            month_dir.rmdir()
+    except OSError:
+        pass
+
+    if combined.num_rows == 0:
+        first_ts_ns = 0
+        last_ts_ns = 0
+    else:
+        ts_col = combined.column("timestamp_ns")
+        first_ts_ns = int(pa.compute.min(ts_col).as_py())
+        last_ts_ns = int(pa.compute.max(ts_col).as_py())
+
+    _LOG.info(
+        "compact_month.success",
+        extra={
+            "symbol": symbol,
+            "exchange": exchange,
+            "year": year,
+            "month": month,
+            "row_count": combined.num_rows,
+            "daily_files_consumed": len(daily_paths),
+            "file_size_bytes": file_size,
+        },
+    )
+
+    return WriteResult(
+        path=monthly_path,
+        row_count=combined.num_rows,
+        first_ts_ns=first_ts_ns,
+        last_ts_ns=last_ts_ns,
+        checksum_sha256=checksum,
+        file_size_bytes=file_size,
+    )
+
+
 __all__ = [
     "ParquetWriter",
     "WriteResult",
+    "compact_month",
 ]

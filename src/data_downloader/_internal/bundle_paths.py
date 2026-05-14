@@ -52,6 +52,7 @@ from pathlib import Path
 __all__ = [
     "asset_path",
     "bundle_root",
+    "default_data_dir",
     "exe_dir",
     "is_frozen",
     "user_data_dir",
@@ -231,3 +232,24 @@ def user_env_path() -> Path:
         True
     """
     return user_data_dir() / ".env"
+
+
+def default_data_dir() -> Path:
+    """Pasta de dados default — ``user_data_dir() / "data"``.
+
+    Single source of truth para o ``data_dir`` da UI (DownloadScreen,
+    CatalogScreen, SettingsScreen) e do CLI quando o usuário não passa
+    ``--data-dir`` explícito.
+
+    v1.3.0 (Bug 2 fix): antes a UI tinha 3 caminhos divergentes para
+    o data_dir default (DownloadScreen usava ``user_data_dir()/"data"``,
+    mas CatalogScreen e SettingsScreen caíam em ``Path.cwd()/"data"``).
+    Quando o ``.exe`` instalado é lançado pelo atalho do Setup, o ``cwd``
+    é tipicamente ``System32`` → CatalogScreen abria ``System32\\data\\``
+    (inexistente) e mostrava lista vazia mesmo com downloads concluídos.
+    Esta função consolida o caminho para que os 3 lugares concordem.
+
+    Returns:
+        ``user_data_dir() / "data"`` (ex.: ``~/.data-downloader/data``).
+    """
+    return user_data_dir() / "data"

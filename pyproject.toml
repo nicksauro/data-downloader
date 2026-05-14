@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data_downloader"
-version = "1.2.0"
+version = "1.3.0"
 description = "Downloader de histórico de ativos via ProfitDLL — fundação para projetos futuros"
 requires-python = ">=3.12"
 authors = [{name = "Squad data-downloader"}]

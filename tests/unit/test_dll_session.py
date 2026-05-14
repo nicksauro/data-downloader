@@ -45,6 +45,10 @@ def _reset_session(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(session_mod, "_DLL_INSTANCE", None, raising=False)
     monkeypatch.setattr(session_mod, "_DLL_INIT_KWARGS", {}, raising=False)
     monkeypatch.setattr(session_mod, "_ATEXIT_REGISTERED", True, raising=False)  # evita atexit real
+    # v1.3.0 Wave 2A: reset observer state.
+    monkeypatch.setattr(session_mod, "_OBSERVERS", [], raising=False)
+    monkeypatch.setattr(session_mod, "_DLL_STATE", "idle", raising=False)
+    monkeypatch.setattr(session_mod, "_DLL_VERSION", "—", raising=False)
     _FakeProfitDLL.instances.clear()
     # Patch ProfitDLL importado dentro de get_dll.
     monkeypatch.setattr("data_downloader.dll.wrapper.ProfitDLL", _FakeProfitDLL)
@@ -52,6 +56,9 @@ def _reset_session(monkeypatch: pytest.MonkeyPatch):
     # Cleanup defensivo.
     session_mod._DLL_INSTANCE = None
     session_mod._DLL_INIT_KWARGS = {}
+    session_mod._OBSERVERS = []
+    session_mod._DLL_STATE = "idle"
+    session_mod._DLL_VERSION = "—"
 
 
 def test_get_dll_returns_same_instance() -> None:
@@ -175,3 +182,184 @@ def test_get_dll_stores_init_kwargs() -> None:
     }
     session_mod.shutdown_dll()
     assert session_mod._DLL_INIT_KWARGS == {}
+
+
+# =====================================================================
+# v1.3.0 Wave 2A — Observer pattern + lifecycle states
+# =====================================================================
+
+
+def test_register_and_unregister_observer() -> None:
+    """Observer registrado recebe transições; unregister cessa entrega."""
+    events: list[tuple[str, str]] = []
+
+    def _cb(state: str, version: str) -> None:
+        events.append((state, version))
+
+    session_mod.register_state_observer(_cb)
+    session_mod._set_state("connecting", "")
+    session_mod._set_state("connected", "1.2.3")
+
+    assert ("connecting", "—") in events
+    assert ("connected", "1.2.3") in events
+
+    session_mod.unregister_state_observer(_cb)
+    events.clear()
+    session_mod._set_state("idle", "")
+    assert events == []
+
+
+def test_register_observer_idempotent() -> None:
+    """Registrar a MESMA referência 2x não duplica entregas."""
+    events: list[tuple[str, str]] = []
+
+    def _cb(state: str, version: str) -> None:
+        events.append((state, version))
+
+    session_mod.register_state_observer(_cb)
+    session_mod.register_state_observer(_cb)  # noop
+    session_mod._set_state("connecting", "")
+    assert events == [("connecting", "—")]
+
+
+def test_unregister_unknown_observer_is_noop() -> None:
+    """Remover callback não registrado não levanta."""
+
+    def _cb(state: str, version: str) -> None:  # pragma: no cover
+        pass
+
+    # Sem registro prévio — deve ser no-op.
+    session_mod.unregister_state_observer(_cb)
+
+
+def test_set_state_calls_all_observers() -> None:
+    """``_set_state`` chama TODOS os observers em ordem registrada."""
+    events_a: list[str] = []
+    events_b: list[str] = []
+    events_c: list[str] = []
+
+    session_mod.register_state_observer(lambda s, v: events_a.append(s))
+    session_mod.register_state_observer(lambda s, v: events_b.append(s))
+    session_mod.register_state_observer(lambda s, v: events_c.append(s))
+
+    session_mod._set_state("downloading", "WDOFUT")
+
+    assert events_a == ["downloading"]
+    assert events_b == ["downloading"]
+    assert events_c == ["downloading"]
+
+
+def test_observer_exception_does_not_break_others() -> None:
+    """Um observer que levanta NÃO interrompe os outros."""
+    events: list[str] = []
+
+    def _bad(state: str, version: str) -> None:
+        raise RuntimeError("boom")
+
+    def _good(state: str, version: str) -> None:
+        events.append(state)
+
+    session_mod.register_state_observer(_bad)
+    session_mod.register_state_observer(_good)
+    # Não deve levantar.
+    session_mod._set_state("connecting", "")
+    assert events == ["connecting"]
+
+
+def test_current_state_reflects_transitions() -> None:
+    """``current_state`` retorna o snapshot atual ``(state, version)``."""
+    assert session_mod.current_state() == ("idle", "—")
+    session_mod._set_state("connecting", "")
+    assert session_mod.current_state()[0] == "connecting"
+    session_mod._set_state("connected", "4.0.0.34")
+    assert session_mod.current_state() == ("connected", "4.0.0.34")
+
+
+def test_get_dll_emits_connecting_then_connected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lifecycle: ``get_dll`` emite ``connecting`` → ``connected``."""
+    events: list[tuple[str, str]] = []
+
+    session_mod.register_state_observer(lambda s, v: events.append((s, v)))
+
+    # FakeDLL sem ``dll_version`` → version = "—".
+    session_mod.get_dll(market_only=True, **_FAKE_CREDS)
+
+    states = [e[0] for e in events]
+    assert "connecting" in states
+    assert "connected" in states
+    # Connecting vem antes de connected.
+    assert states.index("connecting") < states.index("connected")
+
+
+def test_get_dll_emits_error_on_init_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Init falhou → emite ``error`` (não ``connected``)."""
+
+    class _FailingDLL(_FakeProfitDLL):
+        def initialize_market_only(self, **kwargs: object) -> None:
+            raise RuntimeError("init boom")
+
+    monkeypatch.setattr("data_downloader.dll.wrapper.ProfitDLL", _FailingDLL)
+
+    events: list[str] = []
+    session_mod.register_state_observer(lambda s, v: events.append(s))
+
+    with pytest.raises(RuntimeError, match="init boom"):
+        session_mod.get_dll(market_only=True, **_FAKE_CREDS)
+
+    assert "connecting" in events
+    assert "error" in events
+    assert "connected" not in events
+
+
+def test_shutdown_emits_idle() -> None:
+    """``shutdown_dll`` emite ``idle`` no final."""
+    session_mod.get_dll(market_only=True, **_FAKE_CREDS)
+
+    events: list[str] = []
+    session_mod.register_state_observer(lambda s, v: events.append(s))
+
+    session_mod.shutdown_dll()
+    assert "idle" in events
+
+
+def test_set_downloading_helper_sets_state() -> None:
+    """``set_downloading(symbol)`` emite estado ``downloading`` com symbol como version."""
+    events: list[tuple[str, str]] = []
+    session_mod.register_state_observer(lambda s, v: events.append((s, v)))
+
+    session_mod.set_downloading("WDOFUT")
+    assert ("downloading", "WDOFUT") in events
+    state, version = session_mod.current_state()
+    assert state == "downloading"
+    assert version == "WDOFUT"
+
+
+def test_set_state_thread_safe() -> None:
+    """Stress test — múltiplas threads chamando ``_set_state`` simultaneamente."""
+    import threading as _threading
+
+    events: list[tuple[str, str]] = []
+    lock = _threading.Lock()
+
+    def _cb(s: str, v: str) -> None:
+        with lock:
+            events.append((s, v))
+
+    session_mod.register_state_observer(_cb)
+
+    def _worker(state: str, n: int) -> None:
+        for _ in range(n):
+            session_mod._set_state(state, "v")
+
+    threads = [
+        _threading.Thread(target=_worker, args=("connecting", 50)),
+        _threading.Thread(target=_worker, args=("downloading", 50)),
+        _threading.Thread(target=_worker, args=("connected", 50)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    # Cada thread emite 50 eventos → 150 totais (sem perdas).
+    assert len(events) == 150

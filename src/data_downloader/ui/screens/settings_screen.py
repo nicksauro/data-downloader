@@ -847,8 +847,13 @@ class SettingsScreen(QWidget):
             )
             self._dll_empty_hint.setText(steps)
 
-        # Data dir: env or default.
-        data_dir = os.environ.get("DATA_DOWNLOADER_DATA_DIR") or str(Path.cwd() / "data")
+        # Data dir: env or default. (Bug 2 fix v1.3.0: usar `default_data_dir()`
+        # em vez de `Path.cwd()/data` — Settings/Catalog/Download agora concordam
+        # no path canônico `user_data_dir()/data`. `Path.cwd()` é frágil em frozen
+        # instalado via Setup — o cwd ao lançar via atalho pode ser System32.)
+        from data_downloader._internal.bundle_paths import default_data_dir
+
+        data_dir = os.environ.get("DATA_DOWNLOADER_DATA_DIR") or str(default_data_dir())
         self._data_dir_edit.setText(data_dir)
         self._refresh_storage_status(Path(data_dir))
 

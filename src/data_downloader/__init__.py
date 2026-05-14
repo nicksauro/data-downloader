@@ -37,7 +37,7 @@ from importlib.metadata import version as _pkg_version
 # É a source-of-truth canônica em dev mode (onde dist-info pode estar stale)
 # e em frozen builds onde importlib.metadata pode não enxergar a distribuição
 # (PyInstaller sem .dist-info bundled).
-_PACKAGE_VERSION = "1.2.0"
+_PACKAGE_VERSION = "1.3.0"
 
 
 def _resolve_version() -> str:

@@ -3,7 +3,7 @@
 > Downloader de histórico de ativos via **ProfitDLL** (Nelogica).
 > Fundação para todos os projetos de quant/backtest/research que vierem.
 
-**Versão:** 1.2.0 (download robusto + períodos extensos — desde 2018)
+**Versão:** 1.3.0 (UX excepcional + parquet híbrido)
 **Plataforma:** Windows x64 (a DLL é Windows-only)
 **Squad:** 10 agentes — vide `agents/`
 
@@ -11,12 +11,14 @@
 
 ## ✨ What's new
 
-**v1.2.0 — download robusto + períodos extensos (BIG COUNCIL round 3):**
-- 🎯 **`translate_failures` ≈ 0** — a ProfitDLL não perde mais trades. O callback V2 traduz o trade **dentro do escopo do callback** (o handle só é válido ali — Q-DRIFT-40); antes ~0.01% dos trades eram perdidos por handle stale → access violation interna da DLL. + retry de chunk se `completeness_pct < 99.99%`.
-- 🔁 **Resume funcional** — `--resume <job_id>` (era no-op) + auto-resume + `download(resume_job_id=...)` na API; re-rodar o mesmo range é idempotente e barato (baixa só o que falta — `chunk_ledger` diário, fim da perda silenciosa do resume mensal).
-- 📅 **Períodos extensos** — baixar desde 2018: `_PARTITION_ROW_LIMIT` 5M→50M (mês movimentado não aborta mais); PeriodPicker com presets ("Tudo desde 2018" / "Ano completo: YYYY" / ...) + aviso de duração; ProgressCard com ETA / tempo decorrido / throughput / trades baixados / trades perdidos / chunks com retry; banner "Retomar download" ao reabrir o app.
-- 🧹 **Dead-code removido** — `orchestrator/broker/` (~2034 LOC, multi-process pós-ADR-022 que gravava dados falsos via mock factory); `ui/shortcuts.py` (folclore); `BTN_REPEAT_LAST` órfão.
-- ✅ Suite: ruff 0 / mypy --strict 0 (87 files) / **1194 unit + 508 integration+property, 0 fail**.
+**v1.3.0 — UX excepcional + parquet híbrido (BIG COUNCIL round 4):**
+- 📦 **Parquet híbrido mensal + diário** — `{ex}/{sym}/{YYYY}/{MM}.parquet` quando o mês está completo, `{ex}/{sym}/{YYYY}/{MM}/{DD}.parquet` durante o mês corrente / downloads parciais / ranges intra-mês. Auto-compact ao fechar um mês (`maybe_compact_month` atômico: tmp + `os.replace` + fsync + SHA256 + recovery na boot via tabela `compactions`). ADR-025. Pichau directive: "rigidamente implementar e testar" → T1-T9 + property test Hypothesis (50 seeds, 3 invariantes: conservação, exclusividade mútua, consistência catálogo↔FS). (Backtest fica feliz: read único do mês fechado, granularidade diária no mês corrente.)
+- 🐛 **5 bugs corrigidos:** catálogo vazio após download via UI (data_dir mismatch — `Path.cwd()` em vez de `user_data_dir()`); DLL "desconectada" no statusbar durante download (agora observer 5-state em tempo real); cancelar agora avisa "aguardando dia atual terminar (~60s)"; ícone do projeto no exe/atalho/taskbar; atalho desktop criado pelo Setup (`{commondesktop}`→`{autodesktop}`, era read-only em non-admin).
+- ✨ **UX excepcional:** onboarding wizard de 3 telas no 1º run (Welcome / Credenciais / Done); StorageIndicator no statusbar (espaço livre, cores semânticas verde/amarelo/vermelho); ProgressCard polish (hierarquia tipográfica, ícones, cores dinâmicas, segmented progress bar verde/amarelo); CTA "Ver no catálogo" ao concluir.
+- ⚡ **Performance:** `_ROW_GROUP_SIZE` 100k→1M (+30% parquet write throughput); `gc.freeze()` entre chunks (7-12% menos tempo total em downloads de 30+ dias); write-once quando partition tem `day` (sem read-merge-rewrite O(N²) — 700ms→50ms por dia de WDOFUT).
+- ✅ Suite: ruff 0 / mypy --strict 0 (**90 files**) / **1222 unit + 494 integration + 65 property, 0 fail**.
+
+**v1.2.0 (anterior):** translate_failures≈0 (Q-DRIFT-40), resume funcional, chunk_ledger diário, períodos extensos desde 2018, dead-code removed (~2034 LOC broker).
 
 **v1.1.1 (hotfix anterior):** crash do app GUI ao "Baixar" — DLL singleton (Q08-E) + stdio em frozen windowed (Q-DRIFT-39).
 **v1.1.0 (base):** consolidação v1.0.0→v1.0.7 + BIG COUNCIL rounds 1-2; bundle 56% menor; `--healthcheck`; ADR-023 (chunk 1d); ADR-018/021/024.
@@ -25,9 +27,9 @@ Detalhes completos: [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
-## 📥 Install (v1.1.0)
+## 📥 Install (v1.3.0)
 
-A v1.1.0 é distribuída via **Setup.exe** (InnoSetup, não-assinado na v1.1.0 — code signing planejado para v1.2.0). Baixe da release page:
+A v1.3.0 é distribuída via **Setup.exe** (InnoSetup, ainda não-assinado — code signing diferido para v1.4.0). Baixe da release page:
 
 ```
 https://github.com/nicksauro/data-downloader/releases/latest

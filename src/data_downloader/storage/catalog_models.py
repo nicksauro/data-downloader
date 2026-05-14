@@ -48,12 +48,17 @@ class Job:
 
 @dataclass(frozen=True)
 class Partition:
-    """Linha de ``partitions`` (SCHEMA.md §5.3).
+    """Linha de ``partitions`` (SCHEMA.md §5.3 + ADR-025 §2.1).
 
     ``partition_path`` é a chave primária e contém o caminho RELATIVO a
-    ``data/history/`` (ex.: ``F/WDOJ26/2026/03.parquet``). O catálogo
-    nunca persiste paths absolutos — eles dependem de onde ``data_dir``
-    foi montado.
+    ``data/history/`` (ex.: ``F/WDOJ26/2026/03.parquet`` para mensal,
+    ``F/WDOJ26/2026/03/15.parquet`` para diário). O catálogo nunca persiste
+    paths absolutos — eles dependem de onde ``data_dir`` foi montado.
+
+    ADR-025 (v1.3.0+): ``day`` é ``None`` para partições MENSAIS compactadas
+    e ``1..31`` para partições DIÁRIAS parciais. Coexistência durante o mês
+    corrente (vários diários) é normal; após ``maybe_compact_month`` só o
+    mensal sobrevive.
     """
 
     partition_path: str
@@ -69,6 +74,7 @@ class Partition:
     file_size_bytes: int
     written_at: datetime
     job_id: str | None = None
+    day: int | None = None
 
 
 @dataclass(frozen=True)
