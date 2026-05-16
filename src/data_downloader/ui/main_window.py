@@ -158,6 +158,17 @@ class MainWindow(QMainWindow):
         # Atalhos globais.
         self._register_global_shortcuts()
 
+        # Story 4.31 AC3: ativa o event filter context-aware do Esc
+        # (override de :meth:`eventFilter` mais abaixo). Sem este install,
+        # o ``eventFilter`` nunca recebia eventos e o Esc só fechava
+        # modais nativos (default Qt). Instalado na QApplication para
+        # capturar key events de qualquer widget filho (sidebar, screens).
+        from PySide6.QtWidgets import QApplication
+
+        _app_instance = QApplication.instance()
+        if _app_instance is not None:
+            _app_instance.installEventFilter(self)
+
         # Default = DownloadScreen.
         self.set_active_screen(SCREEN_DOWNLOAD)
 
