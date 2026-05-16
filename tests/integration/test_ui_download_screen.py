@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -113,7 +112,7 @@ def test_clicking_download_with_invalid_symbol_shows_error_toast(download_screen
 
 
 def test_clicking_download_with_valid_inputs_transitions_to_loading(
-    download_screen, qtbot, monkeypatch
+    download_screen, qtbot, monkeypatch, tmp_path
 ):
     """Form válido + click → estado=loading + signal de start emitido."""
     # Mock ``public_api.download`` — sem isto, o worker QThread do adapter
@@ -145,9 +144,13 @@ def test_clicking_download_with_valid_inputs_transitions_to_loading(
 
     download_screen._request_start.connect(on_request)
 
+    # Story 4.31 AC11: usa fixture ``tmp_path`` (per-test scratch dir) em vez
+    # de ``Path.cwd() / "data"`` — elimina dependência de cwd no test order
+    # e evita poluir o repo se o teste rodar fora do harness padrão.
+    data_dir_path = tmp_path / "data"
     download_screen._symbol_picker.set_value("WDOJ26")
     download_screen._period_picker.set_range(date(2026, 3, 1), date(2026, 3, 31))
-    download_screen._folder_edit.setText(str(Path.cwd() / "data"))
+    download_screen._folder_edit.setText(str(data_dir_path))
 
     download_screen._on_download_clicked()
     qtbot.waitUntil(lambda: len(captured) > 0, timeout=2000)
@@ -157,7 +160,7 @@ def test_clicking_download_with_valid_inputs_transitions_to_loading(
     assert exchange == "F"
     assert start == date(2026, 3, 1)
     assert end == date(2026, 3, 31)
-    assert data_dir == Path.cwd() / "data"
+    assert data_dir == data_dir_path
     assert download_screen.is_download_active()
     assert download_screen.current_state() == "loading"
 
