@@ -95,6 +95,17 @@ def main() -> int:
     except Exception:
         pass
 
+    # Story 4.31 AC13: gc.freeze() boot-only — antes era chamado por job em
+    # Orchestrator.run() e o heap "permanente" do GC crescia
+    # monotonicamente em sessões longas da UI (vários downloads num mesmo
+    # .exe). Idempotente.
+    try:
+        from data_downloader._internal.gc_boot import freeze_once
+
+        freeze_once()
+    except Exception:
+        pass
+
     # Configurar logging (Story 2.9). Best-effort — UI não falha se logging
     # config falhar (caller pode estar em ambiente sem stderr).
     #

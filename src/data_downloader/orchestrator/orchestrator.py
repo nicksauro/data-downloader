@@ -419,18 +419,12 @@ class Orchestrator:
 
         metrics = OrchestratorMetrics(started_at=datetime.now(UTC))
 
-        # ADR-025 v1.3.0 Wave 3 (Pyro defesa 30-90h custo zero):
-        # ``gc.freeze`` move TODOS os objetos vivos atuais para a geração
-        # "permanente" — GC não os varre mais. Para um download longo
-        # (30-50h por símbolo por 7 anos), o módulo já tem milhões de
-        # objects-of-record (B3 calendar, schemas pyarrow, etc.) que nunca
-        # mudam; congelá-los reduz pausas de gc full-collection (que
-        # tipicamente cresceriam com o número de objects vivos).
-        # No-op semântico — apenas perf, sem risco funcional.
-        import contextlib as _contextlib_freeze
-
-        with _contextlib_freeze.suppress(Exception):
-            gc.freeze()
+        # Story 4.31 AC13: ``gc.freeze()`` foi movido para o boot do
+        # processo (cli.py / ui/app.py) — antes era chamado a cada
+        # Orchestrator.run() e o "permanente" GC heap crescia
+        # monotonicamente em processos longos com múltiplos jobs (UI:
+        # vários downloads num mesmo .exe). O motivo perf original
+        # (ADR-025 v1.3.0 Wave 3 — Pyro) continua válido em boot único.
 
         # v1.3.0 Wave 2A (Dex) — emite estado ``downloading`` ao iniciar o
         # run + lança state_monitor daemon que reage a desconexões da DLL
