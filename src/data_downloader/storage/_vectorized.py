@@ -40,9 +40,13 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from data_downloader.public_api.exceptions import IntegrityError
+from data_downloader.storage.partition import _VALID_EXCHANGES
 from data_downloader.storage.schema import TradeRecord, pyarrow_schema
 
-_VALID_EXCHANGES_LIST: list[str] = ["F", "B"]
+# List derivado do frozenset canônico em ``storage/partition.py`` (Story
+# 4.31 AC15 — single source-of-truth). Ordenação determinística para
+# manter o pa.array reproducível entre builds.
+_VALID_EXCHANGES_LIST: list[str] = sorted(_VALID_EXCHANGES)
 
 
 def trades_to_table_vectorized(trades: list[TradeRecord]) -> pa.Table:
