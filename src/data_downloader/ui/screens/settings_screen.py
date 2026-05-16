@@ -422,6 +422,8 @@ class SettingsScreen(QWidget):
         bottom_bar.setContentsMargins(0, 8, 0, 0)
         self._doctor_btn = QPushButton(format_msg("BTN_DOCTOR_FULL"), self)
         self._doctor_btn.setObjectName("doctorBtn")
+        # Story 4.31 AC10: nome acessível para Narrator/NVDA.
+        self._doctor_btn.setAccessibleName("Executar diagnóstico (Doctor)")
         self._doctor_btn.setMinimumSize(180, 36)
         # Story 4.9 (v1.0.3 hotfix — Owners Council B5): cabeia o botão
         # ao slot ``_on_doctor_clicked`` que invoca ``run_doctor_checks``
@@ -439,6 +441,8 @@ class SettingsScreen(QWidget):
         self._save_btn.setDefault(True)
         self._save_btn.setAutoDefault(True)
         self._save_btn.setToolTip(format_msg("BTN_SAVE_SETTINGS") or "Salvar")
+        # Story 4.31 AC10: nome acessível.
+        self._save_btn.setAccessibleName("Salvar configurações")
         self._save_btn.clicked.connect(self._on_save_clicked)
         bottom_bar.addWidget(self._save_btn)
 
@@ -510,6 +514,9 @@ class SettingsScreen(QWidget):
         self._dll_browse_btn = QPushButton(format_msg("BTN_DLL_BROWSE"), section)
         self._dll_browse_btn.setObjectName("dllBrowseBtn")
         self._dll_browse_btn.setToolTip(format_msg("TOOLTIP_DLL_BROWSE"))
+        # Story 4.31 AC10: nome acessível para Narrator/NVDA — o texto
+        # visível pode ser "...".
+        self._dll_browse_btn.setAccessibleName("Procurar arquivo da ProfitDLL")
         self._dll_browse_btn.clicked.connect(self._on_dll_browse_clicked)
         dll_path_row.addWidget(self._dll_browse_btn)
 
@@ -557,6 +564,8 @@ class SettingsScreen(QWidget):
         actions = QHBoxLayout()
         self._test_conn_btn = QPushButton(format_msg("BTN_TEST_CONNECTION"), section)
         self._test_conn_btn.setObjectName("testConnBtn")
+        # Story 4.31 AC10: nome acessível.
+        self._test_conn_btn.setAccessibleName("Testar conexão com a ProfitDLL")
         self._test_conn_btn.clicked.connect(self._on_test_connection_clicked)
         actions.addWidget(self._test_conn_btn)
 

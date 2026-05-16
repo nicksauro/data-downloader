@@ -301,6 +301,9 @@ class DownloadScreen(QWidget):
         self._download_btn.setProperty("variant", "primary")
         self._download_btn.setObjectName("downloadBtn")
         self._download_btn.setToolTip(format_msg("TIP_BTN_DOWNLOAD"))
+        # Story 4.31 AC10: nome acessível para Narrator/NVDA (botão tem
+        # texto descritivo, mas reforçamos para consistência cross-screen).
+        self._download_btn.setAccessibleName("Baixar histórico")
         self._download_btn.clicked.connect(self._on_download_clicked)
         self._download_btn.setMinimumWidth(240)
         self._download_btn.setMinimumHeight(44)

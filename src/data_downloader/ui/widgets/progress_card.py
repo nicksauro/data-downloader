@@ -413,6 +413,9 @@ class ProgressCard(QGroupBox):
         self._cancel_btn = QPushButton("⏹  " + format_msg("BTN_CANCEL"), self)
         self._cancel_btn.setProperty("variant", "destructive")
         self._cancel_btn.setToolTip(format_msg("TIP_BTN_CANCEL"))
+        # Story 4.31 AC10: nome acessível — o texto visível tem ícone
+        # unicode ⏹ que leitores de tela podem ler como "símbolo desconhecido".
+        self._cancel_btn.setAccessibleName("Cancelar download")
         self._cancel_btn.setMinimumHeight(40)
         # Felix nota: o stylesheet inline não sobrescreve variant=destructive
         # globalmente (QSS é mais específico no widget vs. inline) mas como
