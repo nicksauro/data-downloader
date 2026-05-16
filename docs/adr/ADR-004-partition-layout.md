@@ -1,10 +1,11 @@
 # ADR-004 — Particionamento `data/history/{exchange}/{symbol}/{year}/{month}.parquet`
 
-**Status:** accepted
+**Status:** superseded by ADR-025
 **Data:** 2026-05-03
 **Autor:** 🏛️ Aria
 **Consultados:** 💾 Sol, ⚡ Pyro
 **Supersedes:** —
+**Superseded-by:** ADR-025-parquet-per-day-hybrid.md (2026-05-13)
 **Related:** ADR-002 (storage stack)
 
 ---
