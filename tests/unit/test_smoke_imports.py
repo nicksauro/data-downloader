@@ -19,15 +19,33 @@ import pytest
 def test_root_package_exposes_version() -> None:
     """``data_downloader.__version__`` existe e bate com a source-of-truth.
 
-    Não enrijece um literal — deriva da constante canônica
-    ``_PACKAGE_VERSION`` (que por sua vez é mantida em sync com
-    ``pyproject.toml::project.version``). Isso evita a regressão recorrente
-    de o teste travar numa versão antiga após cada bump.
+    Story 4.31 AC4: source-of-truth canônica passa a ser
+    :func:`importlib.metadata.version` (lendo o ``pyproject.toml::project.version``
+    via dist-info), com fallback para o literal ``_PACKAGE_VERSION_FALLBACK``
+    quando metadata indisponível (frozen build sem dist-info). O teste
+    aceita qualquer um dos dois caminhos — o que valida é que o resolver
+    NÃO inventa string e usa o caminho documentado.
     """
-    from data_downloader import _PACKAGE_VERSION, __version__
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    from data_downloader import _PACKAGE_VERSION_FALLBACK, __version__
 
     assert isinstance(__version__, str)
-    assert __version__ == _PACKAGE_VERSION
+    # Caminho primário: importlib.metadata.version.
+    expected_from_metadata: str | None
+    try:
+        expected_from_metadata = _pkg_version("data_downloader")
+    except PackageNotFoundError:
+        try:
+            expected_from_metadata = _pkg_version("data-downloader")
+        except PackageNotFoundError:
+            expected_from_metadata = None
+    if expected_from_metadata is not None:
+        assert __version__ == expected_from_metadata
+    else:
+        # Fallback: literal de safety net.
+        assert __version__ == _PACKAGE_VERSION_FALLBACK
 
 
 @pytest.mark.smoke
