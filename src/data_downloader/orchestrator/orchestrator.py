@@ -50,6 +50,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from queue import Empty
 from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
@@ -1546,10 +1547,18 @@ class Orchestrator:
             while not stop_event.is_set():
                 try:
                     conn_type, result = state_queue.get(timeout=0.5)
-                except Exception:
-                    # Empty / timeout — continua polling. Esse é o caso
-                    # normal: state_queue só recebe eventos em transições
-                    # do servidor; ficamos parados na maior parte do tempo.
+                except Empty:
+                    # Timeout esperado — state_queue só recebe eventos em
+                    # transições do servidor; ficamos parados na maior parte
+                    # do tempo. Caso "normal" do loop.
+                    continue
+                except Exception as exc:
+                    # Story 4.31 AC12: outras exceções (queue.get pode
+                    # levantar runtime errors em casos exóticos, e.g. monkey
+                    # patching) NÃO devem ser silenciadas — diagnóstico ficava
+                    # cego antes. Logamos como warning e continuamos polling
+                    # (loop é defensivo, mas registramos para auditoria).
+                    log.warning("orchestrator.state_monitor.unexpected", exc_info=exc)
                     continue
 
                 log.info(
