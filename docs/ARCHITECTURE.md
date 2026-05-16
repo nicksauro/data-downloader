@@ -531,9 +531,14 @@ Spec completa em ADR-007a. Aqui só re-exporta como Protocol para ser importado 
 | ADR-015 | Multiprocess catalog coordination (broker process) | **REVOKED 2026-05-05** (superseded by ADR-022) |
 | ADR-016 | Windows code signing & SmartScreen | accepted (deferred to V1 release) |
 | ADR-017 | Auto-updater (tufup preliminar) | accepted (deferred to Epic 4) |
+| ADR-018 | Frozen-Mode Path Boundary (`bundle_paths` SSOT) | accepted (2026-05-06) |
 | ADR-019 | Schema as Contract — Never Drop Columns | proposed (2026-05-05) |
 | ADR-020 | Volume Completeness Invariant | proposed (2026-05-05) |
+| ADR-021 | `sys.frozen` Contract — Quem testa frozen mode | accepted (2026-05-06) |
 | ADR-022 | Single-Session Sequential Download Policy | accepted (2026-05-05) — supersedes ADR-015 |
+| ADR-023 | Uniform 1-day Chunk Policy | accepted (2026-05-07) |
+| ADR-024 | Catalog SQLite em `data/_internal/` | accepted (2026-05-07) |
+| ADR-025 | Parquet-per-day híbrido com auto-compactação mensal | accepted (2026-05-13) — supersedes ADR-004 |
 
 ---
 
