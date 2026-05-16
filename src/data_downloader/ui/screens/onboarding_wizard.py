@@ -428,7 +428,9 @@ class OnboardingWizard(QDialog):
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Warning)
         msg.setWindowTitle(format_msg("WAR_ONBOARDING_SKIPPED", field="title"))
-        msg.setText(format_msg("WAR_ONBOARDING_SKIPPED", field="title"))
+        # Story 4.31 AC14: setText recebia field="title" (bug) e o diálogo
+        # exibia título e corpo idênticos. Corrigido para field="detail".
+        msg.setText(format_msg("WAR_ONBOARDING_SKIPPED", field="detail"))
         msg.setInformativeText(format_msg("WAR_ONBOARDING_SKIPPED", field="detail"))
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
