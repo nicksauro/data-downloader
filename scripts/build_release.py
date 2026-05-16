@@ -567,6 +567,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
+    # Story 4.31 AC8 — Python pinning guard (R19 / ADR-009):
+    # PyInstaller bytecode + bundled stdlib são dependentes da minor
+    # version. requires-python>=3.12 em pyproject não é o bastante:
+    # build em 3.13/3.14 gera bundle que pode crashar no usuário final
+    # (ABI breaks, deprecated stdlib modules). Para garantir
+    # reproducibilidade bit-exata cross-build, exigimos 3.12.x explícito.
+    #
+    # Em ``--dry-run`` o guard é relaxado para warning porque dry-run
+    # NÃO invoca PyInstaller (apenas valida spec template + emite
+    # manifest stub para tests/integration). Builds reais continuam
+    # bloqueados.
+    if sys.version_info[:2] != (3, 12):
+        msg = (
+            f"build requires Python 3.12.x "
+            f"(current: {sys.version_info.major}.{sys.version_info.minor}). "
+            f"See R19 / ADR-009."
+        )
+        if args.dry_run:
+            print(f"[build_release] WARNING (dry-run): {msg}", file=sys.stderr)
+        else:
+            print(f"[build_release] ERROR: {msg}", file=sys.stderr)
+            return 1
+
     # 1. Resolve version + git context.
     try:
         version = args.version or _read_version_from_pyproject()
