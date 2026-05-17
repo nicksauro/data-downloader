@@ -941,46 +941,23 @@ class SettingsScreen(QWidget):
         self._dirty = False
 
     def _refresh_storage_status(self, data_dir: Path) -> None:
-        """Helper sincrono — mantido para testes que pré-existem (AC2).
+        """Story 4.27 AC2 — wrapper async para retrocompat.
 
-        ADR-029: NÃO chamar este método do MainThread em produção. Use
-        :meth:`_dispatch_storage_worker` (rota async via QThread). Este
-        helper continua existindo apenas como caller de testes que precisam
-        validar o comportamento sem orquestrar QThread + signals.
+        Antes de 4.27 esta função rodava ``shutil.disk_usage`` +
+        ``sqlite3.connect`` + ``COUNT(*)`` SÍNCRONO no MainThread (R11
+        violation P0-U3). Agora delega ao :class:`_StorageStatusWorker`
+        via :meth:`_dispatch_storage_worker`.
+
+        ADR-029: NÃO há mais I/O síncrono aqui. Esta API pública é mantida
+        apenas para back-compat de chamadores externos (nenhum teste atual
+        chama; conservada para evitar quebra futura).
         """
-        # sqlite3.connect + COUNT — Worker thread em produção (R11 OK).
-        # ADR-029: SQLite I/O → Worker, não Defer.
-        try:
-            usage = shutil.disk_usage(str(data_dir if data_dir.exists() else data_dir.parent))
-            free_gb = usage.free / (1024**3)
-            total_gb = usage.total / (1024**3)
-            self._free_space_label.setText(
-                format_msg(
-                    "LBL_STORAGE_FREE_SPACE",
-                    free_gb=f"{free_gb:.1f}",
-                    total_gb=f"{total_gb:.1f}",
-                )
-            )
-        except Exception:
-            self._free_space_label.setText("—")
-
-        # Catalog status — count partitions sem auto-reconcile (rápido).
-        db_path = data_dir / "_internal" / "catalog.db"
-        n_partitions = 0
-        if db_path.exists():
-            try:
-                import sqlite3
-
-                with sqlite3.connect(str(db_path)) as conn:
-                    cursor = conn.execute("SELECT COUNT(*) FROM partitions")
-                    n_partitions = int(cursor.fetchone()[0])
-            except Exception:
-                pass
-            self._catalog_status_label.setText(
-                format_msg("LBL_STORAGE_CATALOG_OK", n_partitions=n_partitions)
-            )
-        else:
-            self._catalog_status_label.setText(format_msg("LBL_STORAGE_CATALOG_OK", n_partitions=0))
+        # Worker thread — R11 OK. Dispara via QTimer.singleShot(0, ...)
+        # para garantir que o caller MainThread retorne imediatamente.
+        self._free_space_label.setText("—")
+        self._catalog_status_label.setText("—")
+        self._pending_storage_dispatch_dir = data_dir
+        QTimer.singleShot(0, self._dispatch_storage_worker)
 
     def _dispatch_storage_worker(self) -> None:
         """Story 4.27 AC2 (P0-U3) — kick-off do StorageStatusWorker.
