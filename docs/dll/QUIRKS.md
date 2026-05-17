@@ -1697,6 +1697,42 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ---
 
+## Q-DRIFT-41
+
+- **ID:** Q-DRIFT-41
+- **Status:** validado (Pichau report 2026-05-17 + diagnose Aria) — **FIX-APPLIED (2026-05-17)** via Story 4.29 (detecção proativa LogDesktop).
+- **Categoria:** lifecycle / autenticação / UX / silent-failure
+- **Severidade:** **HIGH** (UX bloqueante — usuário fica olhando spinner infinito ~990s sem mensagem clara; era hipótese ProfitChart concorrente até o root-cause real ser identificado)
+- **Título:** Servidor Nelogica responde `ActivationResult=MaxHID` ("Todos os seus logins estão em uso") ~178ms após login quando a licença está em uso em outro processo/máquina. A DLL marca `Profit Dll Valid=False` no `LogDesktop_YYYY_MM_DD.log` mas **NÃO emite o estado autoritativo `(MARKET_DATA, MARKET_CONNECTED=4)`** no state callback Python. Resultado: `wait_market_connected` drena `_state_queue` até timeout 300s × 3 retries (Story 2.12) = ~990s sem feedback acionável.
+- **Causa raiz:** o protocolo Nelogica trata MaxHID como uma classe de erro de **login** (não de market data) — o servidor enfileira a falha no log nativo da DLL mas não propaga via state callback (slot `TStateCallback`). O exemplo oficial Nelogica (`profitdll/Exemplo Python/main.py`) também não trata este caso; código de produção que apenas faz `wait_login → wait_market_connected` cai no caminho de timeout genérico.
+- **Workaround / fix (Story 4.29):** parse proativo do bloco `TInfoClientProcessor.ProcessLoginResult` no `LogDesktop_*.log` durante `_wait_market_connected_once`. Polling a cada 2s nos primeiros 30s (após grace de 1s pré-flush da DLL); se `ActivationResult == "MaxHID"` → raise `MaxHIDError(DLLInitError)` com 3 remedies prescritivos (fechar outras instâncias, desconectar HIDs no portal Nelogica, aguardar 5-30min). Detecção em <3s no caso típico vs ~990s do path legacy. UI mostra banner dedicado (`ERR_DLL_MAX_HID`) com 2 botões + link "Ver logs".
+- **Manual diz:** silencioso — Manual ProfitDLL §3 documenta `ActivationResult` como campo do retorno de `Login` mas não fala sobre o valor `MaxHID` nem que ele aparece **só** no LogDesktop quando o servidor recusa o login.
+- **Evidência:** `LogDesktop_2026_05_17.log` (Pichau, in-session 2026-05-17):
+  ```
+  17/05 11:40:19.197 : #Con#Info  TInfoClientProcessor.ProcessLoginResult:
+                                    ActivationResult=MaxHID
+                                    Mensagem="Todos os seus logins estão em uso"
+                                    HardLogout=True
+                                    LoginResult=MaxHID
+  ```
+- **Data descoberta:** 2026-05-17 (Pichau report + diagnose Aria, 95% confiança).
+- **Data fix:** 2026-05-17 (Story 4.29, modo autônomo — pendente smoke real Pichau confirmar banner visível e timing <5s).
+- **Aplica a stories:** 4.29 (este fix), 2.12 (retry policy do `wait_market_connected` — agora MaxHID atalha o retry).
+- **Refs:**
+  - `src/data_downloader/dll/log_reader.py` (parser do `LogDesktop_*.log`).
+  - `src/data_downloader/dll/wrapper.py` (`_wait_market_connected_once` — polling MaxHID; `_maybe_raise_maxhid`).
+  - `src/data_downloader/public_api/exceptions.py` (`MaxHIDError(DLLInitError)`).
+  - `src/data_downloader/ui/screens/download_screen.py` (banner + 2 botões + link "Ver logs").
+  - `src/data_downloader/ui/screens/settings_screen.py` (botão `BTN_OPEN_LOGS_FOLDER`).
+  - `src/data_downloader/ui/microcopy_loader.py` (`ERR_DLL_MAX_HID*`, `BTN_OPEN_LOGS_FOLDER`, `TOOLTIP_OPEN_LOGS_FOLDER`).
+  - `docs/release/INSTALL.md` §8 Troubleshooting (entrada Licença em uso).
+  - `docs/dll/PROFITDLL_KNOWLEDGE.md` §5 (códigos de erro + protocolo de detecção).
+  - `tests/unit/test_log_reader_maxhid.py` (15 unit tests do parser).
+  - `tests/integration/test_maxhid_detection.py` (5 integration tests do wrapper).
+  - [Q-DRIFT-02](#q-drift-02) (handshake flakiness — hipótese ProfitChart concorrente refutada antes deste root-cause).
+
+---
+
 ## Manutenção
 
 - **Adicionar quirk:** comando Nelo `*add-quirk {description}` OU edit manual aqui.

@@ -20,6 +20,11 @@ stories futuras (1.4 ``DiskFull``/``IntegrityError``, 1.6 ``InvalidContract``,
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
 __all__ = [
     "ConnectionLost",
     "DLLInitError",
@@ -28,6 +33,7 @@ __all__ = [
     "DownloadError",
     "IntegrityError",
     "InvalidContract",
+    "MaxHIDError",
     "OperationCancelled",
 ]
 
@@ -45,6 +51,10 @@ _PUBLIC_ERROR_MICROCOPY_ID: dict[str, str] = {
     "IntegrityError": "ERR_CATALOG_DRIFT",
     "OperationCancelled": "SUC_CANCEL_DONE",
     "ConnectionLost": "ERR_CONNECTION_LOST",
+    # Story 4.29 — MaxHID detection (DLL nativa reporta ActivationResult=
+    # MaxHID quando licença Nelogica está em uso em outro processo). Microcopy
+    # ID dedicado prescreve remedies via portal Nelogica + reinício.
+    "MaxHIDError": "ERR_DLL_MAX_HID",
     "DataDownloaderError": "ERR_DLL_GENERIC",
 }
 
@@ -261,3 +271,97 @@ class ConnectionLost(DataDownloaderError):  # noqa: N818  ADR-011 canonical name
     Story 2.11 — primeira implementação (traduzido de
     :class:`_DLLDisconnected` interno via adapter).
     """
+
+
+# ---------------------------------------------------------------------
+# Story 4.29 — MaxHID detection (DLL nativa reporta licença em uso).
+# ---------------------------------------------------------------------
+
+
+class MaxHIDError(DLLInitError):
+    """Servidor Nelogica recusou login com ``ActivationResult=MaxHID``.
+
+    Story 4.29 — UX fix do bug Pichau 2026-05-17. A DLL nativa Nelogica
+    grava ``TInfoClientProcessor.ProcessLoginResult`` no LogDesktop
+    quando o servidor de autenticação recusa o login porque **todos
+    os HIDs (computadores/sessões) da licença já estão em uso**. A DLL
+    marca ``Profit Dll Valid=False`` e NUNCA emite o estado
+    ``(MARKET_DATA, MARKET_CONNECTED=4)`` esperado pelo Python — sem
+    detecção proativa, :meth:`ProfitDLL.wait_market_connected` espera
+    o timeout completo (3 retries x 300s, ~990s) com spinner infinito.
+
+    Detecção: :func:`data_downloader.dll.log_reader.parse_login_result_from_log`
+    lê o bloco em <1s pós-login; se ``activation_result == "MaxHID"``,
+    o wrapper raise esta exception em vez de seguir o path legacy
+    (``DLLInitError(NL_WAITING_SERVER)`` genérico).
+
+    Subclasse de :class:`DLLInitError` (compatibilidade com adapters
+    existentes que tratam ``except DLLInitError``). ``code=-1`` (sentinela
+    sem NL_* equivalente direto), ``name="MAX_HID"``.
+
+    Remedies prescritivos (microcopy ``ERR_DLL_MAX_HID``):
+
+    1. Feche o ProfitChart e qualquer outra instância do data-downloader
+       (em qualquer máquina).
+    2. Acesse https://www.nelogica.com.br/area-cliente e desconecte
+       todos os HIDs ativos.
+    3. Aguarde 5-30min e tente de novo; se persistir, abra ticket em
+       suporte@nelogica.com.br com assunto "licença travada em MaxHID".
+
+    Attributes:
+        activation_result: Valor literal do servidor (``"MaxHID"``).
+        server_message: Texto humanizado do servidor (ex.: ``"Todos os
+            seus logins estão em uso"``).
+        timestamp: Datetime BRT naive do bloco no LogDesktop (``None``
+            se timestamp não pôde ser parseado).
+
+    Microcopy UI (MICROCOPY_CATALOG.md §5 + Uma sign-off Story 4.29):
+        - Título: "Licença Nelogica em uso"
+        - Detalhe: "Sua chave de licença Nelogica está em uso em outro
+          computador ou sessão..."
+        - Ação primária: "Tentar de novo"
+        - Ação secundária: "Abrir portal Nelogica"
+    """
+
+    def __init__(
+        self,
+        activation_result: str,
+        server_message: str,
+        timestamp: datetime | None,
+        *,
+        cause: Exception | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        # ``message`` carrega o microcopy ID dedicado como prefixo — UI
+        # parsing ("ID: detail") dispara lookup direto via MSG.get; sem
+        # depender do mapeamento NL_*. Padrão alinhado ao hotfix v1.1.0
+        # ``ERR_DLL_MARKET_RETRY_EXHAUSTED`` (Felix+Aria Story 4.21).
+        msg = (
+            "ERR_DLL_MAX_HID: Licenca Nelogica em uso "
+            f"(ActivationResult={activation_result!r}, server_message="
+            f"{server_message!r}). Remedies: 1) Feche ProfitChart e outras "
+            "instancias do data-downloader; 2) Acesse "
+            "https://www.nelogica.com.br/area-cliente e desconecte HIDs "
+            "ativos; 3) Aguarde 5-30min e tente de novo. Suporte: "
+            "suporte@nelogica.com.br ('licenca travada em MaxHID')."
+        )
+        merged_details: dict[str, object] = {
+            "activation_result": activation_result,
+            "server_message": server_message,
+            "timestamp": timestamp.isoformat() if timestamp is not None else None,
+        }
+        if details:
+            merged_details.update(details)
+        # ``code=-1`` sentinela (sem NL_* equivalente direto). ``name="MAX_HID"``
+        # é um identificador simbólico interno para logs/structlog — adapters
+        # legacy podem inspecionar via ``exc.name`` se quiserem.
+        super().__init__(
+            -1,
+            "MAX_HID",
+            msg,
+            cause=cause,
+            details=merged_details,
+        )
+        self.activation_result = activation_result
+        self.server_message = server_message
+        self.timestamp = timestamp

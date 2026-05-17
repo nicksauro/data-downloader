@@ -331,10 +331,43 @@ class DownloadScreen(QWidget):
         self._error_detail.setWordWrap(True)
         layout.addWidget(self._error_detail)
 
+        # Story 4.29 — area de remedies prescritivos (3 linhas numeradas).
+        # Hidden por default; _on_error popula quando msg_id=ERR_DLL_MAX_HID.
+        # Padrao similar ao success card details (Hotfix v1.1.0 — Felix+Uma).
+        self._error_remedy_1 = QLabel("", card)
+        self._error_remedy_1.setObjectName("errorRemedy1")
+        self._error_remedy_1.setWordWrap(True)
+        self._error_remedy_1.setVisible(False)
+        layout.addWidget(self._error_remedy_1)
+
+        self._error_remedy_2 = QLabel("", card)
+        self._error_remedy_2.setObjectName("errorRemedy2")
+        self._error_remedy_2.setWordWrap(True)
+        self._error_remedy_2.setVisible(False)
+        layout.addWidget(self._error_remedy_2)
+
+        self._error_remedy_3 = QLabel("", card)
+        self._error_remedy_3.setObjectName("errorRemedy3")
+        self._error_remedy_3.setWordWrap(True)
+        self._error_remedy_3.setVisible(False)
+        layout.addWidget(self._error_remedy_3)
+
         self._error_action = QLabel("", card)
         self._error_action.setProperty("role", "muted")
         self._error_action.setWordWrap(True)
         layout.addWidget(self._error_action)
+
+        # Story 4.29 — link "Ver logs" (AC6). Abre <install>/_internal/Logs/.
+        # QLabel com richtext clicavel — sem botao para nao competir com os 2
+        # botoes principais. Hidden por default; _on_error mostra apenas em
+        # MaxHID (auxiliar para suporte tecnico).
+        self._error_logs_link = QLabel("", card)
+        self._error_logs_link.setObjectName("errorLogsLink")
+        self._error_logs_link.setProperty("role", "muted")
+        self._error_logs_link.setOpenExternalLinks(False)
+        self._error_logs_link.linkActivated.connect(self._on_open_logs_folder_link)
+        self._error_logs_link.setVisible(False)
+        layout.addWidget(self._error_logs_link)
 
         layout.addStretch(1)
 
@@ -351,6 +384,17 @@ class DownloadScreen(QWidget):
         self._open_settings_btn.clicked.connect(self.open_settings_requested.emit)
         self._open_settings_btn.setVisible(False)
         button_row.addWidget(self._open_settings_btn)
+
+        # Story 4.29 — botao secundario externo "Abrir portal Nelogica".
+        # Hidden por default; _on_error mostra apenas em MaxHID. Mesma posicao
+        # logica do "Abrir Settings" (ambos sao secundarios pre-retry).
+        self._open_portal_btn = QPushButton(format_msg("ERR_DLL_MAX_HID_ACTION_SECONDARY"), card)
+        self._open_portal_btn.setObjectName("openPortalBtn")
+        self._open_portal_btn.setProperty("variant", "secondary")
+        self._open_portal_btn.setToolTip("Abre https://www.nelogica.com.br/area-cliente no browser")
+        self._open_portal_btn.clicked.connect(self._on_open_portal_clicked)
+        self._open_portal_btn.setVisible(False)
+        button_row.addWidget(self._open_portal_btn)
 
         retry_btn = QPushButton(format_msg("BTN_RETRY"), card)
         retry_btn.setProperty("variant", "primary")
@@ -843,20 +887,78 @@ class DownloadScreen(QWidget):
         self._error_detail.setText(detail)
         self._error_action.setText(action)
 
+        # Story 4.29 — banner especifico para MaxHID. Detectado via msg_id
+        # canonico (resolvido acima a partir de DataDownloaderError.humanized_
+        # message OU prefixo "ERR_DLL_MAX_HID:" no error_message). Renderiza:
+        # - 3 remedies numerados (visiveis)
+        # - link "Ver logs" -> abre <install>/_internal/Logs/
+        # - botao secundario "Abrir portal Nelogica" no button_row
+        # Em outros erros, esses widgets ficam hidden (idempotente em RETRY).
+        is_max_hid = msg_id == "ERR_DLL_MAX_HID"
+        if is_max_hid:
+            try:
+                from data_downloader.ui.microcopy_loader import format_msg as _fm
+
+                self._error_remedy_1.setText(_fm("ERR_DLL_MAX_HID_REMEDY_1"))
+                self._error_remedy_2.setText(_fm("ERR_DLL_MAX_HID_REMEDY_2"))
+                self._error_remedy_3.setText(_fm("ERR_DLL_MAX_HID_REMEDY_3"))
+                # Richtext clicavel — href="logs" intercepta no slot do label.
+                self._error_logs_link.setText('<a href="logs" style="color:#7CC1FF;">Ver logs</a>')
+            except Exception:  # pragma: no cover defensive
+                pass
+        self._error_remedy_1.setVisible(is_max_hid)
+        self._error_remedy_2.setVisible(is_max_hid)
+        self._error_remedy_3.setVisible(is_max_hid)
+        self._error_logs_link.setVisible(is_max_hid)
+        self._open_portal_btn.setVisible(is_max_hid)
+
         # Wave 3 v1.1.0 (Uma) — deep-link "Abrir Settings" só faz sentido
         # quando erro é de DLL ou credenciais. Heurística: msg_id começa com
         # ``ERR_DLL_`` (todos os erros do wrapper DLL) — abrange:
         # ERR_DLL_NOT_INITIALIZED, ERR_DLL_NO_LICENSE, ERR_DLL_GENERIC, etc.
         # Fallback para detail string contém "DLL" ou "credenc"
         # (case-insensitive — robusto a variantes futuras).
+        # Story 4.29: MaxHID NAO mostra "Abrir Settings" — o problema NAO esta
+        # nas credenciais (estao corretas), esta na licenca em uso. CTAs sao
+        # "Abrir portal Nelogica" + Retry.
         is_dll_error = bool(msg_id and msg_id.startswith("ERR_DLL_"))
         if not is_dll_error:
             haystack = (detail or "").lower()
             is_dll_error = "dll" in haystack or "credenc" in haystack
-        self._open_settings_btn.setVisible(is_dll_error)
+        self._open_settings_btn.setVisible(is_dll_error and not is_max_hid)
 
         self._set_state(STATE_ERROR)
         self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
+
+    # ------------------------------------------------------------------
+    # Story 4.29 — MaxHID banner action handlers
+    # ------------------------------------------------------------------
+
+    def _on_open_portal_clicked(self) -> None:
+        """Abre o portal Nelogica no browser default.
+
+        Story 4.29 AC6 — botao secundario do banner MaxHID. Best-effort:
+        se ``QDesktopServices.openUrl`` falhar, no-op silencioso (usuario
+        pode copiar/colar a URL manualmente — esta no detail do banner).
+        """
+        with contextlib.suppress(Exception):
+            QDesktopServices.openUrl(QUrl("https://www.nelogica.com.br/area-cliente"))
+
+    def _on_open_logs_folder_link(self, _href: str) -> None:
+        """Abre ``<install>/_internal/Logs/`` no Explorer.
+
+        Story 4.29 AC6 — link "Ver logs" do banner MaxHID. Mesma resolucao
+        que :meth:`SettingsScreen._on_open_logs_folder_clicked` (AC5) — em
+        frozen mode usa ``bundle_paths.exe_dir() / "_internal" / "Logs"``;
+        em dev cai no exe_dir como ultimo recurso.
+        """
+        try:
+            from data_downloader._internal.bundle_paths import exe_dir, is_frozen
+
+            target = exe_dir() / "_internal" / "Logs" if is_frozen() else exe_dir()
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        except Exception:  # pragma: no cover defensive
+            pass
 
     @Slot(object)
     def _on_cancelled(self, exc: object) -> None:

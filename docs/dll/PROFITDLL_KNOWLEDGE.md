@@ -392,6 +392,31 @@ Códigos `NL_*` são `int` retornados por funções (negativos = erro, 0 ou posi
 
 > **Decode obrigatório** via `dll/errors.py decode_nl_error(code) -> NLError(name, message)`. Mapa completo gerado a partir de `profitTypes.py`.
 
+### 5.1 Erros que NÃO aparecem em `NL_*` — Activation / LogDesktop (Story 4.29)
+
+Nem todo erro é entregue via `int` de retorno ou state callback. **Falhas de licença/autenticação podem aparecer SÓ no log nativo da DLL** (`<dll_parent>/Logs/LogDesktop_YYYY_MM_DD.log`). O caso conhecido é **Q-DRIFT-41 (MaxHID)** — quando a licença está em uso em outro processo, o servidor Nelogica:
+
+1. Recebe o login, valida credenciais (`PROFITDLL_KEY`/`USER`/`PASS` corretos).
+2. Tenta alocar HID → falha (todos os HIDs em uso).
+3. Marca `Profit Dll Valid=False` no LogDesktop com bloco:
+   ```
+   TInfoClientProcessor.ProcessLoginResult:
+       ActivationResult=MaxHID
+       Mensagem="Todos os seus logins estão em uso"
+       HardLogout=True
+       LoginResult=MaxHID
+   ```
+4. **NÃO emite** o estado `(MARKET_DATA, MARKET_CONNECTED=4)` no state callback Python.
+
+**Protocolo de detecção (Story 4.29 — `dll/log_reader.py`):**
+
+1. Pollar `<dll_parent>/Logs/LogDesktop_YYYY_MM_DD.log` mais recente a cada 2s durante `_wait_market_connected_once` (janela de 30s pós-init, após grace de 1s pré-flush).
+2. Buscar bottom-up o último bloco `TInfoClientProcessor.ProcessLoginResult`.
+3. Se `ActivationResult == "MaxHID"` → raise `MaxHIDError(DLLInitError)` com `activation_result`, `server_message`, `timestamp` expostos para UI banner.
+4. Encoding `errors='ignore'` (race com DLL escrevendo no log).
+
+**Equivalente público (ADR-011):** `MaxHIDError(DLLInitError)` em `public_api/exceptions.py` (Story 4.29). Microcopy ID dedicado: `ERR_DLL_MAX_HID` (3 remedies prescritivos no `__str__`).
+
 ---
 
 ## 6. Sequência canônica de inicialização

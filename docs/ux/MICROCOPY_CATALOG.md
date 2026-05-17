@@ -147,6 +147,10 @@ ID: `WAR_99_RECONNECT`. Ver §6.
 | `ERR_DLL_GENERIC` | (catch-all) | Erro não documentado da ProfitDLL | Código {code}: {message}. | Use `--verbose` para detalhes. Reporte em github issues. |
 | `ERR_DLL_MARKET_TIMEOUT` | (timeout interno) | Não conectei ao Market Data | MARKET_DATA não conectou após {timeout}s nesta tentativa. | Aguardando próxima tentativa de retry (Story 2.12 — Q-DRIFT-02). |
 | `ERR_DLL_MARKET_RETRY_EXHAUSTED` | (retry interno) | Não conectei ao Market Data após retries | Market data não conectou após {max} tentativas. | Verifique horário de pregão B3 (09:00-18:30 BRT) e conexão de rede. Rode `data-downloader doctor` para diagnóstico completo. |
+| `ERR_DLL_MAX_HID` | (servidor reportou MaxHID — Story 4.29) | Licença Nelogica em uso | Sua chave de licença Nelogica está em uso em outro computador ou sessão. Feche outras instâncias do data-downloader/ProfitChart e tente de novo, ou desconecte HIDs em https://www.nelogica.com.br/area-cliente. | Tentar de novo |
+| `ERR_DLL_MAX_HID_ACTION_SECONDARY` | secondary CTA do banner MaxHID (Story 4.29) | Abrir portal Nelogica | (link externo — abre https://www.nelogica.com.br/area-cliente) | (sem ação adicional) |
+
+> **Story 4.29 — Detecção MaxHID:** quando o servidor Nelogica recusa o login porque a licença está em uso em outro processo (`ActivationResult=MaxHID` no LogDesktop), o wrapper levanta `MaxHIDError(DLLInitError)`. A UI exibe banner com 3 remedies numerados (fechar outras instâncias, desconectar HIDs no portal, aguardar 5-30min) + 2 botões (`ERR_DLL_MAX_HID` action + `ERR_DLL_MAX_HID_ACTION_SECONDARY` link). Link "Ver logs" abre `BTN_OPEN_LOGS_FOLDER` (§17b.3 SettingsScreen).
 
 ---
 

@@ -1227,18 +1227,42 @@ class ProfitDLL:
         policy). Comportamento idêntico ao código pré-2.12: drena state
         queue até ``MARKET_CONNECTED`` ou timeout.
 
+        Story 4.29: além do timeout, detecta proativamente
+        ``ActivationResult=MaxHID`` no ``LogDesktop_YYYY_MM_DD.log`` nativo
+        da DLL. O servidor Nelogica responde MaxHID 178ms após login quando
+        a licença está em uso em outro processo; a DLL marca
+        ``Profit Dll Valid=False`` mas NUNCA emite ``MARKET_CONNECTED=4``
+        no state callback Python. Sem detecção, o caller espera ~990s
+        (3 retries x 300s timeout). Polling no log a cada ~2s durante o
+        wait permite raise :class:`MaxHIDError` em <3s pós-login.
+
         Args:
             timeout: Timeout em segundos para ESTA tentativa.
 
         Returns:
-            ``True`` se conectou; ``False`` em timeout.
+            ``True`` se conectou; ``False`` em timeout (caller decide retry).
+
+        Raises:
+            MaxHIDError: Detectado ``ActivationResult=MaxHID`` no LogDesktop.
+                Subclasse de :class:`DLLInitError` — bubble para o
+                ``public_api.download`` que traduz para ``error_message``
+                com prefixo ``ERR_DLL_MAX_HID``.
         """
         # Heartbeat a cada 30s para visibilidade quando o handshake é lento
         # (silêncio total >60s confunde operador — parece travado).
         heartbeat_interval = 30.0
+        # Story 4.29 — janela de polling para detecção proativa de MaxHID.
+        # Servidor Nelogica responde MaxHID em ~178ms; mas a DLL pode levar
+        # mais para flushar o LogDesktop. Pollar a cada 2s nos primeiros
+        # ~30s do wait (depois disso é seguro assumir que se MaxHID fosse
+        # vir, já teria vindo). Custo: ~15 file reads <10KB ao longo do
+        # primeiro retry — barato, fora do hot path do callback.
+        maxhid_poll_interval = 2.0
+        maxhid_poll_window = 30.0
         start = time.monotonic()
         deadline = start + timeout
         next_heartbeat = start + heartbeat_interval
+        next_maxhid_check = start + 1.0  # 1s grace pre-flush
         while True:
             now = time.monotonic()
             remaining = deadline - now
@@ -1254,27 +1278,41 @@ class ProfitDLL:
                     timeout=timeout,
                     microcopy_id="ERR_DLL_MARKET_TIMEOUT",
                 )
+                # Story 4.29 — última chance: parse final do log antes de
+                # retornar False. Se MaxHID estiver lá, raise (caller acima
+                # captura e propaga). Útil em cenários onde a janela de
+                # polling fechou mas o log foi escrito mais tarde.
+                self._maybe_raise_maxhid()
                 return False
+
+            # Story 4.29 — detecção proativa MaxHID dentro da janela.
+            elapsed = now - start
+            if elapsed < maxhid_poll_window and now >= next_maxhid_check:
+                self._maybe_raise_maxhid()
+                next_maxhid_check = now + maxhid_poll_interval
 
             # Heartbeat — emite log se passou ``heartbeat_interval`` sem state
             # novo. NÃO consome do queue; apenas informa que ainda estamos
             # vivos esperando.
             if now >= next_heartbeat:
-                elapsed = int(now - start)
                 log.info(
                     "dll.waiting_market_data",
-                    elapsed_seconds=elapsed,
+                    elapsed_seconds=int(elapsed),
                     timeout=timeout,
                 )
                 next_heartbeat = now + heartbeat_interval
 
-            # Bloqueio limitado ao próximo heartbeat OU deadline (o que vier
-            # antes) — permite emitir o log de progresso mesmo sem state novo.
-            wait_for = min(remaining, max(0.1, next_heartbeat - now))
+            # Bloqueio limitado ao próximo heartbeat OU MaxHID check OU
+            # deadline (o que vier antes) — permite poll/heartbeat mesmo
+            # sem state novo no queue.
+            next_event = min(next_heartbeat, next_maxhid_check, deadline)
+            wait_for = max(0.1, next_event - now)
+            wait_for = min(wait_for, remaining)
             try:
                 conn_type, result = self._state_queue.get(timeout=wait_for)
             except Empty:
-                # Não é timeout final — pode ser apenas hora do heartbeat.
+                # Não é timeout final — pode ser apenas hora do heartbeat
+                # ou do polling MaxHID. Loop top decide.
                 continue
 
             alias = self._resolve_state_alias(conn_type, result)
@@ -1291,6 +1329,78 @@ class ProfitDLL:
             if conn_type == MARKET_DATA and result == MARKET_CONNECTED:
                 log.info("dll.connected", alias=alias)
                 return True
+
+    # =================================================================
+    # Story 4.29 — MaxHID detection (LogDesktop polling)
+    # =================================================================
+
+    def _logs_dir(self) -> Path:
+        """Retorna o diretório onde a DLL nativa grava ``LogDesktop_*.log``.
+
+        A DLL escreve em ``<dll_parent>/Logs/`` (relativo ao cwd que setamos
+        em :meth:`initialize_market_only` — Q-DRIFT-10). No bundle PyInstaller
+        ``--onedir`` esse path é ``<install>/_internal/Logs/``; em dev é
+        ``<repo>/profitdll/DLLs/Win64/Logs/``. Hot-path safe (sem I/O).
+
+        Returns:
+            ``Path`` calculado mas NÃO validado (caller — log_reader —
+            tolera dir inexistente retornando ``None``).
+        """
+        return self._dll_path.parent / "Logs"
+
+    def _maybe_raise_maxhid(self) -> None:
+        """Pollar o LogDesktop e levantar :class:`MaxHIDError` se MaxHID.
+
+        Story 4.29 AC3. Operação:
+
+        1. Lê o último bloco ``TInfoClientProcessor.ProcessLoginResult`` do
+           ``LogDesktop_YYYY_MM_DD.log`` mais recente.
+        2. Se ``activation_result == "MaxHID"`` → raise.
+        3. Qualquer outro caso (None, OK, etc.) → no-op silencioso (caller
+           continua o wait normalmente).
+
+        Erros de parse/I/O são engolidos defensivamente — detecção é
+        oportunista; falhar aqui não pode quebrar o caminho de sucesso.
+
+        Raises:
+            MaxHIDError: ``activation_result == "MaxHID"``. Caller deve
+                permitir bubble (não capturar internamente).
+        """
+        # Lazy imports — log_reader é Story 4.29 only; MaxHIDError mora em
+        # public_api/. Manter import fora do hot path do callback (R3).
+        from data_downloader.dll.log_reader import parse_login_result_from_log
+        from data_downloader.public_api.exceptions import MaxHIDError
+
+        try:
+            snapshot = parse_login_result_from_log(self._logs_dir())
+        except Exception as exc:  # pragma: no cover defensive
+            # Parser é defensivo (catches OSError, retorna None); este
+            # except é cinto-e-suspensório para o caso de bug imprevisto
+            # no parser não derrubar o wait inteiro.
+            log.warning(
+                "dll.maxhid_parse_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+
+        if snapshot is None:
+            return
+
+        if snapshot.activation_result == "MaxHID":
+            log.error(
+                "dll.maxhid_detected",
+                activation_result=snapshot.activation_result,
+                server_message=snapshot.message,
+                hard_logout=snapshot.hard_logout,
+                login_result=snapshot.login_result,
+                microcopy_id="ERR_DLL_MAX_HID",
+            )
+            raise MaxHIDError(
+                activation_result=snapshot.activation_result,
+                server_message=snapshot.message,
+                timestamp=snapshot.timestamp,
+            )
 
     @staticmethod
     def _resolve_state_alias(conn_type: int, result: int) -> str:
