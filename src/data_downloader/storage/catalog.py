@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 
@@ -515,6 +515,113 @@ def _migrate_legacy_catalog_path(data_dir: Path, new_path: Path) -> None:
         )
         # Não levanta — Catalog tentará abrir ``new`` (que pode estar limpo
         # ou inexistente; modo de falha mais claro downstream).
+
+
+# ----------------------------------------------------------------------
+# v1.4.0 (Story 4.22 / ADR-026 §2.2) — recovery on boot
+# ----------------------------------------------------------------------
+#
+# Resolução de entradas órfãs de ``_pending_commits`` após crash entre as
+# fases do two-phase commit. Ver ADR-026 §2.2 + INTEGRITY.md §4.3/§4.5.
+#
+# ``PendingRecoveryReport`` é o retorno público do método
+# ``Catalog.recover_pending_commits()`` (e também do dry-run via CLI).
+# Imutável (``frozen=True``) — consumidores podem comparar/contar sem
+# medo de mutação.
+
+
+@dataclass(frozen=True)
+class PendingRecoveryReport:
+    """Resultado imutável de ``Catalog.recover_pending_commits()``.
+
+    Cada categoria é uma tupla de ``(partition_path, reason)`` exceto
+    ``recovered`` (apenas paths — recuperação é binária, sem motivo).
+
+    Attributes:
+        recovered: Partições re-registradas em ``partitions`` após
+            validação SHA256/size. PID original morto, arquivo on-disk
+            íntegro. Tupla de ``partition_path``.
+        cleaned: Pending rows deletadas porque o arquivo final não
+            existe (crash entre Fase 1 e ``os.replace``). Tupla de
+            ``(partition_path, reason)`` — reason é ``'no_file'``.
+        quarantined: Pending rows cujo arquivo on-disk não bate com
+            ``expected_sha256``/``expected_size``. Arquivo movido para
+            ``data/_quarantine/{utc_iso}/{partition_path}`` antes do
+            DELETE. Tupla de ``(partition_path, reason)`` — reason é
+            ``'sha_mismatch'`` ou ``'size_mismatch'``.
+        skipped: Pending rows com PID ainda vivo (outro writer ativo).
+            Tupla de ``(partition_path, reason)`` — reason é
+            ``'pid_alive'``. Não devem ocorrer em recovery on-boot
+            single-flight; presentes para uso futuro (CLI manual).
+    """
+
+    recovered: tuple[str, ...] = ()
+    cleaned: tuple[tuple[str, str], ...] = ()
+    quarantined: tuple[tuple[str, str], ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def is_clean(self) -> bool:
+        """``True`` se nada precisou ser recuperado/limpo/quarentenado.
+
+        ``skipped`` ainda é considerado "clean" no sentido de "recovery
+        não teve trabalho ativo a fazer" — apenas absteve-se de tocar
+        rows com PID vivo.
+        """
+        return not (self.recovered or self.cleaned or self.quarantined)
+
+
+def _pid_alive(pid: int | None, started_at: datetime) -> bool:
+    """Verifica se o PID ainda está vivo com defesa contra PID recycling.
+
+    Política ADR-026 §2.2:
+
+    1. ``pid is None`` -> ``False`` (sem ID, sem dono — pode resolver).
+    2. Se ``psutil`` indisponível (ImportError) -> fallback timestamp:
+       considera vivo apenas se ``started_at`` é recente (< 1h atrás).
+    3. ``psutil.pid_exists(pid) is False`` -> morto.
+    4. ``psutil.Process(pid).create_time()`` comparado com ``started_at``:
+       se o processo foi criado APÓS ``started_at``, é outro processo
+       (PID reciclado pelo OS) -> tratado como morto.
+    5. Caso contrário -> vivo (skip).
+
+    Args:
+        pid: PID do processo que originou a pending row (pode ser
+            ``None`` para rows legadas / corrompidas).
+        started_at: ``datetime`` (UTC) de quando a pending foi criada.
+            Deve ser ``aware`` (tzinfo) — convertemos defensivamente
+            se vier naive.
+
+    Returns:
+        ``True`` se o processo aparentemente ainda está rodando e
+        deve ser respeitado (skip recovery); ``False`` se morto/inexistente.
+    """
+    if pid is None:
+        return False
+
+    # Defensive: garante comparações coerentes (started_at do SQLite vem
+    # naive UTC após _parse_ts). Promove para aware UTC.
+    started_at_utc = started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at
+
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover defensive — psutil é dep transitiva
+        # Fallback timestamp-only: considera vivo se started_at é recente.
+        # Janela de 1h é o mesmo limite usado em ADR-026 §2.3 (writer race).
+        return started_at_utc > datetime.now(UTC) - timedelta(hours=1)
+
+    if not psutil.pid_exists(pid):
+        return False
+
+    try:
+        proc = psutil.Process(pid)
+        create_time = datetime.fromtimestamp(proc.create_time(), tz=UTC)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):  # pragma: no cover defensive
+        return False
+
+    # PID recycling defense: se o processo foi criado APÓS started_at, é
+    # um processo DIFERENTE que herdou o mesmo PID -> tratar como morto.
+    return create_time <= started_at_utc
 
 
 @dataclass
@@ -1994,6 +2101,7 @@ __all__ = [
     "MIGRATIONS",
     "Catalog",
     "PartitionObserver",
+    "PendingRecoveryReport",
     "register_partition_observer",
     "unregister_partition_observer",
 ]
