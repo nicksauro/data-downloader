@@ -412,3 +412,77 @@ def test_recover_handles_missing_pending_commits_table(tmp_path: Path) -> None:
     report = catalog.recover_pending_commits()
     assert report.is_clean
     catalog.close()
+
+
+@pytest.mark.unit
+def test_quarantine_cross_fs_fallback_uses_shutil_move(
+    catalog: Catalog, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC15 (Story 4.24, fecha 4.22 CONCERN 1): cross-FS quarantine usa shutil.move.
+
+    Quando ``os.replace`` falha com ``OSError(EXDEV)`` (cross-volume no
+    Windows), o fallback ``shutil.move`` eh acionado. O arquivo ainda
+    eh quarentenado e a pending row deletada.
+    """
+    import errno
+    import shutil
+
+    from data_downloader.storage import catalog as catalog_module
+
+    _install_fake_psutil(monkeypatch, exists=False, create_time_epoch=0.0)
+    writer = ParquetWriter(data_dir=data_dir)
+    partition = PartitionKey(exchange="F", symbol="WDOJ26", year=2026, month=4)
+    wr = writer.write(_make_trades(6), partition, dll_version="4.0.0.34")
+    rel_path = "F/WDOJ26/2026/04.parquet"
+
+    # SHA mismatch -> branch de quarantine.
+    _insert_pending(
+        catalog,
+        rel_path=rel_path,
+        started_at=datetime.now(UTC) - timedelta(hours=2),
+        expected_sha256="z" * 64,
+        expected_size=wr.file_size_bytes,
+        pid=99999,
+    )
+
+    # Mock os.replace (apenas no modulo catalog) para raise EXDEV.
+    real_replace = catalog_module.os.replace
+    replace_calls: list[tuple[str, str]] = []
+    move_calls: list[tuple[str, str]] = []
+
+    def _failing_replace(src: str | Path, dst: str | Path) -> None:
+        replace_calls.append((str(src), str(dst)))
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    real_move = shutil.move
+
+    def _spy_move(src: str, dst: str) -> str:
+        move_calls.append((src, dst))
+        # Delegamos para o real, porque o teste eh integration-light: o
+        # objetivo eh validar que shutil.move foi acionado, nao testar
+        # implementacao do shutil.
+        return real_move(src, dst)
+
+    monkeypatch.setattr(catalog_module.os, "replace", _failing_replace)
+    monkeypatch.setattr(catalog_module.shutil, "move", _spy_move)
+
+    report = catalog.recover_pending_commits()
+
+    # os.replace falhou (EXDEV), shutil.move foi acionado.
+    assert len(replace_calls) >= 1, "os.replace deveria ter sido tentado primeiro"
+    assert len(move_calls) >= 1, "shutil.move deveria ter sido chamado no fallback"
+
+    # Quarantine reportado, pending limpa.
+    assert (rel_path, "sha_mismatch") in report.quarantined
+    assert _count_pending(catalog) == 0
+
+    # Arquivo original removido + arquivo em quarantine.
+    assert not wr.path.exists()
+    quarantine_root = data_dir / "_quarantine"
+    assert quarantine_root.is_dir()
+    moved_files = list(quarantine_root.rglob("04.parquet"))
+    assert len(moved_files) == 1
+
+    # Limpar mock para nao vazar para outros tests.
+    monkeypatch.setattr(catalog_module.os, "replace", real_replace)
+    catalog.close()

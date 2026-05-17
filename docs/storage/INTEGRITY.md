@@ -376,6 +376,28 @@ Exit codes:
 - `catalog.recovery.invalid_layout` / `.metadata_read_failed` / `.no_metadata` / `.metadata_parse_failed` / `.upsert_failed` — falhas durante `_register_recovered_partition` (pending preservada).
 - `catalog.cleanup_orphans.pending_purged` — defense-in-depth purgou rows >1 dia.
 
+### 4.6 Writer race + compact single-flight (Story 4.24 / ADR-026 §2.3 + §2.4)
+
+**Implementação:** o claim atômico em `_pending_commits` (writer race) e em `compactions` (compact single-flight) é WHERE-guarded em ambas as tabelas — apenas sobrescreve se a row anterior é stale (>1h sem `completed_at`) OU se é do mesmo PID (writer race apenas — retry idempotente).
+
+**Writer race protection** (`ParquetWriter.write` quando `catalog` injetado):
+
+1. `Catalog.pending_commit(...)` → INSERT WHERE-guarded em `_pending_commits` (Fase 1 do two-phase commit invertido).
+2. Pós-INSERT, `SELECT pid` re-fetch da row. Se `pid != os.getpid()` → outro writer ativo → raise `ConcurrentWriterError`.
+3. Writer retry policy: `_RETRY_DELAYS_MS = (100, 500, 2000)` — 3 tentativas com backoff fixo. Após esgotar, propaga `ConcurrentWriterError` ao orchestrator (`tmp_path` deletado antes da propagação).
+
+**Compact single-flight** (`Catalog.maybe_compact_month`):
+
+1. INSERT WHERE-guarded em `compactions` (mesmo padrão).
+2. Pós-INSERT, `SELECT started_at` re-fetch e compara com o `now` original. Se diferente → outro processo claim'd dentro da janela de 1h → no-op (`return False`), log `catalog.maybe_compact_month.claim_lost`.
+3. `started_at` usa precisão de microssegundos (`%Y-%m-%d %H:%M:%S.%f`) para diferenciar claims concorrentes no mesmo segundo. WHERE-guard `started_at < datetime('now', '-1 hour')` continua lexicamente correto (sub-segundos são maiores que segundos).
+
+**Logs estruturados adicionais:**
+
+- `parquet_writer.concurrent_writer.retry` — INFO em cada retry (attempt, delay_ms, rel_path, holder_pid).
+- `parquet_writer.concurrent_writer.exhausted` — WARNING quando 3 tentativas esgotadas.
+- `catalog.maybe_compact_month.claim_lost` — INFO quando o claim de compactação foi perdido (own_started_at, holder_started_at).
+
 ---
 
 ## 5. Reconcile catálogo ↔ arquivos (drift report)
