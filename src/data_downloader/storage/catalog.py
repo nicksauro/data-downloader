@@ -37,6 +37,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -46,6 +47,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 
+from data_downloader.public_api.exceptions import ConcurrentWriterError
 from data_downloader.storage._paths import hide_directory_windows
 from data_downloader.storage.catalog_models import (
     ChunkRange,
@@ -625,6 +627,102 @@ def _pid_alive(pid: int | None, started_at: datetime) -> bool:
     return create_time <= started_at_utc
 
 
+# ----------------------------------------------------------------------
+# v1.4.0 (Story 4.23 / ADR-026 §2.1) — two-phase commit invertido
+# ----------------------------------------------------------------------
+#
+# ``PendingCommitHandle`` é o handle retornado por
+# ``Catalog.pending_commit()`` context manager (AC1/AC2). Encapsula o
+# estado da Fase 1 (claim já feito em ``_pending_commits``) e expõe
+# ``complete(write_result)`` que executa a Fase 3 (UPSERT em
+# ``partitions`` + DELETE pending row + WAL checkpoint + notify
+# observers) dentro da mesma transação SQLite.
+#
+# Design: ``slots=True`` + reference back para o Catalog (não copiamos
+# a conexão; usamos os helpers do dono). Apenas ``_completed`` é mutável
+# (após ``complete()`` retornar). ``_completed`` segunda chamada raise
+# ``RuntimeError`` — guarda contra double-complete (bug de caller).
+
+
+@dataclass(slots=True)
+class PendingCommitHandle:
+    """Handle imutável emitido por :meth:`Catalog.pending_commit` (Story 4.23).
+
+    Carrega o claim atômico já registrado em ``_pending_commits``
+    (Fase 1 do two-phase commit invertido — ADR-026 §2.1) + referência
+    para o ``Catalog`` dono. O caller chama :meth:`complete` após o
+    ``os.replace(tmp, final)`` para executar a Fase 3 (UPSERT em
+    ``partitions`` + DELETE da pending row + WAL checkpoint + dispatch
+    de observers).
+
+    A ordem prescrita do two-phase commit (INTEGRITY.md §4) é:
+
+    1. **Fase 1** — INSERT em ``_pending_commits`` (já feito por
+       ``pending_commit.__enter__``).
+    2. **Fase 2** — ``os.replace(tmp, final)`` (responsabilidade do
+       caller, dentro do ``with`` block).
+    3. **Fase 3** — UPSERT em ``partitions`` + DELETE pending (esta
+       chamada).
+
+    Se o caller chamar :meth:`complete` 2x (bug), raise
+    ``RuntimeError`` — defesa contra uso incorreto. Se sair do ``with``
+    sem chamar :meth:`complete` E sem exception, o context manager loga
+    warning ``catalog.pending_commit.not_completed`` e preserva a pending
+    row (recovery no próximo boot resolve).
+
+    Attributes:
+        rel_path: Path relativo (formato POSIX) a ``data_dir/history/``.
+        partition: ``PartitionKey`` da partição alvo.
+        expected_sha256: SHA256 calculado pelo writer pre-replace.
+        expected_size: Tamanho on-disk pre-replace.
+        job_id: UUID do job que originou (pode ser ``None``).
+        pid: PID do processo que detém o claim (``os.getpid()``).
+        started_at: Timestamp ISO (formato SQLite) do claim.
+    """
+
+    rel_path: str
+    partition: PartitionKey
+    expected_sha256: str
+    expected_size: int
+    job_id: str | None
+    pid: int
+    started_at: str
+    _catalog: Catalog  # forward ref resolvido por `from __future__ import annotations`
+    _completed: bool = False
+
+    def complete(self, write_result: WriteResult) -> None:
+        """Executa Fase 3 do two-phase commit invertido.
+
+        UPSERT em ``partitions`` com ``write_result`` (SHA256/size/bounds
+        finais do arquivo on-disk) + DELETE da pending row + WAL
+        checkpoint + dispatch de observers — tudo em transação SQLite
+        única.
+
+        Idempotente em casos legítimos (UPSERT por ``partition_path``):
+        re-completar uma partição com o mesmo handle é bloqueado por
+        ``_completed`` flag (raise ``RuntimeError``). Para re-registrar
+        a mesma partição via outro handle, basta criar novo
+        ``pending_commit`` para o mesmo ``rel_path`` (claim sobrescreve
+        no UPSERT do ``_pending_commits``).
+
+        Args:
+            write_result: Saída de :meth:`ParquetWriter.write` (path,
+                row_count, bounds, checksum, size).
+
+        Raises:
+            RuntimeError: ``complete()`` chamado 2x para o mesmo handle.
+            sqlite3.Error: Falha no UPSERT/DELETE (caller decide;
+                pending row é preservada para recovery).
+        """
+        if self._completed:
+            raise RuntimeError(
+                f"PendingCommitHandle.complete() already invoked for "
+                f"rel_path={self.rel_path!r} (pid={self.pid})"
+            )
+        self._catalog._finalize_pending_commit(self, write_result)
+        self._completed = True
+
+
 @dataclass
 class Catalog:
     """Catálogo SQLite — fonte única de verdade do estado de downloads.
@@ -988,6 +1086,244 @@ class Catalog:
             )
             if cursor.rowcount == 0:
                 raise ValueError(f"job_id not found: {job_id}")
+
+    # ------------------------------------------------------------------
+    # Story 4.23 / ADR-026 §2.1 — two-phase commit invertido
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def pending_commit(
+        self,
+        rel_path: str,
+        partition: PartitionKey,
+        *,
+        expected_sha256: str,
+        expected_size: int,
+        job_id: str | None = None,
+    ) -> Iterator[PendingCommitHandle]:
+        """Context manager para o two-phase commit invertido (Story 4.23).
+
+        Enquadra a operação completa: Fase 1 (INSERT em
+        ``_pending_commits`` com claim atômico WHERE-guarded) ocorre em
+        ``__enter__``; o caller faz Fase 2 (``os.replace(tmp, final)``)
+        dentro do bloco; Fase 3 (UPSERT em ``partitions`` + DELETE
+        pending) ocorre quando o caller chama
+        :meth:`PendingCommitHandle.complete` (tipicamente como última
+        linha do bloco).
+
+        **Política de claim atômico (ADR-026 §2.3 / AC4):** o INSERT em
+        ``_pending_commits`` usa ``ON CONFLICT(partition_path) DO UPDATE
+        ... WHERE``-guarded — sobrescreve apenas se a row existente é
+        stale (``started_at < now-1h``) OU se é deste mesmo PID (retry
+        idempotente). Caso contrário, o SELECT pós-INSERT detecta
+        ``pid != os.getpid()`` e levantamos
+        :class:`ConcurrentWriterError` — sinal advisory-lock cross-process
+        para o caller (writer policy de retry é Story 4.24).
+
+        **Comportamento em exception no bloco:** a pending row é
+        **preservada** (não deletada). Recovery on boot (Story 4.22)
+        resolve no próximo start:
+
+        - Sem arquivo final em disco -> ``cleaned`` (no_file).
+        - Arquivo presente + SHA/size match -> ``recovered``.
+        - Arquivo presente + mismatch -> ``quarantined``.
+
+        **Comportamento em exit normal sem complete():** loga warning
+        ``catalog.pending_commit.not_completed`` e preserva a pending
+        row (defesa contra esquecimento do caller). Recovery resolve.
+
+        Args:
+            rel_path: Path relativo (POSIX) a ``data_dir/history/``
+                — mesmo formato usado em ``_pending_commits.partition_path``
+                e em ``partitions.partition_path``.
+            partition: :class:`PartitionKey` correspondente.
+            expected_sha256: SHA256 hex (64 chars) calculado pelo writer
+                ANTES do ``os.replace`` (sobre o ``.tmp.{uuid}``). Usado
+                pelo recovery para validar integridade pós-crash.
+            expected_size: Tamanho on-disk em bytes do ``.tmp`` (==
+                tamanho do final, ``os.replace`` preserva).
+            job_id: UUID do job que originou esta escrita (FK opcional).
+
+        Yields:
+            :class:`PendingCommitHandle` com claim ativo. Caller faz
+            ``os.replace`` então chama ``handle.complete(write_result)``.
+
+        Raises:
+            :class:`ConcurrentWriterError`: outro writer (PID diferente
+                vivo OU dentro da janela de 1h) detém o claim para
+                ``rel_path``.
+            sqlite3.Error: falha SQLite no INSERT da Fase 1.
+        """
+        pid = os.getpid()
+        started_at = _utcnow_iso()
+
+        # Fase 1 — claim atômico WHERE-guarded.
+        # WHERE clause em ON CONFLICT DO UPDATE faz o UPSERT só sobrescrever
+        # entries stale (started_at < now - 1h) OU do mesmo PID (retry).
+        # Caller diferente vivo -> UPDATE no-op, mantém row anterior.
+        with self._transaction():
+            conn = self._conn_or_raise()
+            conn.execute(
+                """
+                INSERT INTO _pending_commits(
+                    partition_path, started_at, expected_sha256, expected_size, job_id, pid
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(partition_path) DO UPDATE SET
+                    started_at = excluded.started_at,
+                    expected_sha256 = excluded.expected_sha256,
+                    expected_size = excluded.expected_size,
+                    job_id = excluded.job_id,
+                    pid = excluded.pid
+                WHERE _pending_commits.started_at < datetime('now', '-1 hour')
+                   OR _pending_commits.pid = excluded.pid
+                """,
+                (
+                    rel_path,
+                    started_at,
+                    expected_sha256,
+                    expected_size,
+                    job_id,
+                    pid,
+                ),
+            )
+
+        # Verifica claim: a row pode ter sido inserida nova OU sobrescrita.
+        # Se DO UPDATE WHERE bloqueou (outro PID ainda dentro da janela 1h),
+        # a row continua com o pid antigo -> ConcurrentWriterError.
+        conn = self._conn_or_raise()
+        row = conn.execute(
+            "SELECT pid FROM _pending_commits WHERE partition_path = ?",
+            (rel_path,),
+        ).fetchone()
+        if row is None or int(row["pid"]) != pid:
+            current_pid = int(row["pid"]) if row is not None else -1
+            raise ConcurrentWriterError(
+                partition_path=rel_path,
+                current_pid=current_pid,
+                own_pid=pid,
+            )
+
+        handle = PendingCommitHandle(
+            rel_path=rel_path,
+            partition=partition,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
+            job_id=job_id,
+            pid=pid,
+            started_at=started_at,
+            _catalog=self,
+        )
+
+        exc_info_pre = sys.exc_info()[0]
+        try:
+            yield handle
+        except BaseException:
+            # Exception propagada do bloco caller. NÃO deletamos a pending
+            # row — recovery on boot resolve com base no estado on-disk.
+            raise
+        else:
+            # Exit normal. Se caller esqueceu de chamar complete(), loga
+            # warning para diagnóstico (recovery on boot ainda resolve;
+            # pending row segue preservada).
+            if not handle._completed and sys.exc_info()[0] is exc_info_pre:
+                _LOG.warning(
+                    "catalog.pending_commit.not_completed",
+                    extra={
+                        "rel_path": rel_path,
+                        "pid": pid,
+                        "job_id": job_id,
+                    },
+                )
+
+    def _finalize_pending_commit(
+        self,
+        handle: PendingCommitHandle,
+        write_result: WriteResult,
+    ) -> None:
+        """Fase 3 do two-phase commit invertido (Story 4.23 / ADR-026 §2.1).
+
+        Executado por :meth:`PendingCommitHandle.complete`. UPSERT em
+        ``partitions`` + DELETE da pending row + WAL checkpoint + dispatch
+        de observers — tudo dentro da mesma transação SQLite (atômico).
+
+        Implementação espelha o Phase 3 antigo de ``register_partition``
+        (preservando idempotência R5/AC6 via UPSERT por
+        ``partition_path``). ``day`` vem de ``handle.partition.day``
+        (fonte canônica do layout ADR-025 — NULL = mensal compactado,
+        NOT NULL = diário).
+
+        Args:
+            handle: Handle ativo (não-completado). Usado para
+                ``rel_path``, ``partition``, ``job_id``.
+            write_result: Saída de :meth:`ParquetWriter.write`.
+
+        Raises:
+            sqlite3.Error: falha SQLite (caller decide; pending row é
+                preservada para recovery).
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            raise RuntimeError("data_dir not set; required for _finalize_pending_commit")
+
+        rel_path = handle.rel_path
+        partition = handle.partition
+        job_id = handle.job_id
+        now = _utcnow_iso()
+        resolved_day = partition.day
+
+        with self._transaction():
+            conn = self._conn_or_raise()
+            conn.execute(
+                """
+                INSERT INTO partitions(
+                    partition_path, symbol, exchange, year, month, day,
+                    row_count, first_ts_ns, last_ts_ns, schema_version,
+                    checksum_sha256, file_size_bytes, written_at, job_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(partition_path) DO UPDATE SET
+                    row_count = excluded.row_count,
+                    first_ts_ns = excluded.first_ts_ns,
+                    last_ts_ns = excluded.last_ts_ns,
+                    schema_version = excluded.schema_version,
+                    checksum_sha256 = excluded.checksum_sha256,
+                    file_size_bytes = excluded.file_size_bytes,
+                    day = excluded.day,
+                    written_at = excluded.written_at,
+                    job_id = COALESCE(excluded.job_id, partitions.job_id)
+                """,
+                (
+                    rel_path,
+                    partition.symbol,
+                    partition.exchange,
+                    partition.year,
+                    partition.month,
+                    resolved_day,
+                    write_result.row_count,
+                    write_result.first_ts_ns,
+                    write_result.last_ts_ns,
+                    self._get_meta("parquet_schema_min_supported") or "1.0.0",
+                    write_result.checksum_sha256,
+                    write_result.file_size_bytes,
+                    now,
+                    job_id,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM _pending_commits WHERE partition_path = ?",
+                (rel_path,),
+            )
+
+        # WAL checkpoint forçado após Fase 3 (AC12 — durabilidade vs
+        # default checkpoint delayed). Best-effort: erro não derruba o
+        # commit (que já passou).
+        try:
+            conn = self._conn_or_raise()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            _LOG.warning("catalog.wal_checkpoint.failed", extra={"err": str(exc)})
+
+        # Dispatch de observers — APÓS o commit/checkpoint para que listeners
+        # que re-consultem o catálogo enxerguem a partition recém-gravada.
+        _notify_partition_observers(partition.symbol, partition.year, partition.month)
 
     def register_partition(
         self,
@@ -2554,6 +2890,7 @@ __all__ = [
     "MIGRATIONS",
     "Catalog",
     "PartitionObserver",
+    "PendingCommitHandle",
     "PendingRecoveryReport",
     "register_partition_observer",
     "unregister_partition_observer",
