@@ -691,6 +691,27 @@ class Catalog:
         self._apply_pragmas()
         self._apply_migrations()
 
+        # ADR-026 §2.2 (Story 4.22): recovery DEVE rodar ANTES de
+        # cleanup_orphans (cleanup poderia deletar tmps que recovery
+        # ainda quer validar como pending) e ANTES de reconcile
+        # (reconcile assume FS+catalog consistente). Try/except amplo
+        # garante que boot NUNCA falha por causa do recovery — falha
+        # apenas loga + segue.
+        try:
+            recovery_report = self.recover_pending_commits()
+            if not recovery_report.is_clean:
+                _LOG.info(
+                    "catalog.recover_pending.startup",
+                    extra={
+                        "recovered": len(recovery_report.recovered),
+                        "cleaned": len(recovery_report.cleaned),
+                        "quarantined": len(recovery_report.quarantined),
+                        "skipped": len(recovery_report.skipped),
+                    },
+                )
+        except (OSError, sqlite3.Error) as exc:
+            _LOG.warning("catalog.recover_pending.failed", extra={"err": str(exc)})
+
         if self.auto_cleanup_orphans:
             try:
                 removed = self.cleanup_orphans()
