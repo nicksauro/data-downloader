@@ -2016,7 +2016,9 @@ class Catalog:
         """
         from data_downloader.storage.partition import parse_partition_path
 
-        partition_key = parse_partition_path(Path(rel_path))
+        # parse_partition_path espera segmento "history" no path; rel_path
+        # eh relativo a data_dir/history -> prepend para satisfazer o parser.
+        partition_key = parse_partition_path(Path("history") / rel_path)
         if partition_key is None:
             _LOG.warning(
                 "catalog.recovery.invalid_layout",
