@@ -1,9 +1,10 @@
 # ADR-029 — UI Threading Pattern: Defer-vs-Worker (R11 enforcement)
 
-**Status:** proposed
+**Status:** accepted
 **Data:** 2026-05-17
 **Autor:** Aria (architect)
 **Consultados:** Uma (UX), Felix (frontend-dev), Pyro (perf)
+**Implementor:** Sol (data-engineer) — Story 4.27
 **Supersedes:** —
 **Related:** ADR-005 (thread model — backend), ADR-003 (PySide6), PRINCIPLES.md §3 (P3/R11),
 docs/ux/QT_PATTERNS.md (UI cookbook), Story 4.27 (UI MainThread enforcement)
@@ -319,8 +320,29 @@ R11 + R3 não impõem limite explícito, mas o squad mantém disciplina:
 
 ## Sign-off
 
-- **Aria (architect):** APPROVED como **proposed** — sujeito a validação
-  via Story 4.27 (smoke + responsiveness-audit). Após PASS, transição
-  para `accepted`.
-- **Uma (UX), Felix (frontend-dev), Pyro (perf):** revisão pendente
-  durante implementação de Story 4.27.
+- **Aria (architect):** APPROVED como **accepted** (2026-05-17).
+  Validação via Story 4.27 PASS:
+  - AC1+AC4 implementados: CatalogAdapter.check_interrupted_jobs slot
+    + interrupted_job_found signal (DownloadScreen P0-U2 fechado).
+  - AC2 implementado: _StorageStatusWorker em settings_screen.py
+    (SettingsScreen P0-U3 fechado).
+  - AC3 implementado: storage_indicator_worker.py com strategy
+    catalog-first (SELECT COALESCE(SUM(file_size_bytes), 0))
+    + fallback rglob (StorageIndicator P0-U4 fechado).
+  - AC5 implementado: ADR-029 comentários em todos callsites.
+  - AC6 implementado: shutdown() em StorageIndicator + closeEvent
+    main_window cobre _catalog_adapter dos screens.
+  - AC7 (P1-O1) implementado: veredito Opção 7a documentado inline
+    (bounded + single-shot — Defer/inline aceitável).
+  - AC8 implementado: progress coalesce 100ms + metrics shutdown
+    wait 500ms + closeEvent timeouts 500ms.
+  - AC9 audit: ZERO matches `sqlite3\.connect|rglob\(|Catalog\(`
+    fora de Worker bodies em ui/screens + ui/widgets.
+- **Sol (data-engineer):** implementação concluída commit por commit
+  na branch feat/v1.4.0-ui-r11-enforcement.
+- **Uma (UX), Felix (frontend-dev), Pyro (perf):** revisão durante
+  implementação satisfeita por reuse de padrões consolidados (worker
+  pattern em settings_screen, CatalogAdapter extensão).
+- **Quinn (QA):** responsiveness-audit smoke real (AC10) pendente
+  smoke session Pichau — não bloqueia transição `accepted` (audit
+  estático AC9 passa + suite UI 240+ tests verde).
