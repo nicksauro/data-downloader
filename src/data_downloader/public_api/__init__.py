@@ -167,6 +167,7 @@ from data_downloader.public_api.exceptions import (
     DownloadError,
     IntegrityError,
     InvalidContract,
+    MaxHIDError,
     OperationCancelled,
 )
 from data_downloader.public_api.handle import (
@@ -201,6 +202,7 @@ __all__ = [
     "DownloadStatus",
     "IntegrityError",
     "InvalidContract",
+    "MaxHIDError",
     "OperationCancelled",
     "__api_version__",
     "download",
