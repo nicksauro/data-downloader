@@ -1099,6 +1099,8 @@ class Catalog:
         exchange: str,
         start: date,
         end: date,
+        *,
+        roots: set[str] | None = None,
     ) -> set[date]:
         """Dias úteis já baixados (status ``completed``/``no_trades``) em ``[start, end]``.
 
@@ -1108,22 +1110,47 @@ class Catalog:
         re-tentar dias que falharam definitivamente num run anterior).
 
         Args:
-            symbol: Contrato vigente resolvido (ex.: ``"WDOJ26"``).
+            symbol: Contrato vigente resolvido (ex.: ``"WDOJ26"``). Ignorado
+                quando ``roots`` é passado (modo per-chunk — Story 4.26 AC6).
             exchange: ``"F"`` ou ``"B"``.
             start: Início do range (inclusive).
             end: Fim do range (inclusive).
+            roots: Story 4.26 AC6 — em modo per-chunk, o ledger pode ter
+                rows sob contract_codes heterogeneos (ex.: WDOH26, WDOJ26,
+                WDOK26 todos sob raiz WDO). Quando passado, a query filtra
+                por ``symbol IN roots`` em vez de ``symbol = ?``. Caller
+                tipicamente derive isso de
+                :meth:`list_contracts_in_range`. ``None`` (default) preserva
+                o comportamento legado (modo single-contract).
 
         Returns:
             ``set`` de ``date`` — dias já baixados dentro do range. Vazio
             se nenhum.
         """
         conn = self._conn_or_raise()
-        rows = conn.execute(
-            "SELECT chunk_date FROM chunk_ledger "
-            "WHERE symbol = ? AND exchange = ? AND status IN ('completed','no_trades') "
-            "AND chunk_date >= ? AND chunk_date <= ?",
-            (symbol, exchange, start.isoformat(), end.isoformat()),
-        ).fetchall()
+        if roots:
+            placeholders = ",".join("?" for _ in roots)
+            sql = (
+                "SELECT chunk_date FROM chunk_ledger "
+                f"WHERE symbol IN ({placeholders}) AND exchange = ? "
+                "AND status IN ('completed','no_trades') "
+                "AND chunk_date >= ? AND chunk_date <= ?"
+            )
+            params: tuple[object, ...] = (
+                *roots,
+                exchange,
+                start.isoformat(),
+                end.isoformat(),
+            )
+        else:
+            sql = (
+                "SELECT chunk_date FROM chunk_ledger "
+                "WHERE symbol = ? AND exchange = ? "
+                "AND status IN ('completed','no_trades') "
+                "AND chunk_date >= ? AND chunk_date <= ?"
+            )
+            params = (symbol, exchange, start.isoformat(), end.isoformat())
+        rows = conn.execute(sql, params).fetchall()
         out: set[date] = set()
         for r in rows:
             try:
@@ -1131,6 +1158,61 @@ class Catalog:
             except ValueError:  # pragma: no cover defensive — corrupted row
                 continue
         return out
+
+    def list_contracts_in_range(
+        self,
+        *,
+        root: str,
+        start: date,
+        end: date,
+    ) -> list[object]:
+        """Lista contratos vigentes para ``root`` que se sobrepoem ao range
+        ``[start, end]`` — Story 4.26 / ADR-028 AC2.
+
+        Overlap semantics: contrato cuja janela ``[vigent_from,
+        vigent_until]`` intersecta ``[start, end]``. Algebra:
+        ``vigent_from <= end AND vigent_until >= start``.
+
+        Args:
+            root: Raiz pedida (ex.: ``"WDO"``).
+            start: Inicio do range (inclusive, ``date``).
+            end: Fim do range (inclusive, ``date``).
+
+        Returns:
+            Lista de
+            :class:`data_downloader.orchestrator.contracts.Contract`
+            ordenada por ``vigent_from`` ASC. Vazia se a raiz nao tem
+            vigencia alguma cobrindo o range — caller decide tratamento
+            (fail-late no ``vigent_contract`` posterior).
+
+        Notes:
+            Retorno tipado como ``list[object]`` no signature publico para
+            evitar ciclo de import (Contract vive em ``orchestrator/``,
+            que ja importa ``Catalog``). Caller deve esperar
+            ``Contract`` instances — a import lazy interna garante isso.
+        """
+        from data_downloader.orchestrator.contracts import _row_to_contract
+
+        # Comparacao por string ISO datetime canonica do SQLite — vigent_from
+        # e vigent_until sao TIMESTAMP "YYYY-MM-DD HH:MM:SS" (ver
+        # populate_contracts_from_seed._format_ts). Para overlap, comparamos
+        # com strings YYYY-MM-DD que ordenam lexicograficamente como datetimes
+        # ate o limite do dia (YYYY-MM-DD < YYYY-MM-DD 00:00:01 < YYYY-MM-DD
+        # HH:MM:SS) — comportamento consistente com vigent_contract.
+        end_iso = end.strftime("%Y-%m-%d 23:59:59")
+        start_iso = start.strftime("%Y-%m-%d 00:00:00")
+        conn = self._conn_or_raise()
+        rows = conn.execute(
+            """
+            SELECT * FROM contracts
+             WHERE symbol_root = ?
+               AND vigent_from <= ?
+               AND vigent_until >= ?
+             ORDER BY vigent_from ASC
+            """,
+            (root, end_iso, start_iso),
+        ).fetchall()
+        return [_row_to_contract(r) for r in rows]
 
     # ------------------------------------------------------------------
     # ADR-025 Wave 3 — auto-compactação mensal (parquet-per-day híbrido)
