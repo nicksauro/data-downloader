@@ -418,19 +418,29 @@ data-downloader/
 ## 6. Contracts (Protocols por fronteira)
 
 > **Adicionado em v1.1.0 (2026-05-03)** — endereça PLAN_REVIEW H21.
+>
+> **Amendment 2026-05-17 (Story 4.28 / ADR-030):** Os 5 Protocols
+> prometidos em v1.1.0 estão implementados em
+> `src/data_downloader/contracts/_protocols.py` (consolidado num único
+> módulo — decisão Aria: 5 arquivos separados é overhead injustificado
+> para Protocols de ~20 LOC cada). Política de migração: **opt-in**.
+> Callers existentes (`ui/`, `cli/`, `public_api/`) mantêm imports
+> concretos. **Código novo** que cruza fronteira de camada DEVE depender
+> via Protocol. Migração de callers legados em PRs futuros (v1.5.0+).
+> Decisão completa em [ADR-030](./adr/ADR-030-protocol-first-boundary-policy.md).
+>
+> `MetricsEmitter` mora em `contracts/observability.py` desde Story 2.4 —
+> não move (re-exportado via `contracts/__init__.py`).
 
 Sem `Protocol`s explícitos em fronteiras, refator de internal quebra todo lugar que importa concreto. Aria define **interfaces tipadas** para cada fronteira de camada — implementações concretas adaptam, não substituem.
 
-**Path canônico:** `src/data_downloader/contracts/`
+**Path canônico (real, post-Story 4.28):** `src/data_downloader/contracts/`
 
 ```
 src/data_downloader/contracts/
-├── __init__.py
-├── writer.py          # WriterProtocol
-├── catalog.py         # CatalogProtocol
-├── dll_client.py      # DLLClientProtocol
-├── progress.py        # ProgressEmitter
-└── handle.py          # DownloadHandle (Protocol; impl concreta em public_api/download.py)
+├── __init__.py        # re-export dos 5 Protocols + MetricsEmitter
+├── _protocols.py      # 5 Protocols: Writer / Catalog / DLLClient / Progress / DownloadHandle
+└── observability.py   # MetricsEmitter (Story 2.4 / ADR-013)
 ```
 
 ### Protocols principais
