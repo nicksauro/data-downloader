@@ -1672,7 +1672,13 @@ class Catalog:
         # Import lazy para evitar ciclo (parquet_writer já importa schema).
         from data_downloader.storage.parquet_writer import compact_month
 
-        now = _utcnow_iso()
+        # Story 4.24: ``started_at`` precisa de granularidade sub-segundo
+        # para diferenciar claims concorrentes. ``_utcnow_iso()`` produz
+        # apenas precisao de segundos (compatibilidade SQLite ``datetime(
+        # 'now')``); usamos microssegundos APENAS aqui — comparacao
+        # WHERE-guard ``started_at < datetime('now', '-1 hour')`` continua
+        # correta lexicamente (sub-segundos sao mais "altos" que segundos).
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
         # Story 4.24 / ADR-026 §2.4 — claim atômico WHERE-guarded em
         # ``compactions`` como advisory lock cross-process. Substitui o
         # UPSERT incondicional v1.3.x (que sobrescrevia in-flight). Permite
