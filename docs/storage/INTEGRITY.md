@@ -267,6 +267,12 @@ DELETE FROM _pending_commits WHERE partition_path = ?;
 COMMIT;
 ```
 
+**Implementação (v1.4.0 — Story 4.23 / ADR-026 §2.1):**
+
+A ordem prescrita acima é implementada por `Catalog.pending_commit()` context manager em `src/data_downloader/storage/catalog.py`. O writer (`ParquetWriter.write`) e `compact_month` ganharam um kwarg opcional `catalog: Catalog | None`: quando passado, enquadram `os.replace(tmp, final)` no context manager — Fase 1 acontece em `__enter__` (claim atômico WHERE-guarded — ver §4.5), Fase 2 é o `os.replace` dentro do bloco, Fase 3 é executada por `handle.complete(write_result)`.
+
+A versão anterior do `Catalog.register_partition` (que invertia a ordem: replace → INSERT pending → UPSERT) foi mantida como **wrapper deprecated** (`DeprecationWarning`, remoção planejada para v1.5.0): wraps `pending_commit` + `handle.complete` para callers v1.3.x que ainda fazem `writer.write(...)` + `register_partition(...)` em sequência. Recovery de pending órfãs no boot é coberto em [§4.5](#45-recovery-on-boot--protocolo-story-422--adr-026-22).
+
 ### 4.3 Recovery no boot
 
 ```python
