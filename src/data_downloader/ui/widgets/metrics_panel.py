@@ -170,9 +170,18 @@ class MetricsAdapter(QObject):
                 "_teardown_in_worker",
                 Qt.ConnectionType.BlockingQueuedConnection,
             )
+        # Story 4.27 AC8 (P1-M1): reduzir wait(1500) → wait(500). "App trava
+        # ao fechar" — em pior caso o usuário percebia até 1.5s; agora 0.5s
+        # é teto + cleanup best-effort se thread não responder.
         with contextlib.suppress(Exception):
             thread.quit()
-            thread.wait(1500)
+            ok = thread.wait(500)
+            if not ok:
+                # Thread não terminou a tempo — agenda deleteLater no
+                # MainThread como best-effort. Não bloqueia closeEvent.
+                from PySide6.QtCore import QTimer
+
+                QTimer.singleShot(0, thread.deleteLater)
         self._thread = None
         self._timer = None
 

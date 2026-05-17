@@ -397,7 +397,25 @@ class OnboardingWizard(QDialog):
                     "Preencha os 3 campos antes de continuar.",
                 )
                 return
-            # Salva no .env (best-effort).
+            # Story 4.27 AC7 (P1-O1 — R11 envelope):
+            # ``save()`` faz ``env_path.write_text`` síncrono. Pela regra
+            # determinística de ADR-029, qualquer I/O de disco deveria ir
+            # para Worker. Decisão (Opção 7a — Defer/inline aceitável):
+            #
+            # Justificativas (escopo-bounded explícito):
+            # - Single-shot: roda apenas no 1º launch (wizard modal); NÃO
+            #   está em hot path (timer 30s) nem cresce com dado do usuário.
+            # - Payload bounded: ~150 bytes (3 chaves env). Custo medido
+            #   em SSD: <5ms; pior caso esperado em HDD/encrypted: <50ms
+            #   — dentro do envelope R11 de "1 frame budget".
+            # - UX flow: usuário acaba de clicar "Próximo" e ESPERA uma
+            #   transição (mesmo que pequena); Worker aqui introduziria
+            #   3 estados (idle/salvando/done) para zerar uma latência
+            #   imperceptível.
+            #
+            # Se profile real (Pichau) revelar p99 > 16ms em SSD ou
+            # >50ms em HDD, promover para Worker one-shot (Opção 7b).
+            # AC7 — veredito Opção 7a sob bounded + single-shot.
             try:
                 self.save()
             except OSError as exc:

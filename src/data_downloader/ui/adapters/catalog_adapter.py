@@ -282,7 +282,11 @@ class CatalogAdapter(QObject):
             self._debounce_timer.stop()
         try:
             self._thread.quit()
-            self._thread.wait(2000)
+            # Story 4.27 AC8 (P1-C1): reduzir wait(2000) → wait(500). N
+            # adapters * 2000ms = pior caso vários segundos para closeEvent;
+            # 500ms é teto razoável para uma query SQLite drain. Se a thread
+            # não responder em 500ms, deleteLater best-effort cuida do GC.
+            self._thread.wait(500)
         except Exception:
             pass
 

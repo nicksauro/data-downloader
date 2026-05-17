@@ -55,6 +55,12 @@ __all__ = ["DownloadAdapter"]
 # breadcrumbs no entry point do worker QThread.
 _log = logging.getLogger("data_downloader.ui.adapters.download_adapter")
 
+# Story 4.27 AC8 (P1-D1): intervalo mínimo entre emits do progress signal.
+# 100ms = 10Hz visual — humano não percebe atualizações mais rápidas que
+# isso. Coalesce rajada de chunks rápidos para evitar sinal-flooding no
+# MainThread (ProgressCard.set_progress chama setText em vários labels).
+_PROGRESS_COALESCE_MS = 100.0
+
 
 class DownloadAdapter(QObject):
     """Bridge thread-safe MainThread Qt → ``public_api.download()``.
@@ -173,9 +179,31 @@ class DownloadAdapter(QObject):
 
         # Loop bloqueante de eventos — roda nesta QThread, não bloqueia
         # MainThread. Cada item é DownloadProgress.
+        #
+        # Story 4.27 AC8 (P1-D1 — backpressure): coalesce de progress
+        # signal. Em rajada (10+ events/seg) a UI gasta tempo só processando
+        # `setText` em ProgressCard; humano percebe ~10Hz visual. Mantemos
+        # um throttle de _PROGRESS_COALESCE_MS entre emits consecutivos,
+        # com 1 garantia: sempre emitir o ÚLTIMO evento sincronamente quando
+        # events() esgota (Risk #4 — usuário não fica em "97%" perpétuo).
         try:
+            last_emit_monotonic = 0.0
+            pending_event: object | None = None
+            from time import monotonic
+
             for event in self._handle.events():
-                self.progress.emit(event)
+                now = monotonic()
+                # Sempre coalesce: se passou _PROGRESS_COALESCE_MS, emite e
+                # reseta o timestamp; senão, segura para próxima oportunidade.
+                if (now - last_emit_monotonic) * 1000.0 >= _PROGRESS_COALESCE_MS:
+                    self.progress.emit(event)
+                    last_emit_monotonic = now
+                    pending_event = None
+                else:
+                    pending_event = event
+            # events() esgotou — drena o último pendente (sempre síncrono).
+            if pending_event is not None:
+                self.progress.emit(pending_event)
         except Exception as exc:
             _log.exception("ui.events_loop_raised symbol=%s", symbol)
             self.error.emit(exc)
@@ -276,7 +304,12 @@ class DownloadAdapter(QObject):
                 handle.cancel(timeout=0.0)
         try:
             self._thread.quit()
-            self._thread.wait(5000)
+            # Story 4.27 AC8 (P1-C1): reduzir wait(5000) → wait(500). Em
+            # closeEvent não podemos bloquear 5s — usuário percebe "trava".
+            # Se thread não responder em 500ms, deleteLater best-effort
+            # cuida do GC; "QThread: destroyed while running" warning
+            # aceito como ruído (versus app travada perceptivelmente).
+            self._thread.wait(500)
         except Exception:
             pass
 
