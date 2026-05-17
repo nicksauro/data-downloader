@@ -118,9 +118,38 @@ class VerificationResult:
 
 
 # -----------------------------------------------------------------------------
+# PyInstaller 6.x layout helper
+# -----------------------------------------------------------------------------
+def _resolve_pyinstaller_layout(base_path: Path) -> Path:
+    """Detecta layout PyInstaller 6.x onedir e redireciona para ``_internal/``.
+
+    Story 4.25 AC6 — fix invocation order: BUILD_PROTOCOL.md §4.1 (e o
+    release.yml job ``build-windows``) chamam este script com o root
+    ``dist/data_downloader/``, mas PyInstaller 6.x bundla as DLLs/companions
+    em ``dist/data_downloader/_internal/`` por default (não no root, apesar
+    do spec tentar forçar ``contents_directory='.'`` — ver
+    ``scripts/build_release.py:329-336`` para a mesma defesa).
+
+    Heurística: se ``ProfitDLL.dll`` NÃO está em ``base_path`` mas ESTÁ em
+    ``base_path/_internal/``, retorna ``base_path/_internal/``. Caso contrário
+    retorna ``base_path`` inalterado.
+    """
+    if not base_path.is_dir():
+        return base_path
+    if (base_path / "ProfitDLL.dll").is_file():
+        return base_path
+    internal = base_path / "_internal"
+    if (internal / "ProfitDLL.dll").is_file():
+        return internal
+    return base_path
+
+
+# -----------------------------------------------------------------------------
 # Verificação principal
 # -----------------------------------------------------------------------------
 def verify(base_path: Path) -> VerificationResult:
+    # Story 4.25 AC6 — auto-detect _internal/ para PyInstaller 6.x onedir.
+    base_path = _resolve_pyinstaller_layout(base_path)
     result = VerificationResult(base_path=base_path)
 
     if not base_path.exists():
