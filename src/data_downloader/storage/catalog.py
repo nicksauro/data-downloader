@@ -1218,9 +1218,13 @@ class Catalog:
         exc_info_pre = sys.exc_info()[0]
         try:
             yield handle
-        except BaseException:
+        except Exception:
             # Exception propagada do bloco caller. NÃO deletamos a pending
             # row — recovery on boot resolve com base no estado on-disk.
+            # Story 4.24: ``except Exception`` (não ``BaseException``) — o
+            # objetivo é preservar pending em caso de erro de aplicação;
+            # KeyboardInterrupt/SystemExit não são erros lógicos e podem
+            # propagar sem custom handling (recovery on boot ainda cobre).
             raise
         else:
             # Exit normal. Se caller esqueceu de chamar complete(), loga
@@ -1626,15 +1630,22 @@ class Catalog:
         Pipeline:
 
         1. Checa ``is_month_complete`` — se False, no-op.
-        2. INSERT em ``compactions`` (started_at=now, completed_at=NULL).
+        2. **Claim atômico WHERE-guarded em ``compactions``** (Story 4.24 /
+           ADR-026 §2.4): INSERT ... ON CONFLICT DO UPDATE WHERE só
+           sobrescreve se row anterior é stale (>1h) OU já completada.
+           Pós-INSERT re-SELECT compara ``started_at`` com o ``now``
+           passado — se diferente, outro processo claim'd primeiro
+           (no-op, retorna ``False``, log ``claim_lost``).
         3. Chama :func:`compact_month` (lê diários → write mensal atômico → DELETE diários).
         4. UPSERT na tabela ``partitions``: row mensal (day=NULL) + DELETE
            das rows diárias do mesmo ``(symbol, exchange, year, month)``.
         5. UPDATE ``compactions`` completed_at=now.
 
-        Crash entre passos 3 e 5: ``reconcile`` detecta ``compactions``
-        in-flight e completa (se ``MM.parquet`` íntegro) OU reverte
-        (se inconsistente) — ver ADR-025 §2.4.
+        Crash entre passos 3 e 5: ``_recover_inflight_compactions`` detecta
+        ``compactions`` in-flight no próximo boot e completa (se
+        ``MM.parquet`` íntegro) OU reverte (se inconsistente) — ver
+        ADR-025 §2.4. Claims stale (>1h) tornam-se reclamáveis pelo
+        WHERE-guard de §2.4.
 
         Idempotência: se ``compact_month`` retorna ``None`` (no-op — já
         compactado, sem diários), apenas garante que o estado SQLite
@@ -1649,7 +1660,8 @@ class Catalog:
 
         Returns:
             ``True`` se compactou (executou IO); ``False`` se no-op
-            (mês incompleto OU já compactado).
+            (mês incompleto OU já compactado OU claim perdido p/ outro
+            processo).
         """
         if self.data_dir is None:  # pragma: no cover defensive
             return False
@@ -1661,7 +1673,15 @@ class Catalog:
         from data_downloader.storage.parquet_writer import compact_month
 
         now = _utcnow_iso()
-        # Marca início da compactação (idempotente — UPSERT).
+        # Story 4.24 / ADR-026 §2.4 — claim atômico WHERE-guarded em
+        # ``compactions`` como advisory lock cross-process. Substitui o
+        # UPSERT incondicional v1.3.x (que sobrescrevia in-flight). Permite
+        # sobrescrever apenas se a row anterior está stale (>1h sem
+        # ``completed_at``) OU já completada. Pós-INSERT, re-SELECT
+        # ``started_at`` e comparamos com o ``now`` original: se diferente,
+        # outro processo claim'd dentro da janela de 1h — no-op (retorna
+        # ``False``). Evita o race em que 2 processos chamam
+        # ``compact_month`` na mesma chave.
         try:
             with self._transaction():
                 conn = self._conn_or_raise()
@@ -1674,14 +1694,42 @@ class Catalog:
                         started_at = excluded.started_at,
                         completed_at = NULL,
                         error = NULL
+                    WHERE compactions.completed_at IS NOT NULL
+                       OR compactions.started_at < datetime('now', '-1 hour')
                     """,
                     (symbol, exchange, year, month, now),
                 )
+                claim_row = conn.execute(
+                    "SELECT started_at FROM compactions WHERE symbol = ? "
+                    "AND exchange = ? AND year = ? AND month = ?",
+                    (symbol, exchange, year, month),
+                ).fetchone()
         except sqlite3.Error as exc:
             _LOG.warning(
                 "catalog.maybe_compact_month.tracker_failed",
                 extra={"err": str(exc), "symbol": symbol, "year": year, "month": month},
             )
+            return False
+
+        # AC6/AC7 — verifica se o claim foi conquistado: o ``started_at``
+        # da row precisa bater com o ``now`` que passamos no INSERT.
+        # Diferente = outro processo claim'd primeiro (DO UPDATE bloqueado
+        # pelo WHERE) -> no-op.
+        if claim_row is None or str(claim_row["started_at"]) != now:
+            _LOG.info(
+                "catalog.maybe_compact_month.claim_lost",
+                extra={
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "year": year,
+                    "month": month,
+                    "own_started_at": now,
+                    "holder_started_at": str(claim_row["started_at"])
+                    if claim_row is not None
+                    else None,
+                },
+            )
+            return False
 
         try:
             # Story 4.23 / ADR-026 §2.1: passamos ``catalog=self`` para
@@ -2479,7 +2527,7 @@ class Catalog:
         )
 
     def _recover_inflight_compactions(self) -> None:
-        """Resolve compactações in-flight (ADR-025 §2.4).
+        """Resolve compactações in-flight (ADR-025 §2.4 + ADR-026 §2.4).
 
         Crash entre write ``{MM}.parquet`` e DELETE diários deixa rows em
         ``compactions`` com ``started_at`` mas sem ``completed_at``. Para
@@ -2491,6 +2539,14 @@ class Catalog:
         - Caso contrário (`MM.parquet` inexistente OU menor que diários):
           REVERTE — deleta o `{MM}.parquet` se existir, marca
           ``compactions.error='reverted'`` para inspeção humana.
+
+        **Integração single-flight (Story 4.24 / ADR-026 §2.4):** após o
+        claim atômico WHERE-guarded em ``maybe_compact_month``, rows com
+        ``started_at < now-1h`` são consideradas crash residuals e
+        tornam-se reclamáveis pelo próximo claim. Este método é o
+        "garbage collector" da `completed_at IS NULL` queue — completa ou
+        reverte conforme o estado on-disk, deixando o catálogo coerente
+        para a próxima janela de claim.
         """
         if self.data_dir is None:  # pragma: no cover defensive
             return
