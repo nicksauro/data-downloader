@@ -20,7 +20,10 @@ stories futuras (1.4 ``DiskFull``/``IntegrityError``, 1.6 ``InvalidContract``,
 
 from __future__ import annotations
 
+from datetime import date as _date
+
 __all__ = [
+    "AmbiguousRolloverError",
     "ConnectionLost",
     "DLLInitError",
     "DataDownloaderError",
@@ -40,6 +43,7 @@ __all__ = [
 _PUBLIC_ERROR_MICROCOPY_ID: dict[str, str] = {
     "DLLInitError": "ERR_DLL_NOT_INITIALIZED",
     "InvalidContract": "ERR_INVALID_CONTRACT",
+    "AmbiguousRolloverError": "ERR_AMBIGUOUS_ROLLOVER",
     "DiskFull": "ERR_DISK_FULL",
     "DownloadError": "ERR_CHUNK_FAILED",
     "IntegrityError": "ERR_CATALOG_DRIFT",
@@ -195,6 +199,103 @@ class InvalidContract(DataDownloaderError):  # noqa: N818  ADR-011 canonical nam
         self.symbol_root = symbol_root
         self.on_date = on_date
         self.exchange = exchange
+
+
+class AmbiguousRolloverError(InvalidContract):
+    """Janela ``[start, end]`` cruza rollover sob uma raiz (Story 4.26 / ADR-028).
+
+    Default-blocked behavior (Q-DRIFT-32 defense): ``download('WDO',
+    2026-01-15, 2026-06-15)`` cruzaria 4-5 contratos vigentes WDO. Antes
+    da v1.4.0 o orchestrator resolvia ``WDOG26`` uma única vez via
+    ``config.start.date()`` e usava-o para todos os chunks — chunks fora
+    da vigência de ``WDOG26`` retornavam 0 trades silenciosamente (perda
+    de dados invisível).
+
+    A v1.4.0 detecta o caso em ``_validate_config`` e levanta esta
+    exceção com mensagem prescritiva listando os contratos detectados
+    + as 3 opções de remediação:
+
+      1. **Continuous future** (recomendado): ``download('WDOFUT', ...)``.
+      2. **Contrato específico**: sub-range dentro da vigência.
+      3. **Opt-in per-chunk**: ``resolve_contract_per_chunk=True`` — cada
+         chunk re-resolve o vigente.
+
+    Subclasse de :class:`InvalidContract` para que callers que já
+    capturam ``InvalidContract`` continuem funcionando (compat). Quem
+    quiser distinguir captura por tipo.
+
+    Args:
+        symbol_root: Raiz pedida (ex.: ``"WDO"``).
+        start: Início da janela (date).
+        end: Fim da janela (date).
+        contracts_in_range: Lista ordenada de ``contract_code`` que
+            cobrem o range (>= 2 obrigatório — < 2 é caso permitido).
+
+    Attributes:
+        symbol_root: Raiz consultada.
+        start: Início da janela.
+        end: Fim da janela.
+        contracts_in_range: Contratos detectados no range.
+
+    Story 4.26 — primeira implementação (raised por
+    ``Orchestrator._validate_no_rollover_in_window`` quando
+    ``resolve_contract=True AND resolve_contract_per_chunk=False``).
+    """
+
+    def __init__(
+        self,
+        symbol_root: str,
+        start: _date,
+        end: _date,
+        contracts_in_range: list[str],
+    ) -> None:
+        codes = list(contracts_in_range)
+        msg_lines = [
+            f"Symbol root {symbol_root!r} cobre {len(codes)} contratos vigentes "
+            f"no range [{start.isoformat()}, {end.isoformat()}]:",
+        ]
+        msg_lines.extend(f"  - {code}" for code in codes)
+        msg_lines.extend(
+            [
+                "",
+                "Cross-rollover downloads com raiz sao bloqueados por padrao (Q-DRIFT-32 defense).",
+                "Escolha UMA opcao:",
+                "",
+                "  1. Use o continuous-future (recomendado para historico longo):",
+                f"       download({symbol_root}FUT, start=..., end=...)",
+                "",
+                "  2. Use o contrato especifico (sub-range deve caber dentro da vigencia):",
+                f"       download({codes[0] if codes else '<contract>'}, start=..., end=...)",
+                "",
+                "  3. Habilite re-resolucao por chunk explicitamente (opt-in avancado):",
+                f"       download({symbol_root!r}, start=..., end=..., "
+                "resolve_contract_per_chunk=True)",
+                "       (cada dia baixa com o vigente correto; requer contracts "
+                "table populada cobrindo todo o range).",
+            ]
+        )
+        message = "\n".join(msg_lines)
+        details: dict[str, object] = {
+            "symbol_root": symbol_root,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "contracts_in_range": list(codes),
+            "remedy": "use_continuous_future_or_split_or_opt_in_per_chunk",
+        }
+        # ``InvalidContract.__init__`` aceita ``message`` keyword e mescla
+        # ``details``; passar ``on_date=start`` mantém compat com leitura
+        # de ``.on_date`` em código existente que trate ``InvalidContract``.
+        super().__init__(
+            symbol_root,
+            start,
+            exchange="F",
+            message=message,
+            details=details,
+        )
+        self.symbol_root = symbol_root
+        self.start = start
+        self.end = end
+        self.contracts_in_range = list(codes)
 
 
 class DiskFull(DataDownloaderError):  # noqa: N818  ADR-011 canonical name

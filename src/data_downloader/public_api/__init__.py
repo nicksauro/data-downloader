@@ -160,6 +160,7 @@ from __future__ import annotations
 
 from data_downloader.public_api.download import download
 from data_downloader.public_api.exceptions import (
+    AmbiguousRolloverError,
     ConnectionLost,
     DataDownloaderError,
     DiskFull,
@@ -190,6 +191,7 @@ Bump rules in module docstring above. Consumers pin via
 """
 
 __all__ = [
+    "AmbiguousRolloverError",
     "ConnectionLost",
     "DLLInitError",
     "DataDownloaderError",
