@@ -41,6 +41,7 @@
 | [019](./ADR-019-schema-as-contract.md) | Schema as Contract — Never Drop Columns | `proposed` | 2026-05-05 | — |
 | [020](./ADR-020-volume-completeness.md) | Volume Completeness Invariant | `proposed` | 2026-05-05 | — |
 | [022](./ADR-022-single-session-sequential-policy.md) | Single-Session Sequential Download Policy | `accepted` | 2026-05-05 | supersedes **ADR-015** |
+| [030](./ADR-030-protocol-first-boundary-policy.md) | Protocol-First Boundary Policy (opt-in migration) | `proposed` | 2026-05-17 | — |
 
 ---
 
@@ -70,6 +71,7 @@
 - ADR-007 (princípio SemVer separado — superseded)
 - ADR-007a (`DownloadHandle` + `cancel()`)
 - ADR-011 (Exception hierarchy)
+- ADR-030 (Protocol-First Boundary Policy — proposed)
 
 ### Operacional / DevOps
 - ADR-008 (DLL distribution)
