@@ -82,6 +82,10 @@ def indicator(qtbot):
     yield w
     with contextlib.suppress(Exception):
         w._timer.stop()
+    # Story 4.27 AC6 — encerra QThread do worker (evita "QThread destroyed
+    # while still running" no teardown do test).
+    with contextlib.suppress(Exception):
+        w.shutdown()
 
 
 def test_indicator_initial_state(indicator):
