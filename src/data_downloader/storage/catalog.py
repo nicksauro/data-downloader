@@ -40,6 +40,7 @@ import sqlite3
 import sys
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1333,128 +1334,99 @@ class Catalog:
         job_id: str | None = None,
         day: int | None = None,
     ) -> None:
-        """Registra (UPSERT) uma partição escrita pelo writer.
+        """Registra (UPSERT) uma partição já escrita on-disk — **DEPRECATED**.
 
-        Implementa o two-phase commit emulado (AC13):
+        Story 4.23 (ADR-026 §2.1) inverteu o protocolo two-phase commit
+        em :meth:`ParquetWriter.write` (kwarg ``catalog``). Esta função
+        permanece como wrapper de compatibilidade para callers v1.3.x
+        que ainda chamam ``write()`` SEM injetar catalog e fazem a
+        registração em sequência.
 
-        1. INSERT em ``_pending_commits`` com hash esperado.
-        2. (writer já fez ``os.replace`` antes desta chamada — assumimos
-           atomicidade do replace.)
-        3. UPSERT em ``partitions`` + DELETE de ``_pending_commits``.
+        Comportamento:
 
-        UPSERT por ``partition_path`` torna a operação idempotente
-        (AC6): re-registrar a mesma partição atualiza row_count,
-        timestamps e checksum sem duplicar linhas.
+        1. Emite ``DeprecationWarning`` com ``stacklevel=2`` (aponta
+           para o caller).
+        2. Chama :meth:`pending_commit` para o ``write_result.path``
+           (Fase 1 — INSERT atômico em ``_pending_commits``).
+        3. Imediatamente chama ``handle.complete(write_result)`` (Fase 3
+           — UPSERT em ``partitions`` + DELETE pending + WAL checkpoint
+           + notify observers).
 
-        Após commit bem-sucedido, força ``wal_checkpoint(TRUNCATE)``
-        (AC12) para evitar perda em crash entre write e checkpoint
-        default. Trade-off: ~10ms extra por partição vs. ganho de
-        durabilidade — aceitável dado que partições são escritas em
-        granularidade mensal (não por trade).
+        Como o arquivo JÁ está em disco (writer legacy fez ``os.replace``
+        antes desta chamada), a Fase 2 (replace) é no-op aqui — o SHA256
+        passado em ``pending_commit`` é o ``write_result.checksum_sha256``
+        atual; recovery on boot validaria o mesmo SHA contra o arquivo
+        on-disk e re-registraria normalmente.
+
+        Migração recomendada (v1.4.0):
+
+        .. code-block:: python
+
+            # ANTES (v1.3.x — caminho legacy):
+            wr = writer.write(trades, partition, dll_version=v)
+            catalog.register_partition(wr, partition, job_id=jid)
+
+            # DEPOIS (v1.4.0+):
+            wr = writer.write(trades, partition, dll_version=v,
+                              catalog=catalog, job_id=jid)
+            # register_partition NÃO é mais necessário.
+
+        Remoção planejada: v1.5.0.
 
         Args:
             write_result: Saída de ``ParquetWriter.write``.
             partition: ``PartitionKey`` correspondente.
             job_id: UUID do job que originou esta escrita (opcional).
+            day: Override defensivo para ``partition.day`` (raro — uso
+                em testes). Default ``None`` honra ``partition.day``.
 
         Raises:
-            sqlite3.IntegrityError: Violação de constraint (ex:
-                ``row_count < 0`` — defesa contra bug de writer).
+            sqlite3.IntegrityError: Violação de constraint do SQLite.
+            ConcurrentWriterError: Outro writer detém claim ativo na
+                mesma ``partition_path`` (inesperado se caller já passou
+                pelo replace; pode indicar bug de coordenação).
+
+        .. deprecated:: 1.4.0
+            Pass ``catalog`` to :meth:`ParquetWriter.write` instead.
         """
+        warnings.warn(
+            "Catalog.register_partition is deprecated; pass catalog to "
+            "ParquetWriter.write() instead (Story 4.23 / ADR-026 sect 2.1). "
+            "Removal planned for v1.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self.data_dir is None:  # pragma: no cover  defensive
             raise RuntimeError("data_dir not set; required for register_partition")
 
         rel_path = relative_partition_path(write_result.path, self.data_dir)
-        now = _utcnow_iso()
-        pid = os.getpid()
 
-        # ADR-025 v1.3.0: ``day`` derivado em prioridade da ``PartitionKey``
-        # (fonte canônica do layout); caller pode sobrescrever via kwarg
-        # ``day`` se quiser registrar uma partição mensal a partir de uma
-        # PartitionKey diária (uso raro — defensivo). NULL = mensal
-        # compactado; NOT NULL = diário parcial.
-        resolved_day = day if day is not None else partition.day
-
-        # Fase 1 — pending commit (AC13).
-        with self._transaction():
-            conn = self._conn_or_raise()
-            conn.execute(
-                """
-                INSERT INTO _pending_commits(
-                    partition_path, started_at, expected_sha256, expected_size, job_id, pid
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(partition_path) DO UPDATE SET
-                    started_at = excluded.started_at,
-                    expected_sha256 = excluded.expected_sha256,
-                    expected_size = excluded.expected_size,
-                    job_id = excluded.job_id,
-                    pid = excluded.pid
-                """,
-                (
-                    rel_path,
-                    now,
-                    write_result.checksum_sha256,
-                    write_result.file_size_bytes,
-                    job_id,
-                    pid,
-                ),
+        # ADR-025 v1.3.0 / Story 4.23: ``day`` override defensivo. Se
+        # caller passou ``day`` explícito, usamos uma PartitionKey ajustada
+        # para que ``_finalize_pending_commit`` use o ``day`` correto.
+        if day is not None and day != partition.day:
+            partition_for_phase3 = PartitionKey(
+                exchange=partition.exchange,
+                symbol=partition.symbol,
+                year=partition.year,
+                month=partition.month,
+                day=day,
             )
+        else:
+            partition_for_phase3 = partition
 
-        # Fase 2 — arquivo já está em disco (writer fez os.replace antes).
-        # Fase 3 — UPSERT em partitions + clear pending commit.
-        with self._transaction():
-            conn = self._conn_or_raise()
-            conn.execute(
-                """
-                INSERT INTO partitions(
-                    partition_path, symbol, exchange, year, month, day,
-                    row_count, first_ts_ns, last_ts_ns, schema_version,
-                    checksum_sha256, file_size_bytes, written_at, job_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(partition_path) DO UPDATE SET
-                    row_count = excluded.row_count,
-                    first_ts_ns = excluded.first_ts_ns,
-                    last_ts_ns = excluded.last_ts_ns,
-                    schema_version = excluded.schema_version,
-                    checksum_sha256 = excluded.checksum_sha256,
-                    file_size_bytes = excluded.file_size_bytes,
-                    day = excluded.day,
-                    written_at = excluded.written_at,
-                    job_id = COALESCE(excluded.job_id, partitions.job_id)
-                """,
-                (
-                    rel_path,
-                    partition.symbol,
-                    partition.exchange,
-                    partition.year,
-                    partition.month,
-                    resolved_day,
-                    write_result.row_count,
-                    write_result.first_ts_ns,
-                    write_result.last_ts_ns,
-                    self._get_meta("parquet_schema_min_supported") or "1.0.0",
-                    write_result.checksum_sha256,
-                    write_result.file_size_bytes,
-                    now,
-                    job_id,
-                ),
-            )
-            conn.execute(
-                "DELETE FROM _pending_commits WHERE partition_path = ?",
-                (rel_path,),
-            )
-
-        # AC12 — WAL checkpoint forçado após cada register_partition.
-        try:
-            conn = self._conn_or_raise()
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.Error as exc:
-            _LOG.warning("catalog.wal_checkpoint.failed", extra={"err": str(exc)})
-
-        # v1.3.0 Wave 2B — notifica observers (CatalogScreen auto-refresh).
-        # APÓS o commit/checkpoint para que listeners que re-consultem o
-        # catálogo enxerguem a partition recém-gravada.
-        _notify_partition_observers(partition.symbol, partition.year, partition.month)
+        # Fase 1 + Fase 3 em sequência via context manager (Fase 2 é no-op
+        # — caller legacy já fez os.replace antes). Comportamento
+        # observável idêntico ao caminho original: UPSERT em partitions
+        # + DELETE pending + WAL checkpoint + notify observers.
+        with self.pending_commit(
+            rel_path=rel_path,
+            partition=partition_for_phase3,
+            expected_sha256=write_result.checksum_sha256,
+            expected_size=write_result.file_size_bytes,
+            job_id=job_id,
+        ) as handle:
+            handle.complete(write_result)
 
     def register_gap(
         self,
