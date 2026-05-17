@@ -245,6 +245,46 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
             "Aguarde alguns minutos e tente novamente. Se persistir, rode `data-downloader doctor`."
         ),
     ),
+    # Story 4.29 — MaxHID detection. Servidor Nelogica recusa login quando a
+    # licenca esta em uso em outro processo (relatorio Pichau 2026-05-17 +
+    # diagnose Aria). Microcopy prescreve 3 remedies; UI banner em
+    # DownloadScreen (AC6) renderiza titulo/detalhe/acao + 2 botoes (acao
+    # primaria "Tentar de novo" + acao secundaria abre portal Nelogica).
+    "ERR_DLL_MAX_HID": MicrocopyEntry(
+        msg_type="error",
+        title="Licença Nelogica em uso",
+        detail=(
+            "Sua chave de licença Nelogica está em uso em outro computador ou "
+            "sessão. Feche outras instâncias do data-downloader/ProfitChart e "
+            "tente de novo, ou desconecte HIDs em "
+            "https://www.nelogica.com.br/area-cliente."
+        ),
+        action="Tentar de novo",
+    ),
+    "ERR_DLL_MAX_HID_ACTION_SECONDARY": MicrocopyEntry(
+        msg_type="label",
+        title="Abrir portal Nelogica",
+    ),
+    "ERR_DLL_MAX_HID_REMEDY_1": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "1. Feche o ProfitChart e qualquer outra instância do "
+            "data-downloader (em qualquer máquina)."
+        ),
+    ),
+    "ERR_DLL_MAX_HID_REMEDY_2": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "2. Acesse https://www.nelogica.com.br/area-cliente e desconecte todos os HIDs ativos."
+        ),
+    ),
+    "ERR_DLL_MAX_HID_REMEDY_3": MicrocopyEntry(
+        msg_type="label",
+        title=(
+            "3. Aguarde 5-30min e tente de novo; se persistir, abra ticket em "
+            "suporte@nelogica.com.br ('licença travada em MaxHID')."
+        ),
+    ),
     "ERR_DOWNLOAD_EMPTY": MicrocopyEntry(
         msg_type="error",
         title="Download retornou vazio sem motivo claro",
@@ -725,6 +765,14 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
     "LBL_ABOUT_BUG_LINK": MicrocopyEntry(msg_type="label", title="🐛 Reportar bug"),
     "BTN_TEST_CONNECTION": MicrocopyEntry(msg_type="button", title="Testar Conexão"),
     "BTN_OPEN_DLL_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir Pasta DLL"),
+    # Story 4.29 — botao em SettingsScreen para self-service de suporte.
+    # Pichau 2026-05-17: usuario disse "DLL nao loga" porque procurou os
+    # logs no lugar errado. Abre <install>/_internal/Logs/ no Explorer.
+    "BTN_OPEN_LOGS_FOLDER": MicrocopyEntry(msg_type="button", title="Abrir pasta de logs"),
+    "TOOLTIP_OPEN_LOGS_FOLDER": MicrocopyEntry(
+        msg_type="label",
+        title="Logs nativos da DLL — útil para suporte técnico",
+    ),
     # Story 4.14 (Pichau live test 2026-05-05) — auto-detect DLL +
     # file picker. Usuário do .exe não sabia path completo da DLL para
     # colar manualmente; precisa de UX onde ele nem precise saber path.
