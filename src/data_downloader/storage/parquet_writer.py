@@ -46,6 +46,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -69,6 +70,11 @@ from data_downloader.storage.schema import (
     TradeRecord,
     pyarrow_schema,
 )
+
+if TYPE_CHECKING:
+    # Forward-only: catalog.py importa WriteResult deste módulo (ciclo
+    # ascendente). Annotation lazy via `from __future__ import annotations`.
+    from data_downloader.storage.catalog import Catalog
 
 _LOG = logging.getLogger(__name__)
 
@@ -259,11 +265,24 @@ class ParquetWriter:
         *,
         dll_version: str,
         chunk_id: str | None = None,
+        catalog: Catalog | None = None,
+        job_id: str | None = None,
     ) -> WriteResult:
         """Escreve um lote de trades atomicamente.
 
         Pipeline (ver módulo docstring). Append + dedup automático se a
         partição já existe (idempotência R5).
+
+        **Two-phase commit invertido (Story 4.23 / ADR-026 §2.1):**
+        quando ``catalog`` é injetado, o writer enquadra o
+        ``os.replace(tmp, final)`` em :meth:`Catalog.pending_commit` —
+        Fase 1 (INSERT em ``_pending_commits`` com SHA256/size esperados
+        pré-replace) ANTES do replace, Fase 3 (UPSERT em ``partitions``
+        + DELETE pending) DEPOIS. Crash em qualquer ponto deixa estado
+        recuperável (Story 4.22). Quando ``catalog is None`` (callers
+        legacy v1.3.x), comportamento original é preservado: writer
+        apenas faz ``os.replace`` e retorna ``WriteResult``; caller
+        decide se/como registrar (via ``Catalog.register_partition``).
 
         Args:
             trades: Lote a persistir. Cópia defensiva é feita
@@ -274,6 +293,11 @@ class ParquetWriter:
                 no boot (NOT NULL no schema).
             chunk_id: UUID do chunk de origem (auditoria). Pode ser
                 ``None`` se merge de múltiplos chunks.
+            catalog: Catalog opcional para enquadrar o commit no protocolo
+                two-phase invertido. Quando passado, ``register_partition``
+                NÃO deve ser chamado pelo caller (já está incluído).
+            job_id: UUID do job que originou a escrita; forwardado para
+                ``Catalog.pending_commit`` quando ``catalog`` injetado.
 
         Returns:
             ``WriteResult`` com path, row_count, bounds, SHA256, size.
@@ -282,6 +306,8 @@ class ParquetWriter:
             IntegrityError: registro inválido OU partição excede
                 ``_PARTITION_ROW_LIMIT`` (guard paliativo; particionamento
                 diário real é ADR-025 — v1.2.0 Wave 2).
+            ConcurrentWriterError: outro writer detém claim em
+                ``_pending_commits`` (somente quando ``catalog`` injetado).
         """
         if not trades:
             # No-op semântico — não cria arquivo vazio.
@@ -415,11 +441,54 @@ class ParquetWriter:
             # 10. fsync(parent_dir) — best-effort.
             _fsync_directory(path.parent)
 
-            # 11. os.replace (atômico Windows + Linux).
-            os.replace(tmp_path, path)
+            # 11. Compute WriteResult bounds antes do replace — usado tanto
+            # no caminho legacy quanto no two-phase commit (handle.complete).
+            if table.num_rows == 0:
+                # Defesa — não devíamos chegar aqui (input validado não vazio).
+                first_ts_ns = 0
+                last_ts_ns = 0
+            else:
+                ts_col = table.column("timestamp_ns")
+                first_ts_ns = int(pa.compute.min(ts_col).as_py())
+                last_ts_ns = int(pa.compute.max(ts_col).as_py())
 
-            # 12. fsync(parent_dir) novamente para persistir a entrada renomeada.
-            _fsync_directory(path.parent)
+            write_result = WriteResult(
+                path=path,
+                row_count=table.num_rows,
+                first_ts_ns=first_ts_ns,
+                last_ts_ns=last_ts_ns,
+                checksum_sha256=checksum,
+                file_size_bytes=file_size,
+            )
+
+            # 12. Fase 2 (replace atômico) — enquadrado em pending_commit
+            # quando catalog injetado (Story 4.23 / ADR-026 §2.1).
+            if catalog is not None:
+                # Catalog.data_dir é Path | None mas Catalog garante
+                # set em __post_init__ (data_dir fallback para
+                # db_path.parent.parent se None) — guard defensivo.
+                if catalog.data_dir is None:  # pragma: no cover defensive
+                    raise RuntimeError("catalog.data_dir must be set for two-phase commit")
+                rel_path = (
+                    path.resolve().relative_to((catalog.data_dir / "history").resolve()).as_posix()
+                )
+                with catalog.pending_commit(
+                    rel_path=rel_path,
+                    partition=partition,
+                    expected_sha256=checksum,
+                    expected_size=file_size,
+                    job_id=job_id,
+                ) as handle:
+                    # Fase 2 — replace atômico DENTRO do bloco (claim ativo).
+                    os.replace(tmp_path, path)
+                    _fsync_directory(path.parent)
+                    # Fase 3 — UPSERT em partitions + DELETE pending.
+                    handle.complete(write_result)
+            else:
+                # Caminho legacy v1.3.x — caller é responsável por
+                # Catalog.register_partition(write_result, partition).
+                os.replace(tmp_path, path)
+                _fsync_directory(path.parent)
         except Exception:
             # Cleanup tmp em caso de qualquer falha.
             if tmp_path.exists():
@@ -432,24 +501,7 @@ class ParquetWriter:
                     )
             raise
 
-        # WriteResult bounds vêm da tabela final (já ordenada).
-        if table.num_rows == 0:
-            # Defesa — não devíamos chegar aqui (input validado não vazio).
-            first_ts_ns = 0
-            last_ts_ns = 0
-        else:
-            ts_col = table.column("timestamp_ns")
-            first_ts_ns = int(pa.compute.min(ts_col).as_py())
-            last_ts_ns = int(pa.compute.max(ts_col).as_py())
-
-        return WriteResult(
-            path=path,
-            row_count=table.num_rows,
-            first_ts_ns=first_ts_ns,
-            last_ts_ns=last_ts_ns,
-            checksum_sha256=checksum,
-            file_size_bytes=file_size,
-        )
+        return write_result
 
 
 def compact_month(
