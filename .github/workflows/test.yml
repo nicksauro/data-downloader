@@ -1,0 +1,153 @@
+# =============================================================================
+# .github/workflows/test.yml — CI Pipeline (Story 4.25 AC1/AC2)
+# Owner: Gage (devops) — squad data-downloader
+# Story: 4.25 — CI Pipeline GitHub Actions
+# ADR: ADR-027 §2.3
+#
+# Mecaniza R13 (gates pré-commit obrigatórios) e R14 (suite full em PR).
+# Substitui disciplina humana por barrier mecânico — squad não pode mais
+# pular ruff/mypy/pytest "porque está com pressa" (P0-R1, frente 2 v1.4.0).
+#
+# Runner: windows-latest (DLL é Windows-only — ADR-008/ADR-027 §2.2).
+# Python: 3.12 único (requires-python>=3.12 + R19 pinning).
+# =============================================================================
+
+name: test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancela runs obsoletos quando novo commit é pushed para o mesmo PR/branch.
+# Reduz custo Windows runner ($0.08/min) sem perder feedback do último commit.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Permissions mínimas — read-only é suficiente para test.yml.
+# release.yml escala permissions para auto-AUDIT commit.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. lint-type — ruff + mypy --strict (rápido, < 2min esperado)
+  # ---------------------------------------------------------------------------
+  lint-type:
+    name: lint + type-check
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install dev deps
+        run: pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check src/ tests/
+
+      - name: mypy --strict
+        run: mypy --strict src/data_downloader/
+
+  # ---------------------------------------------------------------------------
+  # 2. unit-tests — pytest tests/unit (< 5min esperado)
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: unit tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install test + dev deps
+        run: pip install -e ".[test,dev]"
+
+      - name: pytest tests/unit
+        run: pytest tests/unit -v --maxfail=5 --timeout=60 --junitxml=junit-unit.xml
+
+      - name: Upload JUnit XML (unit)
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: junit-unit
+          path: junit-unit.xml
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 3. integration-property-tests — pytest tests/integration + tests/property
+  # Skip @pytest.mark.smoke (DLL real exige ProfitChart, não disponível em GH
+  # runner). (< 8min esperado.)
+  # ---------------------------------------------------------------------------
+  integration-property-tests:
+    name: integration + property tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install test + dev deps
+        run: pip install -e ".[test,dev]"
+
+      - name: pytest tests/integration tests/property
+        run: pytest tests/integration tests/property -v --maxfail=3 --timeout=180 --junitxml=junit-integration.xml -m "not smoke"
+
+      - name: Upload JUnit XML (integration)
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: junit-integration
+          path: junit-integration.xml
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 4. pre-commit — bandit + pip-audit + detect-secrets + ruff format etc
+  # Inclui hooks de Story 4.31 AC6 (bandit/pip-audit/detect-secrets).
+  # (< 2min esperado.)
+  # ---------------------------------------------------------------------------
+  pre-commit:
+    name: pre-commit (security + format)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files --show-diff-on-failure
