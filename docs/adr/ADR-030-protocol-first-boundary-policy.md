@@ -1,6 +1,6 @@
 # ADR-030 — Protocol-First Boundary Policy: opt-in migration over big-bang
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-05-17)
 - **Date:** 2026-05-17
 - **Author:** Aria (@architect)
 - **Consultados:** Sol (@data-engineer — impl Story 4.28), Quinn (@qa — audit), Dex (@dev — caller callsites)
