@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from data_downloader.public_api.exceptions import IntegrityError
+from data_downloader.public_api.exceptions import ConcurrentWriterError, IntegrityError
 from data_downloader.storage._vectorized import (
     assign_sequence_within_ns_vectorized,
     compute_sha256_streaming,
@@ -91,6 +91,15 @@ _WRITE_STATISTICS: bool = True
 # disto; mensais compactados (~10-13M rows WDOFUT) também. Limit é guard
 # contra partições absurdas (símbolo errado, ano errado), não política.
 _PARTITION_ROW_LIMIT: int = 50_000_000
+
+# Story 4.24 / ADR-026 §2.3 — retry policy do writer ao receber
+# ``ConcurrentWriterError`` em ``Catalog.pending_commit()``. Backoff fixo
+# com 3 tentativas totais (100ms → 500ms → 2s = 2.6s no pior caso).
+# Após o 3º attempt fracassado, propaga ``ConcurrentWriterError`` para o
+# orchestrator (que marca o chunk como ``failed`` no ``chunk_ledger`` para
+# retry futuro — ver ADR-026 §2.3). Backoff curto evita storm; não pode
+# crescer demais para não bloquear o writer indefinidamente.
+_RETRY_DELAYS_MS: tuple[int, ...] = (100, 500, 2000)
 
 
 def _check_no_field_drop(sample: TradeRecord) -> None:
@@ -307,7 +316,10 @@ class ParquetWriter:
                 ``_PARTITION_ROW_LIMIT`` (guard paliativo; particionamento
                 diário real é ADR-025 — v1.2.0 Wave 2).
             ConcurrentWriterError: outro writer detém claim em
-                ``_pending_commits`` (somente quando ``catalog`` injetado).
+                ``_pending_commits`` após esgotar ``_RETRY_DELAYS_MS``
+                (3 tentativas com backoff 100ms→500ms→2s — Story 4.24 /
+                ADR-026 §2.3). Somente quando ``catalog`` injetado. O
+                ``tmp_path`` é deletado antes da propagação (limpo).
         """
         if not trades:
             # No-op semântico — não cria arquivo vazio.
@@ -472,18 +484,50 @@ class ParquetWriter:
                 rel_path = (
                     path.resolve().relative_to((catalog.data_dir / "history").resolve()).as_posix()
                 )
-                with catalog.pending_commit(
-                    rel_path=rel_path,
-                    partition=partition,
-                    expected_sha256=checksum,
-                    expected_size=file_size,
-                    job_id=job_id,
-                ) as handle:
-                    # Fase 2 — replace atômico DENTRO do bloco (claim ativo).
-                    os.replace(tmp_path, path)
-                    _fsync_directory(path.parent)
-                    # Fase 3 — UPSERT em partitions + DELETE pending.
-                    handle.complete(write_result)
+                # Story 4.24 / ADR-026 §2.3 — retry com backoff em
+                # ``ConcurrentWriterError`` (outro writer detém o claim
+                # advisory-lock para a mesma partition_path). Limite
+                # ``_RETRY_DELAYS_MS`` (3 tentativas; 100ms → 500ms → 2s).
+                # Após esgotar, propaga; o ``except Exception`` block
+                # abaixo limpa o ``tmp_path`` (AC4).
+                for attempt, delay_ms in enumerate(_RETRY_DELAYS_MS):
+                    try:
+                        with catalog.pending_commit(
+                            rel_path=rel_path,
+                            partition=partition,
+                            expected_sha256=checksum,
+                            expected_size=file_size,
+                            job_id=job_id,
+                        ) as handle:
+                            # Fase 2 — replace atômico DENTRO do bloco (claim ativo).
+                            os.replace(tmp_path, path)
+                            _fsync_directory(path.parent)
+                            # Fase 3 — UPSERT em partitions + DELETE pending.
+                            handle.complete(write_result)
+                        break  # sucesso — sai do retry loop
+                    except ConcurrentWriterError as exc:
+                        if attempt == len(_RETRY_DELAYS_MS) - 1:
+                            # Último attempt — propaga; cleanup do tmp
+                            # fica para o ``except Exception`` block abaixo.
+                            _LOG.warning(
+                                "parquet_writer.concurrent_writer.exhausted",
+                                extra={
+                                    "rel_path": rel_path,
+                                    "attempts": len(_RETRY_DELAYS_MS),
+                                    "holder_pid": exc.current_pid,
+                                },
+                            )
+                            raise
+                        _LOG.info(
+                            "parquet_writer.concurrent_writer.retry",
+                            extra={
+                                "attempt": attempt + 1,
+                                "delay_ms": delay_ms,
+                                "rel_path": rel_path,
+                                "holder_pid": exc.current_pid,
+                            },
+                        )
+                        time.sleep(delay_ms / 1000.0)
             else:
                 # Caminho legacy v1.3.x — caller é responsável por
                 # Catalog.register_partition(write_result, partition).
