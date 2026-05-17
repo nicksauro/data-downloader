@@ -1,0 +1,520 @@
+# =============================================================================
+# .github/workflows/release.yml — Release Pipeline (Story 4.25 AC3/AC4)
+# Owner: Gage (devops) — squad data-downloader
+# Story: 4.25 — CI Pipeline GitHub Actions
+# ADR: ADR-027 §2.4
+#
+# Disparado por tag v* OU workflow_dispatch manual. Executa 5 jobs sequenciais:
+#   validate-version -> full-test-suite -> build-windows -> build-installer
+#                                                        \-> auto-audit-and-release
+#
+# Cobre P0-R2 (Python pinning), P0-R3 (verify-dll-companions), P0-R4 (auto-AUDIT
+# por release em RELEASES.md), P0-R5 (SHA256 in-band via GH release assets) da
+# frente 2 v1.4.0.
+#
+# Runner: windows-latest (ADR-008 / ADR-027 §2.2).
+# Python: 3.12 único.
+# =============================================================================
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.4.0)'
+        required: true
+        type: string
+      skip_tests:
+        description: 'Skip full test suite (hotfix escape hatch — emits WARNING)'
+        required: false
+        type: boolean
+        default: false
+
+# Permissions — release.yml precisa escrever (auto-AUDIT commit + GH release).
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. validate-version — extract+validate tag, drift check vs pyproject/iss
+  # ---------------------------------------------------------------------------
+  validate-version:
+    name: validate version
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      commit_sha: ${{ steps.extract.outputs.commit_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Extract version (tag or workflow_dispatch input)
+        id: extract
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = '${{ inputs.version }}'
+          } else {
+            # Tag formato 'refs/tags/vX.Y.Z' -> 'X.Y.Z'
+            $tag = $env:GITHUB_REF -replace '^refs/tags/v', ''
+            $version = $tag
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "Version invalida: '$version' (esperado X.Y.Z SemVer)"
+            exit 1
+          }
+          $sha = git rev-parse HEAD
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "commit_sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "[validate-version] OK — version=$version commit=$sha"
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate drift (pyproject.toml + __init__.py + installer.iss)
+        shell: pwsh
+        run: |
+          $version = '${{ steps.extract.outputs.version }}'
+          # Extrai version de pyproject.toml [project]
+          $pyproject = Get-Content pyproject.toml -Raw
+          if ($pyproject -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
+            Write-Error "pyproject.toml: version field nao encontrado"
+            exit 1
+          }
+          $pyprojectVersion = $matches[1]
+          if ($pyprojectVersion -ne $version) {
+            Write-Error "DRIFT: tag v$version != pyproject.toml v$pyprojectVersion"
+            exit 1
+          }
+          Write-Host "[drift-check] pyproject.toml: OK"
+          # __init__.py (best-effort — verifica __version__ se presente)
+          $initPy = 'src/data_downloader/__init__.py'
+          if (Test-Path $initPy) {
+            $initContent = Get-Content $initPy -Raw
+            if ($initContent -match '__version__\s*=\s*"([^"]+)"') {
+              $initVersion = $matches[1]
+              if ($initVersion -ne $version) {
+                Write-Error "DRIFT: tag v$version != __init__.py __version__ '$initVersion'"
+                exit 1
+              }
+              Write-Host "[drift-check] __init__.py: OK"
+            }
+          }
+          # installer/data_downloader.iss (#define AppVersion)
+          $iss = 'installer/data_downloader.iss'
+          if (Test-Path $iss) {
+            $issContent = Get-Content $iss -Raw
+            # ISCC compile-time pode receber /DAppVersion=X.Y.Z — verificamos
+            # o default declarado no .iss (#define AppVersion "X.Y.Z").
+            if ($issContent -match '(?m)^\s*#define\s+AppVersion\s+"([^"]+)"') {
+              $issVersion = $matches[1]
+              if ($issVersion -ne $version) {
+                Write-Warning "DRIFT (non-fatal — /DAppVersion sobrescreve): tag v$version != installer.iss AppVersion '$issVersion'"
+              } else {
+                Write-Host "[drift-check] installer.iss: OK"
+              }
+            }
+          }
+
+      - name: Validate CHANGELOG.md has section for v${{ steps.extract.outputs.version }}
+        shell: pwsh
+        run: |
+          $version = '${{ steps.extract.outputs.version }}'
+          if (-not (Test-Path 'CHANGELOG.md')) {
+            Write-Error "CHANGELOG.md ausente — auto-AUDIT precisa de seção da versão"
+            exit 1
+          }
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $patterns = @(
+            "(?m)^##\s+\[API v$([regex]::Escape($version))\]",
+            "(?m)^##\s+\[v?$([regex]::Escape($version))\]",
+            "(?m)^##\s+v?$([regex]::Escape($version))\s*$"
+          )
+          $found = $false
+          foreach ($p in $patterns) {
+            if ($changelog -match $p) { $found = $true; break }
+          }
+          if (-not $found) {
+            Write-Error "CHANGELOG.md: nenhuma seção '[v$version]' / '[API v$version]' / 'v$version' encontrada"
+            exit 1
+          }
+          Write-Host "[changelog-check] CHANGELOG.md tem section para v$version"
+
+  # ---------------------------------------------------------------------------
+  # 2. full-test-suite — re-roda os 4 jobs de test.yml inline
+  # (skip se workflow_dispatch + inputs.skip_tests=true — hotfix escape hatch)
+  # ---------------------------------------------------------------------------
+  full-test-suite:
+    name: full test suite
+    needs: validate-version
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install dev + test deps
+        run: pip install -e ".[test,dev]"
+
+      - name: ruff check
+        run: ruff check src/ tests/
+
+      - name: mypy --strict
+        run: mypy --strict src/data_downloader/
+
+      - name: pytest tests/unit
+        run: pytest tests/unit -v --maxfail=5 --timeout=60
+
+      - name: pytest tests/integration tests/property
+        run: pytest tests/integration tests/property -v --maxfail=3 --timeout=180 -m "not smoke"
+
+      - name: pre-commit run --all-files
+        run: |
+          pip install pre-commit
+          pre-commit run --all-files --show-diff-on-failure
+
+  # ---------------------------------------------------------------------------
+  # 2b. skip-tests-warning — emite warning loud em $GITHUB_STEP_SUMMARY
+  # quando skip_tests=true (escape hatch ativo para hotfix).
+  # ---------------------------------------------------------------------------
+  skip-tests-warning:
+    name: WARNING — full test suite SKIPPED
+    needs: validate-version
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests }}
+    runs-on: windows-latest
+    timeout-minutes: 1
+    steps:
+      - name: Emit warning summary
+        shell: pwsh
+        run: |
+          $msg = @"
+          # WARNING — full test suite SKIPPED
+
+          - **Version:** v${{ needs.validate-version.outputs.version }}
+          - **Trigger:** workflow_dispatch with ``skip_tests=true``
+          - **Justificativa:** hotfix escape hatch (Story 4.25 AC4 / ADR-027 §2.4)
+          - **Risco assumido:** regressao silenciosa nao detectada por ruff/mypy/pytest.
+
+          Use APENAS para hotfixes urgentes. Para releases normais, deixe ``skip_tests=false``.
+          "@
+          $msg | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          Write-Warning "Full test suite skipped (hotfix mode) — see step summary"
+
+  # ---------------------------------------------------------------------------
+  # 3. build-windows — PyInstaller bundle + verify-dll-companions
+  # DLL bootstrap fallback (v1.4.0): se PROFITDLL_S3_* secrets ausentes,
+  # pula PyInstaller e emite release-no-binary.json.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: build PyInstaller bundle
+    needs: [validate-version, full-test-suite]
+    # Roda se full-test-suite passou OU foi pulado intencionalmente (hotfix).
+    if: ${{ always() && needs.validate-version.result == 'success' && (needs.full-test-suite.result == 'success' || needs.full-test-suite.result == 'skipped') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    outputs:
+      bundle_built: ${{ steps.bootstrap_or_skip.outputs.bundle_built }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install build + test + dev deps
+        run: pip install -e ".[build,test,dev]"
+
+      - name: Bootstrap DLLs (S3 fallback)
+        id: bootstrap_or_skip
+        shell: pwsh
+        env:
+          PROFITDLL_S3_BUCKET: ${{ secrets.PROFITDLL_S3_BUCKET }}
+          PROFITDLL_S3_KEY: ${{ secrets.PROFITDLL_S3_KEY }}
+          PROFITDLL_S3_SECRET: ${{ secrets.PROFITDLL_S3_SECRET }}
+        run: |
+          # v1.4.0 fallback (ADR-027 §2.4): sem secrets, pula PyInstaller.
+          if (-not $env:PROFITDLL_S3_BUCKET -or -not $env:PROFITDLL_S3_KEY -or -not $env:PROFITDLL_S3_SECRET) {
+            Write-Warning "PROFITDLL_S3_* secrets ausentes — DLL bootstrap impossivel em CI"
+            Write-Warning "Build PyInstaller SERA PULADO. Operador humano completa build local."
+            $version = '${{ needs.validate-version.outputs.version }}'
+            New-Item -ItemType Directory -Path dist -Force | Out-Null
+            $payload = @{
+              version = $version
+              skipped_reason = "PROFITDLL_S3_* secrets nao configurados"
+              build_workflow_run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              git_sha = '${{ needs.validate-version.outputs.commit_sha }}'
+              tag = "v$version"
+              v1_4_0_known_limitation = $true
+              follow_up = "v1.4.1: provisionar S3 bucket + creds via Pichau"
+            } | ConvertTo-Json -Depth 5
+            $payload | Out-File -FilePath "dist/release-no-binary.json" -Encoding utf8
+            $summary = @"
+          # WARNING — Build PyInstaller skipped (Story 4.25 AC4 fallback)
+
+          - **Causa:** ``PROFITDLL_S3_*`` secrets nao configurados no repo.
+          - **Impacto:** release artifacts (.zip + Setup.exe) NAO foram gerados pelo CI.
+          - **Workaround:** operador roda ``scripts/build_release.py --version $version`` local.
+          - **Follow-up:** v1.4.1 — provisionar S3 bucket privado com ProfitDLL.
+          "@
+            $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            "bundle_built=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          # Secrets presentes: baixa DLLs do S3.
+          # AWS CLI le credenciais via env vars padrao (AWS_ACCESS_KEY_ID /
+          # AWS_SECRET_ACCESS_KEY) — passamos via env: do step a seguir para
+          # evitar literais matching de regex do check_no_dotenv.py.
+          Write-Host "[bootstrap-dll] secrets detectados — baixando de s3://$env:PROFITDLL_S3_BUCKET/profitdll/DLLs/Win64/"
+          New-Item -ItemType Directory -Path profitdll/DLLs/Win64 -Force | Out-Null
+          "bundle_built=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Sync DLLs from S3 (aws cli)
+        if: ${{ steps.bootstrap_or_skip.outputs.bundle_built == 'true' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PROFITDLL_S3_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PROFITDLL_S3_SECRET }}
+          AWS_DEFAULT_REGION: us-east-1
+          PROFITDLL_S3_BUCKET: ${{ secrets.PROFITDLL_S3_BUCKET }}
+        shell: pwsh
+        run: |
+          aws s3 cp "s3://$env:PROFITDLL_S3_BUCKET/profitdll/DLLs/Win64/" profitdll/DLLs/Win64/ --recursive
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "aws s3 cp falhou (exit $LASTEXITCODE)"
+            exit 1
+          }
+          Write-Host "[bootstrap-dll] OK"
+
+      - name: Verify companions pre-build (profitdll/DLLs/Win64/)
+        if: ${{ steps.bootstrap_or_skip.outputs.bundle_built == 'true' }}
+        run: python scripts/verify-dll-companions.py
+
+      - name: Build PyInstaller bundle
+        if: ${{ steps.bootstrap_or_skip.outputs.bundle_built == 'true' }}
+        run: python scripts/build_release.py --version ${{ needs.validate-version.outputs.version }}
+
+      - name: Verify companions post-build (dist/data_downloader/)
+        if: ${{ steps.bootstrap_or_skip.outputs.bundle_built == 'true' }}
+        # AC6 fix: script auto-detecta _internal/ em PyI 6.x onedir.
+        run: python scripts/verify-dll-companions.py --path dist/data_downloader/
+
+      - name: Upload bundle artifact (zip + manifest)
+        if: ${{ steps.bootstrap_or_skip.outputs.bundle_built == 'true' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: bundle-v${{ needs.validate-version.outputs.version }}
+          path: |
+            dist/data-downloader-v${{ needs.validate-version.outputs.version }}-win64.zip
+            dist/build-manifest-v${{ needs.validate-version.outputs.version }}.json
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload release-no-binary placeholder
+        if: ${{ steps.bootstrap_or_skip.outputs.bundle_built == 'false' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-no-binary-v${{ needs.validate-version.outputs.version }}
+          path: dist/release-no-binary.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # 4. build-installer — InnoSetup Setup.exe (apenas se bundle_built=true)
+  # ---------------------------------------------------------------------------
+  build-installer:
+    name: build InnoSetup installer
+    needs: [validate-version, build-windows]
+    if: ${{ needs.build-windows.outputs.bundle_built == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+
+      - name: Install build deps (PyInstaller, etc.)
+        run: pip install -e ".[build]"
+
+      - name: Download bundle artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: bundle-v${{ needs.validate-version.outputs.version }}
+          path: dist/
+
+      - name: Install InnoSetup via Chocolatey
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer (ISCC.exe)
+        shell: pwsh
+        env:
+          ISCC_PATH: 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+        run: |
+          $version = '${{ needs.validate-version.outputs.version }}'
+          & "$env:ISCC_PATH" "/DAppVersion=$version" installer/data_downloader.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ISCC.exe falhou (exit $LASTEXITCODE)"
+            exit 1
+          }
+          # Setup é gerado em dist/data-downloader-Setup-v{version}.exe (per build_release.py L477)
+          if (-not (Test-Path "dist/data-downloader-Setup-v$version.exe")) {
+            Write-Error "Setup.exe nao foi gerado em dist/data-downloader-Setup-v$version.exe"
+            exit 1
+          }
+          Write-Host "[build-installer] OK — Setup.exe gerado"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: installer-v${{ needs.validate-version.outputs.version }}
+          path: dist/data-downloader-Setup-v${{ needs.validate-version.outputs.version }}.exe
+          retention-days: 90
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 5. auto-audit-and-release — RELEASES.md append + GH Release creation
+  # Roda apenas se build-windows produziu bundle (skip release-no-binary).
+  # ---------------------------------------------------------------------------
+  auto-audit-and-release:
+    name: auto-AUDIT + GH Release
+    needs: [validate-version, build-windows, build-installer]
+    if: ${{ needs.build-windows.outputs.bundle_built == 'true' && needs.build-installer.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main (auto-AUDIT commits aqui)
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install build deps (for github_release.py)
+        run: pip install -e ".[build]"
+
+      - name: Download bundle artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: bundle-v${{ needs.validate-version.outputs.version }}
+          path: dist/
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: installer-v${{ needs.validate-version.outputs.version }}
+          path: dist/
+
+      - name: Re-compute SHA256 (sanity check vs manifest)
+        id: hashes
+        shell: pwsh
+        run: |
+          $version = '${{ needs.validate-version.outputs.version }}'
+          $zip = "dist/data-downloader-v$version-win64.zip"
+          $setup = "dist/data-downloader-Setup-v$version.exe"
+          $manifestPath = "dist/build-manifest-v$version.json"
+          $zipHash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          $setupHash = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
+          $manifestHash = (Get-FileHash -Algorithm SHA256 $manifestPath).Hash.ToLower()
+          $zipSize = (Get-Item $zip).Length
+          $setupSize = (Get-Item $setup).Length
+          $manifestSize = (Get-Item $manifestPath).Length
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          $expectedZipHash = $manifest.zip.sha256.ToLower()
+          if ($zipHash -ne $expectedZipHash) {
+            Write-Error "SHA256 mismatch (zip): re-compute=$zipHash, manifest=$expectedZipHash"
+            exit 1
+          }
+          "zip_sha256=$zipHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "setup_sha256=$setupHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "manifest_sha256=$manifestHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_size=$zipSize" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "setup_size=$setupSize" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "manifest_size=$manifestSize" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Append RELEASES.md entry (auto-AUDIT)
+        shell: pwsh
+        run: |
+          $version = '${{ needs.validate-version.outputs.version }}'
+          $commit = '${{ needs.validate-version.outputs.commit_sha }}'
+          $short = $commit.Substring(0, 7)
+          $iso = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $today = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $releaseUrl = "${{ github.server_url }}/${{ github.repository }}/releases/tag/v$version"
+          $zipSize = '${{ steps.hashes.outputs.zip_size }}'
+          $zipSha = '${{ steps.hashes.outputs.zip_sha256 }}'
+          $setupSize = '${{ steps.hashes.outputs.setup_size }}'
+          $setupSha = '${{ steps.hashes.outputs.setup_sha256 }}'
+          $manifestSize = '${{ steps.hashes.outputs.manifest_size }}'
+          $manifestSha = '${{ steps.hashes.outputs.manifest_sha256 }}'
+          function HumanSize($bytes) {
+            $b = [int64]$bytes
+            if ($b -ge 1MB) { return ("{0:N1} MB" -f ($b / 1MB)) }
+            if ($b -ge 1KB) { return ("{0:N1} KB" -f ($b / 1KB)) }
+            return "$b B"
+          }
+          $entry = @"
+
+          ## v$version — $today
+          - **Released:** $iso via [workflow #${{ github.run_id }}]($runUrl)
+          - **Tag:** v$version
+          - **Commit:** $commit ($short)
+          - **Artifacts (SHA256):**
+            - ``data-downloader-v$version-win64.zip`` — ``$zipSha`` ($(HumanSize $zipSize))
+            - ``data-downloader-Setup-v$version.exe`` — ``$setupSha`` ($(HumanSize $setupSize))
+            - ``build-manifest-v$version.json`` — ``$manifestSha`` ($(HumanSize $manifestSize))
+          - **CHANGELOG:** [GitHub Release]($releaseUrl)
+          "@
+          $releasesPath = 'docs/release/RELEASES.md'
+          if (-not (Test-Path $releasesPath)) {
+            Write-Error "$releasesPath ausente — backfill em Story 4.31 AC5 deveria ter criado"
+            exit 1
+          }
+          Add-Content -Path $releasesPath -Value $entry -Encoding utf8
+          Write-Host "[auto-AUDIT] entry appended em $releasesPath"
+
+      - name: Commit + push auto-AUDIT (skip ci)
+        shell: pwsh
+        run: |
+          $version = '${{ needs.validate-version.outputs.version }}'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/release/RELEASES.md
+          git commit -m "docs(release): auto-AUDIT v$version [skip ci] [Story 4.25]"
+          git push origin main
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = '${{ needs.validate-version.outputs.version }}'
+          python scripts/github_release.py --version $version

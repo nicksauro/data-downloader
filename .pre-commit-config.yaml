@@ -108,6 +108,16 @@ repos:
         exclude: ^tests/
 
   # ===========================================================================
+  # 4.5 — actionlint: valida sintaxe dos GitHub Actions YAMLs
+  # Story 4.25 AC9. Catch sintaxe quebrada local antes do CI quebrar.
+  # Roda apenas quando .github/workflows/*.yml mudam (default do hook).
+  # ===========================================================================
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+
+  # ===========================================================================
   # 5. Custom hooks locais — guard-rails específicos do squad
   # ===========================================================================
   - repo: local
