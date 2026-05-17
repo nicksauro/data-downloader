@@ -75,6 +75,7 @@ def download(
     writer_factory: Callable[[Path], object] | None = None,
     metrics_emitter: MetricsEmitter | None = None,
     resume_job_id: str | None = None,
+    resolve_contract_per_chunk: bool = False,
 ) -> DownloadHandle:
     """Inicia download assíncrono de histórico para ``symbol`` em ``[start, end]``.
 
@@ -213,6 +214,7 @@ def download(
                 writer_factory=writer_factory,
                 metrics_emitter=metrics_emitter,
                 resume_job_id=resume_job_id,
+                resolve_contract_per_chunk=resolve_contract_per_chunk,
             )
 
         parent_ctx.run(_go)
@@ -240,6 +242,7 @@ def _run_download_worker(
     writer_factory: Callable[[Path], object] | None,
     metrics_emitter: MetricsEmitter | None = None,
     resume_job_id: str | None = None,
+    resolve_contract_per_chunk: bool = False,
 ) -> None:
     """Worker: instancia componentes, roda Orchestrator.run, traduz JobResult.
 
@@ -344,6 +347,10 @@ def _run_download_worker(
             end=end,
             # resolve_contract: True se symbol é raiz (sem letra+ano), False senão.
             resolve_contract=_looks_like_root(symbol),
+            # Story 4.26 / ADR-028 — opt-in para re-resolve por chunk
+            # (downloads multi-rollover sob raiz simples). Default False
+            # mantém fail-loudly via AmbiguousRolloverError.
+            resolve_contract_per_chunk=resolve_contract_per_chunk,
         )
 
         _emit(

@@ -98,7 +98,7 @@
 | [Q-DRIFT-26](#q-drift-26) | ⚠️ **REFUTED 2026-05-05** | download | Hipótese "data antiga não dispara callback" — refutada (data dinâmica também trava) |
 | [Q-DRIFT-27..30](#q-drift-27--30-sucessores-historico) | ⚠️ refuted (histórico) | download / wrapper | Exchange code, registro V2, struct mismatch — todas refutadas: bug real era Q-DRIFT-32 (contrato vencido vs WDOFUT) |
 | [Q-DRIFT-31](#q-drift-31) | ✅ valid | download / window | `GetHistoryTrades` janela máx ~5 dias úteis (servidor Nelogica) |
-| [Q-DRIFT-32](#q-drift-32) | ✅ valid | download / symbol | Usar `WDOFUT` (continuous) para histórico, NÃO `WDOJ26`/`WDOK26` (vencidos retornam 0 trades). **Supersede Q01-V.** |
+| [Q-DRIFT-32](#q-drift-32) | ✅ valid + **MITIGATED v1.4.0** | download / symbol | Usar `WDOFUT` (continuous) para histórico, NÃO `WDOJ26`/`WDOK26` (vencidos retornam 0 trades). **Supersede Q01-V.** v1.4.0 (Story 4.26 / ADR-028) bloqueia cedo com `AmbiguousRolloverError`. |
 | [Q-DRIFT-33](#q-drift-33) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `TranslateTrade.argtypes` → OverflowError; hotfix cirúrgico aplicado |
 | [Q-DRIFT-34](#q-drift-34) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | orchestrator / ingestor | `_process_trade` morre em `format_brt_timestamp(ns<0)`; guard + try/except aplicados |
 | [Q-DRIFT-35](#q-drift-35) | 🐛 bug-código (HOTFIX-APPLIED-VALIDATED postfix-35) | wrapper / signatures | `minimal_handshake=True` skipava `GetAgentName{,Length}.argtypes` → length lido como `0x80000004` negativo; hotfix cirúrgico aplicado |
@@ -1331,7 +1331,7 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 ## Q-DRIFT-32
 
 - **ID:** Q-DRIFT-32
-- **Status:** ✅ **VALIDATED — Story 1.7d 2026-05-05 (Quinn @qa)**
+- **Status:** ✅ **VALIDATED — Story 1.7d 2026-05-05 (Quinn @qa)** + **MITIGATED v1.4.0 — Story 4.26 2026-05-17 (Sol @data-engineer)**
 - **Categoria:** download / symbol / continuous-future
 - **Título:** Símbolo `WDOFUT` (continuous future) deve ser usado para download histórico, NÃO contratos específicos `WDOJ26`/`WDOK26`/etc.
 - **Sintoma:** `GetHistoryTrades(WDOJ26, 'F', ...)` ou `(WDOK26, 'F', ...)` retorna code=0 mas servidor NÃO despacha trades — callback V2 nunca dispara, mesmo em pregão aberto com janela curta. Já era hipótese suspeita (Q11-E permissão BMF) mas mal-formulada — não era falta de permissão, era contrato errado.
@@ -1344,6 +1344,27 @@ ret: int = self._dll.DLLInitializeMarketLogin(
   - `docs/qa/SMOKE_EVIDENCE/logs/standalone-pregao-20260505T103538Z.log` (WDOJ26/F + 2h → 0 trades).
 - **Data descoberta:** 2026-05-04 (correção do usuário); validação 2026-05-05 (Quinn @qa).
 - **Aplica a stories:** 1.7b (smoke MVP gate — usar WDOFUT), 1.7d (smoke real WDOFUT validado), 4.1/4.2 (multi-symbol — WIN, PETR4 etc. usar continuous quando existir).
+
+### Mitigation v1.4.0 (Story 4.26 / ADR-028)
+
+A partir da release v1.4.0 (Story 4.26 — `feat/v1.4.0-rollover-safety`), o orchestrator detecta jobs que cruzariam silenciosamente um rollover e bloqueia cedo com :class:`AmbiguousRolloverError`. Política híbrida prescrita em [ADR-028](../adr/ADR-028-contract-vigent-resolution-policy.md):
+
+- **Default fail-loudly:** `download('WDO', cross-rollover)` → `AmbiguousRolloverError` com mensagem prescritiva listando os contratos detectados + 3 opções de remediação. Antes da v1.4.0 isso baixava lixo silencioso.
+- **Opt-in per-chunk:** `download('WDO', ..., resolve_contract_per_chunk=True)` re-resolve `vigent_contract` por chunk diário (1 query SQLite extra/chunk — custo desprezível). Caller assume risco; bypassa a validation.
+- **Continuous future continua golden path:** `download('WDOFUT', any_range)` segue funcionando sem mudança (ainda **recomendado** para histórico longo).
+
+UI Qt traduz a exception em `QMessageBox` com 3 botões clicáveis (`download_screen._handle_ambiguous_rollover` — Story 4.26 AC10). Microcopy IDs: `ERR_AMBIGUOUS_ROLLOVER`, `BTN_USE_CONTINUOUS`, `BTN_SPLIT_RANGE`, `BTN_OPT_IN_PER_CHUNK`.
+
+**Componentes implementados:**
+- `src/data_downloader/public_api/exceptions.py` — `AmbiguousRolloverError(InvalidContract)`.
+- `src/data_downloader/storage/catalog.py` — `Catalog.list_contracts_in_range(root, start, end)` + `completed_days(..., roots=...)`.
+- `src/data_downloader/orchestrator/orchestrator.py` — `JobConfig.resolve_contract_per_chunk: bool = False`, `Orchestrator._validate_no_rollover_in_window`, per-chunk re-resolve no `run` loop.
+- Testes: `tests/unit/test_rollover_safety.py` (14), `tests/integration/test_orchestrator_rollover.py` (5), `tests/property/test_rollover_safety_property.py` (3).
+
+**Refs:**
+- [ADR-028](../adr/ADR-028-contract-vigent-resolution-policy.md) (policy completa).
+- [ADR-006](../adr/ADR-006-contract-calendar.md#amendment-2026-05-17--story-426--adr-028) (amendment).
+- `docs/stories/4.26-rollover-safety-vigent-contract.story.md`.
 
 ---
 

@@ -134,6 +134,18 @@ def vigent_contract(symbol_root: str, on_date: date, *, exchange: str = 'F') -> 
 > automatizado em `scripts/probe_win_vigency_calendar.py` (criado nesta
 > sessão; bloqueado por DLL real — executa em Story 4.2-followup).
 
+### Amendment 2026-05-17 — Story 4.26 / ADR-028
+
+ADR-006 estabeleceu o calendário de contratos vigentes como tabela e a função `vigent_contract(catalog, root, on_date)` como lookup canônico (Story 1.6). A revisão consolidada Frente 3 v1.4.0 identificou que o orchestrator resolvia o `contract_code` **uma única vez** (`config.start.date()`) e usava o resultado para todos os chunks — jobs cuja janela cruza rollover baixavam o mês 1 corretamente e os demais como `no_trades` silenciosos (Q-DRIFT-32 — DLL aceita ticker vencido e retorna `ret=0` sem despachar trades).
+
+[ADR-028](./ADR-028-contract-vigent-resolution-policy.md) prescreve a política híbrida que complementa esta ADR:
+
+- **Default fail-loudly:** se `resolve_contract=True AND resolve_contract_per_chunk=False`, `Orchestrator._validate_config` chama `_validate_no_rollover_in_window` (via `Catalog.list_contracts_in_range`). > 1 contrato no range → `AmbiguousRolloverError` com 3 remedies prescritivos.
+- **Opt-in per-chunk:** `JobConfig.resolve_contract_per_chunk=True` bypassa a validation e o loop `Orchestrator.run` re-resolve `vigent_contract` por chunk diário.
+- **Continuous future** (`WDOFUT`, `WINFUT`, `INDFUT`, `DOLFUT`) — golden path **enforced** pela mensagem da exception (não muda o lookup em si).
+
+Esta ADR-006 permanece autoritativa para a tabela `contracts` e o lookup `vigent_contract`. ADR-028 adiciona apenas as decisões de **policy** sobre quando/como chamar o lookup. Sem mudança de DDL.
+
 - **WDO** (mini-dólar futuro): mensal. Hipótese — vigente do **penúltimo dia útil do mês X-1** até o **penúltimo dia útil do mês X**. Nelo valida via probe.
 - **WIN** (mini-Ibovespa futuro): trimestral H/M/U/Z. Vigente do **5º dia útil do mês de vencimento - 3 meses** até a **quarta-feira mais próxima do dia 15 do mês de vencimento** (regra B3 oficial para futuros de índice; ver `docs/storage/CONTRACTS.md` §2.2 + Q-DRIFT-18 em `docs/dll/QUIRKS.md`). Probe DLL automatizado pendente — Story 4.2-followup.
 - **Equities** (PETR4, VALE3): não há vigência — ticker é estável. Tabela `contracts` tem entrada com `vigent_from = '1900-01-01', vigent_until = '9999-12-31'`.

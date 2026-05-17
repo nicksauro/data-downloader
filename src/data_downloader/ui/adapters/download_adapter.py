@@ -103,6 +103,7 @@ class DownloadAdapter(QObject):
 
     @Slot(str, str, object, object, object)
     @Slot(str, str, object, object, object, object)
+    @Slot(str, str, object, object, object, object, bool)
     def start(
         self,
         symbol: str,
@@ -111,6 +112,7 @@ class DownloadAdapter(QObject):
         end: date | datetime,
         data_dir: Path | None,
         resume_job_id: str | None = None,
+        resolve_contract_per_chunk: bool = False,
     ) -> None:
         """Dispara download (executa na thread do adapter).
 
@@ -121,6 +123,10 @@ class DownloadAdapter(QObject):
         v1.2.0 Wave 1D: ``resume_job_id`` opcional — quando passado, o
         ``public_api.download`` retoma o job existente em vez de criar um
         novo (Wave 1B — Dex-B). Default ``None`` = comportamento clássico.
+
+        Story 4.26 / ADR-028: ``resolve_contract_per_chunk`` opt-in para
+        downloads multi-rollover com raiz simples. Default ``False``
+        mantém fail-loudly via ``AmbiguousRolloverError``.
         """
         # Story v1.0.8 fix (Pichau live test 2026-05-06): breadcrumbs no
         # entry point do worker QThread. Sem isto, em windowed mode após
@@ -160,6 +166,7 @@ class DownloadAdapter(QObject):
                 exchange=exchange,
                 data_dir=data_dir,
                 resume_job_id=resume_job_id,
+                resolve_contract_per_chunk=resolve_contract_per_chunk,
             )
             _log.info(
                 "ui.api_download_returned_handle symbol=%s resume_job_id=%s",

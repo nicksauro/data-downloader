@@ -107,6 +107,9 @@ class DownloadScreen(QWidget):
     # marshalling via QueuedConnection — mais robusto que invokeMethod
     # com tipos não-Qt).
     _request_start = Signal(str, str, object, object, object)
+    # Story 4.26 AC10 — request_start com bool no fim para opt-in per-chunk
+    # (caminho usado pelo dialog AmbiguousRolloverError).
+    _request_start_per_chunk = Signal(str, str, object, object, object, object, bool)
     _request_cancel = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -122,7 +125,14 @@ class DownloadScreen(QWidget):
         )
         # Conexões internas: signals → slots do adapter (cross-thread Queued).
         self._request_start.connect(self._adapter.start, Qt.ConnectionType.QueuedConnection)
+        self._request_start_per_chunk.connect(
+            self._adapter.start, Qt.ConnectionType.QueuedConnection
+        )
         self._request_cancel.connect(self._adapter.cancel, Qt.ConnectionType.QueuedConnection)
+        # Story 4.26 AC10 — cache do ultimo (symbol, start, end, data_dir)
+        # para re-submit pelo dialog AmbiguousRolloverError com remedy
+        # escolhido (WDOFUT / specific / per-chunk opt-in).
+        self._last_request_args: tuple[str, str, object, object, Path | None] | None = None
 
         self._download_active = False
 
@@ -668,6 +678,8 @@ class DownloadScreen(QWidget):
             format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE_DOWNLOADING", symbol=symbol)
         )
 
+        # Story 4.26 AC10 — cache args for potential remedy re-submit.
+        self._last_request_args = (symbol, "F", start, end, data_dir)
         # Despacha para adapter via signal cross-thread (auto QueuedConnection).
         self._request_start.emit(symbol, "F", start, end, data_dir)
 
@@ -791,6 +803,24 @@ class DownloadScreen(QWidget):
     @Slot(object)
     def _on_error(self, exc: object) -> None:
         self._download_active = False
+
+        # Story 4.26 AC10 — AmbiguousRolloverError vira dialog com 3 opcoes.
+        # Antes do fluxo de mensagem humanizada — se o handler abriu o dialog
+        # e re-submeteu (per-chunk OU continuous OU split), retornamos cedo
+        # para nao mostrar o STATE_ERROR card.
+        try:
+            from data_downloader.public_api.exceptions import (
+                AmbiguousRolloverError,
+            )
+
+            if isinstance(exc, AmbiguousRolloverError):
+                handled = self._handle_ambiguous_rollover(exc)
+                if handled:
+                    return
+        except Exception:
+            # Defensive — qualquer erro no dialog cai no fluxo padrao abaixo.
+            pass
+
         # Mensagem humanizada via humanized_message se possível.
         title = ""
         detail = str(exc)
@@ -857,6 +887,153 @@ class DownloadScreen(QWidget):
 
         self._set_state(STATE_ERROR)
         self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
+
+    def _handle_ambiguous_rollover(self, exc: object) -> bool:
+        """Story 4.26 AC10 — dialog com 3 opcoes de remedy para
+        :class:`AmbiguousRolloverError`.
+
+        Returns:
+            True se o usuario clicou em uma opcao e re-submetemos o download
+            (caller deve return cedo). False se o usuario cancelou o dialog
+            (caller mostra error card padrao).
+        """
+        symbol_root = str(getattr(exc, "symbol_root", "") or "")
+        contracts = list(getattr(exc, "contracts_in_range", []) or [])
+        start_d = getattr(exc, "start", None)
+        end_d = getattr(exc, "end", None)
+        if not symbol_root or not self._last_request_args:
+            return False
+
+        # Decide qual continuous future sugerir: se {root}FUT existe no
+        # catalog seed, oferece. Senao, grey-out a opcao (texto desabilita
+        # via QMessageBox.setEnabled — fallback: nao instala o botao).
+        continuous = f"{symbol_root}FUT"
+        has_continuous = self._continuous_future_exists(continuous)
+
+        # Microcopy.
+        title = format_msg("MSG_AMBIGUOUS_ROLLOVER_TITLE") or "Range cobre multiplos contratos"
+        body = format_msg(
+            "MSG_AMBIGUOUS_ROLLOVER_BODY",
+            field="detail",
+            symbol_root=symbol_root,
+            start=(start_d.isoformat() if start_d else "?"),
+            end=(end_d.isoformat() if end_d else "?"),
+            n_contracts=len(contracts),
+            contracts=", ".join(contracts),
+        )
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(title)
+        box.setInformativeText(body or str(exc))
+        btn_continuous = box.addButton(
+            format_msg("BTN_USE_CONTINUOUS", continuous=continuous) or f"Usar {continuous}",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        if not has_continuous:
+            # Grey-out — visivel mas desabilitado quando {root}FUT nao existe.
+            btn_continuous.setEnabled(False)
+            btn_continuous.setToolTip(
+                f"{continuous} nao esta cadastrado no catalog "
+                "(adicionar via 'data-downloader contracts add' ou seed)."
+            )
+        btn_split = box.addButton(
+            format_msg("BTN_SPLIT_RANGE") or "Dividir range",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        btn_per_chunk = box.addButton(
+            format_msg("BTN_OPT_IN_PER_CHUNK") or "Avancado: per-chunk",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        btn_per_chunk.setToolTip(
+            "Re-resolve vigent_contract por chunk (1 query SQLite/chunk). "
+            "Util quando voce QUER seguir o rollover natural — caller assume "
+            "responsabilidade (Q-DRIFT-32 defense bypassada)."
+        )
+        btn_cancel = box.addButton(
+            format_msg("BTN_CANCEL") or "Cancelar",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+
+        box.exec()
+        clicked = box.clickedButton()
+        _symbol, _exchange, _start, _end, _data_dir = self._last_request_args
+
+        if clicked is btn_continuous and has_continuous:
+            # Re-submit com WDOFUT. Reativa state loading.
+            self._download_active = True
+            self._set_state(STATE_LOADING)
+            self._last_request_args = (continuous, _exchange, _start, _end, _data_dir)
+            self._request_start.emit(continuous, _exchange, _start, _end, _data_dir)
+            return True
+        if clicked is btn_per_chunk:
+            self._download_active = True
+            self._set_state(STATE_LOADING)
+            self._request_start_per_chunk.emit(
+                _symbol,
+                _exchange,
+                _start,
+                _end,
+                _data_dir,
+                None,  # resume_job_id
+                True,  # resolve_contract_per_chunk
+            )
+            return True
+        if clicked is btn_split:
+            # MVP: nao temos dialog para split — apenas explicar e voltar ao
+            # form para o usuario ajustar manualmente. Mostra info card.
+            from data_downloader.ui.microcopy_loader import MSG as _MSG
+
+            entry = _MSG.get("ERR_AMBIGUOUS_ROLLOVER")
+            if entry is not None:
+                self._error_title.setText(entry.title or "")
+                self._error_detail.setText(
+                    f"Escolha um contrato especifico ({', '.join(contracts)}) "
+                    f"e ajuste o range para caber dentro da vigencia. "
+                    "Veja docs/storage/CONTRACTS.md para vigencias."
+                )
+                self._error_action.setText(entry.action or "")
+                self._open_settings_btn.setVisible(False)
+            self._set_state(STATE_ERROR)
+            self._subtitle.setText(format_msg("LBL_DOWNLOAD_SCREEN_SUBTITLE"))
+            return True
+        # btn_cancel ou close — devolve controle ao fluxo padrao de erro.
+        _ = btn_cancel
+        return False
+
+    def _continuous_future_exists(self, continuous_code: str) -> bool:
+        """Verifica se ``{root}FUT`` ja existe no catalog (AC10 grey-out).
+
+        Best-effort: se nao conseguir abrir catalog (sem data_dir, sem db),
+        retorna False — botao fica desabilitado e usuario nao toma decisao
+        sem confirmacao.
+        """
+        try:
+            from data_downloader._internal.bundle_paths import default_data_dir
+            from data_downloader.orchestrator.contracts import list_contracts
+            from data_downloader.storage.catalog import Catalog
+
+            data_dir = default_data_dir()
+            db_path = data_dir / "_internal" / "catalog.db"
+            if not db_path.exists():
+                # Tenta tambem o caminho legado.
+                db_path = data_dir / "history" / "catalog.db"
+            if not db_path.exists():
+                return False
+            cat = Catalog(
+                db_path=db_path,
+                data_dir=data_dir,
+                auto_reconcile=False,
+                auto_cleanup_orphans=False,
+            )
+            try:
+                contracts = list_contracts(cat, root=continuous_code)
+                return any(c.contract_code == continuous_code for c in contracts)
+            finally:
+                cat.close()
+        except Exception:
+            return False
 
     @Slot(object)
     def _on_cancelled(self, exc: object) -> None:

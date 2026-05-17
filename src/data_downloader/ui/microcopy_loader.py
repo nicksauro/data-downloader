@@ -174,6 +174,47 @@ MSG: Final[dict[str, MicrocopyEntry]] = {
         detail='"{symbol}" não consta no calendário oficial de contratos vigentes.',
         action="Liste vigentes: `data-downloader contracts list`.",
     ),
+    # Story 4.26 — AmbiguousRolloverError microcopy (AC10).
+    # Quando o range [start, end] cruza rollover sob uma raiz (ex.: 'WDO'
+    # de 2026-01-15 a 2026-06-15), o orchestrator bloqueia o download por
+    # padrão (Q-DRIFT-32 defense) e o adapter encaminha para um dialog
+    # com 3 opções clicáveis: WDOFUT / contrato específico / opt-in
+    # per-chunk.
+    "ERR_AMBIGUOUS_ROLLOVER": MicrocopyEntry(
+        msg_type="error",
+        title="Range cobre múltiplos contratos",
+        detail=(
+            'A janela [{start}, {end}] sob "{symbol_root}" cobre '
+            "{n_contracts} contratos vigentes. Escolha uma das opções "
+            "abaixo para evitar perda silenciosa de dados (Q-DRIFT-32)."
+        ),
+        action="Use WDOFUT (continuous), divida o range OU habilite per-chunk.",
+    ),
+    "MSG_AMBIGUOUS_ROLLOVER_TITLE": MicrocopyEntry(
+        msg_type="error",
+        title="Range cobre múltiplos contratos",
+    ),
+    "MSG_AMBIGUOUS_ROLLOVER_BODY": MicrocopyEntry(
+        msg_type="error",
+        title="Range cobre múltiplos contratos",
+        detail=(
+            'A janela [{start}, {end}] sob "{symbol_root}" cobre '
+            "{n_contracts} contratos vigentes: {contracts}. Escolha uma "
+            "das opções abaixo para evitar perda silenciosa de dados."
+        ),
+    ),
+    "BTN_USE_CONTINUOUS": MicrocopyEntry(
+        msg_type="button",
+        title="Usar {continuous}",
+    ),
+    "BTN_SPLIT_RANGE": MicrocopyEntry(
+        msg_type="button",
+        title="Dividir range",
+    ),
+    "BTN_OPT_IN_PER_CHUNK": MicrocopyEntry(
+        msg_type="button",
+        title="Avançado: per-chunk",
+    ),
     "ERR_INVALID_PERIOD": MicrocopyEntry(
         msg_type="error",
         title="Período inválido",

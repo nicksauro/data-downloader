@@ -39,6 +39,7 @@ A API V1.0 expõe 4 funções, 4 classes e 8 exceções:
 - :class:`IntegrityError` — schema drift / hash mismatch / dedup gap.
 - :class:`OperationCancelled` — cancel cooperativo concluído (não é falha).
 - :class:`ConnectionLost` — reconexão DLL ultrapassou janela (Q02-E).
+- :class:`AmbiguousRolloverError` — range cruza rollover sob raiz (Story 4.26 / ADR-028).
 
 ================================================================================
 Garantias Semânticas
@@ -160,6 +161,7 @@ from __future__ import annotations
 
 from data_downloader.public_api.download import download
 from data_downloader.public_api.exceptions import (
+    AmbiguousRolloverError,
     ConnectionLost,
     DataDownloaderError,
     DiskFull,
@@ -190,6 +192,7 @@ Bump rules in module docstring above. Consumers pin via
 """
 
 __all__ = [
+    "AmbiguousRolloverError",
     "ConnectionLost",
     "DLLInitError",
     "DataDownloaderError",
