@@ -346,7 +346,7 @@ Na presença de overlap (dois contratos cobrindo a mesma data — caso real dura
 
 ---
 
-## 5. Workflow de manutenção do mapa
+## 4a. Workflow de manutenção do mapa
 
 ### 5.1 Adicionar contrato novo (rollover natural)
 
@@ -376,6 +376,30 @@ Quando Nelogica publica calendário oficial:
 2. `data-downloader contracts import --source nelogica_official --file calendar_2026.csv`.
 3. Tool faz diff contra catálogo, mostra divergências, exige aprovação interativa para cada mudança.
 4. Atualiza `validation_source = nelogica_official` + `notes = "URL: ..."`.
+
+---
+
+## 5. Resolution policy (Story 4.26 / ADR-028 — v1.4.0)
+
+A partir da release v1.4.0, o orchestrator adota política **híbrida** ao resolver o `contract_code` para um job de download:
+
+| Caller pede | Default `resolve_contract_per_chunk=False` (fail-loudly) | Opt-in `resolve_contract_per_chunk=True` |
+|-------------|---------------------------------------------------------|------------------------------------------|
+| Continuous future (`WDOFUT`, `WINFUT`, ...) — golden path | Lookup retorna ticker = root. Funciona. | Idem — sem efeito (1 contrato cobre tudo). |
+| Contrato específico (`WDOJ26`, `WINH26`, ...) — `resolve_contract=False` inferido | Funciona SE `[start, end]` dentro da vigência. DLL retorna 0 trades fora-de-vigência (responsabilidade do caller). | Não aplica (already specific). |
+| Raiz simples (`WDO`, `WIN`, `IND`, `DOL`, ...) — `resolve_contract=True` | **Bloqueia** com `AmbiguousRolloverError` se range cobre múltiplos contratos. Mensagem prescritiva orienta usuário. | Re-resolve `vigent_contract` por chunk diário (1 query SQLite extra/chunk — custo desprezível). Bypassa a validation. |
+
+**Por que `WDOFUT` continua sendo o golden path:** continuous-future é cadastrado em `CONTRACTS.md` com vigência `[1900-01-01, 9999-12-31]` e a DLL Nelogica trata `XXXFUT` como agregação interna — zero queries de rollover, zero risco silent loss (Q-DRIFT-32). A política v1.4.0 transforma essa convenção tácita em **enforcement mecânico** via mensagem da exception.
+
+**Cross-rollover legitimo (research/auditoria seguindo rollover):** o opt-in `resolve_contract_per_chunk=True` cobre o caso de uso, com flag explícita assinando a responsabilidade. Cada chunk diário será baixado com o `contract_code` vigente correto naquele dia; partitions são gravadas sob `contract_code` heterogêneo no catálogo (`chunk_ledger` reflete isso).
+
+**UI Qt (download_screen):** AmbiguousRolloverError vira `QMessageBox` com 3 botões clicáveis — "Usar `{root}FUT`" / "Dividir range" / "Avançado: per-chunk". Opção "Usar `{root}FUT`" fica grey-out se o continuous-future não estiver cadastrado no seed.
+
+**Referências:**
+- [ADR-028 — Contract resolution policy](../adr/ADR-028-contract-vigent-resolution-policy.md) (decisão completa).
+- [ADR-006 §Amendment 2026-05-17](../adr/ADR-006-contract-calendar.md#amendment-2026-05-17--story-426--adr-028).
+- [Q-DRIFT-32 §Mitigation v1.4.0](../dll/QUIRKS.md#mitigation-v140-story-426--adr-028).
+- `docs/stories/4.26-rollover-safety-vigent-contract.story.md`.
 
 ---
 
