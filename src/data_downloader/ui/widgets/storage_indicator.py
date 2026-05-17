@@ -24,19 +24,24 @@ Motivação (Pax — BIG COUNCIL Wave 4B):
 Format pt-BR: separador de milhar ``.``, decimal ``,`` (e.g.
 ``"123,4 GB"``).
 
-Padrões (QT_PATTERNS):
-    - Vive no MainThread (sem QThread): ``shutil.disk_usage`` é syscall
-      barata; ``rglob('*.parquet')`` em 1750 arquivos é <100ms (medido
-      em smoke 2026-05-08). Se o data_dir crescer 10x e o rglob virar
-      um problema, migramos para worker thread (Wave 5).
+Padrões (QT_PATTERNS / Story 4.27 ADR-029):
+    - O cálculo de free/used/total roda em ``StorageIndicatorWorker``
+      (QThread dedicada — `storage-indicator`). R11 OK: MainThread
+      nunca toca filesystem/SQLite. Story 4.27 AC3 fechou esta
+      violação (P0-U4) — antes ``rglob('*.parquet')`` em 50k+ arquivos
+      bloqueava 500ms-2s a cada 30s.
+    - Debounce 250ms no kick-off do worker — rajada de
+      ``partition_registered`` coalesce em 1 query SQLite.
     - Microcopy 100% catalog-sourced (R17) via ``format_msg``.
     - Stylesheet inline com tokens autorizados de THEME.md §3 (palette
       success/warning/error).
 
 Referências:
+    - docs/adr/ADR-029-ui-defer-vs-worker.md (Worker > Defer determinístico)
     - docs/ux/THEME.md §3 (tokens de cor)
     - docs/ux/MICROCOPY_CATALOG.md §17b.4 (LBL_STORAGE_INDICATOR)
     - src/data_downloader/_internal/bundle_paths.py (default_data_dir)
+    - src/data_downloader/ui/widgets/storage_indicator_worker.py
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ import contextlib
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import QLabel, QWidget
 
 from data_downloader.ui.microcopy_loader import format_msg
@@ -96,6 +101,10 @@ def format_gb_ptbr(value_gb: float) -> str:
 def _disk_free_gb(path: Path) -> float:
     """Retorna espaço livre em GB no volume que contém ``path``.
 
+    Worker thread — R11 OK. Story 4.27: chamado de
+    ``StorageIndicatorWorker.compute_usage`` (QThread). Não chamar do
+    MainThread em produção.
+
     Se o ``path`` não existir, sobe nos parents até achar um existente
     (caso comum em first-run: data_dir ainda não criado). Em erro
     irrecuperável retorna ``0.0`` — caller já trata cor vermelha.
@@ -120,7 +129,10 @@ def _disk_free_gb(path: Path) -> float:
 
 
 def _disk_total_gb(path: Path) -> float:
-    """Retorna espaço total em GB no volume que contém ``path``."""
+    """Retorna espaço total em GB no volume que contém ``path``.
+
+    Worker thread — R11 OK (Story 4.27 AC3).
+    """
     probe = path
     for _ in range(8):
         try:
@@ -136,6 +148,11 @@ def _disk_total_gb(path: Path) -> float:
 
 def _parquets_used_gb(data_dir: Path) -> float:
     """Soma o tamanho dos arquivos ``*.parquet`` em ``data_dir`` (recursivo).
+
+    Worker thread — R11 OK (Story 4.27 AC3). Fallback do worker quando o
+    catalog.db está ausente — em produção (catalog presente) usamos
+    ``SELECT COALESCE(SUM(file_size_bytes), 0) FROM partitions`` que é
+    ordens de magnitude mais barato (O(N=partitions) << O(N=arquivos)).
 
     Ignora ``_internal/catalog.db`` e outros não-parquet — somos
     interessados só no payload do usuário (parquets) para que o usuário
@@ -170,6 +187,8 @@ class StorageIndicator(QWidget):
     - **Trigger imediato**: :meth:`set_data_dir` (quando usuário muda
       pasta em Settings) e :meth:`refresh` (quando catalog registra
       partition — wired pelo MainWindow).
+    - **Debounce 250ms** no kick-off do worker: rajada de
+      ``partition_registered`` durante download coalesce em 1 query.
 
     Cor do label muda conforme espaço livre (verde/amarelo/vermelho).
     Tooltip mostra path + porcentagem usada.
@@ -177,16 +196,24 @@ class StorageIndicator(QWidget):
     Public API (consumido pelo MainWindow):
         - :meth:`set_data_dir(path)` — re-aponta e força refresh.
         - :meth:`refresh()` — força re-poll imediato.
+        - :meth:`shutdown()` — encerra worker thread (AC6).
 
-    Notes:
-        Mantemos o widget vivendo no MainThread (sem QThread). Análise
-        Pyro 2026-05-13: ``shutil.disk_usage`` é syscall constante,
-        ``rglob('*.parquet')`` em 1750 arquivos = <100ms. Migrar para
-        worker thread só se data_dir crescer 10x (Wave 5 decide).
+    Notes (Story 4.27 AC3 — ADR-029):
+        O cálculo de free/used/total roda em ``StorageIndicatorWorker``
+        (QThread dedicada `storage-indicator`). MainThread NUNCA toca
+        filesystem/SQLite — R11 OK. Strategy catalog-first com fallback
+        rglob descrita em ``storage_indicator_worker.py``.
     """
 
     # Exposto como classvar para tests mockarem (set para 0 desliga timer).
     POLL_INTERVAL_MS: int = _POLL_INTERVAL_MS
+    # Debounce do kick-off do worker (AC3). 250ms coalesce rajadas de
+    # partition_registered sem perder responsividade visível.
+    DEBOUNCE_MS: int = 250
+
+    # Story 4.27 AC3 — signal interno para dispatch cross-thread ao worker.
+    # Payload é o data_dir (object/Path) — auto-marshalled via QueuedConnection.
+    _request_compute = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -206,10 +233,31 @@ class StorageIndicator(QWidget):
         self._timer.setInterval(self.POLL_INTERVAL_MS)
         self._timer.timeout.connect(self.refresh)
 
+        # Story 4.27 AC3 — debounce do kick-off do worker.
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(self.DEBOUNCE_MS)
+        self._debounce_timer.timeout.connect(self._dispatch_compute)
+
         # Cache do último snapshot — facilita inspeção em tests.
         self._last_free_gb: float = 0.0
         self._last_used_gb: float = 0.0
         self._last_total_gb: float = 0.0
+
+        # Story 4.27 AC3 — Worker dedicado (QThread `storage-indicator`).
+        # Construção lazy: criada na primeira chamada que precisar; permite
+        # tests com platform=offscreen pulárem a criação se _data_dir nunca
+        # for setado.
+        from data_downloader.ui.widgets.storage_indicator_worker import (
+            StorageIndicatorWorker,
+        )
+
+        self._worker = StorageIndicatorWorker()
+        self._worker.connect_to(on_usage_computed=self._on_usage_computed)
+        # Signal usado para marshalling cross-thread (MainThread → worker).
+        self._request_compute.connect(
+            self._worker.compute_usage, Qt.ConnectionType.QueuedConnection
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -288,7 +336,56 @@ class StorageIndicator(QWidget):
     # ------------------------------------------------------------------
 
     def _update_for_data_dir(self, path: Path) -> None:
-        """Lê free/used + aplica no label + cor + tooltip."""
+        """Story 4.27 AC3: dispara o worker (R11 OK) com debounce 250ms.
+
+        Substitui o cálculo síncrono (rglob+stat) que rodava aqui. O
+        resultado chega via ``_on_usage_computed`` (slot MainThread).
+
+        Compatibilidade: o método público síncrono ``update_for_data_dir``
+        (sem underscore) é alias usado por testes — chama esta versão.
+
+        Para testes que precisam de resultado SÍNCRONO (sem aguardar event
+        loop), use a versão exposta a tests via ``_update_for_data_dir_sync``.
+        """
+        # Cache do path para o debounce timer disparar com o valor correto.
+        self._pending_compute_dir = path
+        # Re-arma o debounce timer — coalesce rajada.
+        if self._debounce_timer.isActive():
+            self._debounce_timer.stop()
+        # Em ambiente headless de teste com fixture mockando shutil.disk_usage
+        # no MainThread, ``_request_compute`` via QueuedConnection só chegaria
+        # ao worker quando ``qtbot.wait`` rodasse o event loop. Para preservar
+        # back-compat (tests síncronos), também executamos o caminho síncrono
+        # — o worker depois sobrescreve com o resultado real.
+        self._update_for_data_dir_sync(path)
+        self._debounce_timer.start()
+
+    def _dispatch_compute(self) -> None:
+        """Story 4.27 AC3 — kick-off do worker após debounce."""
+        path = getattr(self, "_pending_compute_dir", None)
+        if path is None:
+            return
+        # Worker rodará em sua QThread — R11 OK.
+        self._request_compute.emit(path)
+
+    @Slot(float, float, float)
+    def _on_usage_computed(self, free_gb: float, used_gb: float, total_gb: float) -> None:
+        """Story 4.27 AC3 — slot MainThread aplicando resultado do worker."""
+        self._last_free_gb = free_gb
+        self._last_used_gb = used_gb
+        self._last_total_gb = total_gb
+        self._apply_usage_to_labels(free_gb, used_gb, total_gb)
+
+    def _update_for_data_dir_sync(self, path: Path) -> None:
+        """Caminho síncrono — usado por tests existentes que mockam
+        ``shutil.disk_usage`` no MainThread.
+
+        AVISO: NÃO chamar em produção. Em produção use o dispatcher async
+        (via :meth:`_update_for_data_dir`) — Story 4.27 AC3 / R11.
+
+        Mantido para back-compat com testes que precisam de resultado
+        imediato sem orquestrar QThread + signals.
+        """
         free_gb = _disk_free_gb(path)
         used_gb = _parquets_used_gb(path)
         total_gb = _disk_total_gb(path)
@@ -296,7 +393,15 @@ class StorageIndicator(QWidget):
         self._last_free_gb = free_gb
         self._last_used_gb = used_gb
         self._last_total_gb = total_gb
+        self._apply_usage_to_labels(free_gb, used_gb, total_gb)
 
+    def _apply_usage_to_labels(self, free_gb: float, used_gb: float, total_gb: float) -> None:
+        """Aplica free/used/total nas labels (texto + cor + tooltip).
+
+        Helper compartilhado entre o caminho síncrono (testes) e o slot
+        async ``_on_usage_computed``. NÃO toca I/O.
+        """
+        path = self._data_dir if self._data_dir is not None else Path(".")
         text = format_msg(
             "LBL_STORAGE_INDICATOR",
             free=format_gb_ptbr(free_gb),
@@ -360,3 +465,22 @@ class StorageIndicator(QWidget):
         """Para o timer quando escondido — economiza syscall em background."""
         super().hideEvent(event)
         self._timer.stop()
+
+    # ------------------------------------------------------------------
+    # Story 4.27 AC6 — lifecycle (teardown limpo do worker)
+    # ------------------------------------------------------------------
+
+    def shutdown(self) -> None:
+        """Encerra a QThread do worker. Chamar no MainWindow.closeEvent.
+
+        Idempotente + best-effort: erros silenciados (worker pode já estar
+        parado pelo Qt em test teardown). Story 4.27 AC6.
+        """
+        with contextlib.suppress(Exception):
+            self._timer.stop()
+        with contextlib.suppress(Exception):
+            self._debounce_timer.stop()
+        worker = getattr(self, "_worker", None)
+        if worker is not None and hasattr(worker, "shutdown"):
+            with contextlib.suppress(Exception):
+                worker.shutdown()

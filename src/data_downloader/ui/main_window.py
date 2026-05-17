@@ -706,12 +706,26 @@ class MainWindow(QMainWindow):
         if adapter is not None:
             with contextlib.suppress(Exception):
                 adapter.shutdown()
+        # Story 4.27 AC6 — StorageIndicator agora tem worker dedicado
+        # (StorageIndicatorWorker) que precisa de shutdown limpo antes do
+        # exit do processo. Idempotente / best-effort.
+        storage_indicator = getattr(self, "_storage_indicator", None)
+        if storage_indicator is not None and hasattr(storage_indicator, "shutdown"):
+            with contextlib.suppress(Exception):
+                storage_indicator.shutdown()
         # Shutdown dos adapters dos screens (DownloadAdapter / CatalogAdapter).
+        # Story 4.27 AC6 — DownloadScreen ganhou um ``_catalog_adapter``
+        # secundário (para check_interrupted_jobs). Shutdown explícito para
+        # evitar ``QThread: Destroyed while still running``.
         for screen in getattr(self, "_screens", {}).values():
             screen_adapter = getattr(screen, "_adapter", None)
             if screen_adapter is not None and hasattr(screen_adapter, "shutdown"):
                 with contextlib.suppress(Exception):
                     screen_adapter.shutdown()
+            screen_catalog_adapter = getattr(screen, "_catalog_adapter", None)
+            if screen_catalog_adapter is not None and hasattr(screen_catalog_adapter, "shutdown"):
+                with contextlib.suppress(Exception):
+                    screen_catalog_adapter.shutdown()
         # v1.3.0 Wave 2A (Dex) — desliga observer do DllSessionAdapter
         # ANTES de ``shutdown_dll`` para evitar que o ``idle`` emitido no
         # finalize tente marshalar ``QMetaObject.invokeMethod`` sobre

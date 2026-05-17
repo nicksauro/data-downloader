@@ -121,6 +121,13 @@ class CatalogAdapter(QObject):
     # múltiplos eventos em runtime (download que registra 1 partition/chunk
     # a alta frequência não thrash a UI).
     partition_registered = Signal(str, int, int)
+    # Story 4.27 AC1+AC4 (Sol) — emit após ``check_interrupted_jobs`` consultar
+    # ``Catalog.list_jobs(statuses=("in_progress","partial"))``. Payload é um
+    # dict ``{"job_id", "symbol", "done_chunks", "total_chunks",
+    # "data_dir"}`` em caso de hit, ou ``None`` se nada a retomar. Conexão
+    # cross-thread DEVE ser ``Qt.QueuedConnection`` — slot é MainThread.
+    # ADR-029: SQLite I/O → Worker, não Defer.
+    interrupted_job_found = Signal(object)
 
     def __init__(self, parent: QObject | None = None) -> None:
         # D2 (COUNCIL-23): NÃO passar parent ao super — QObjects com parent
@@ -223,6 +230,41 @@ class CatalogAdapter(QObject):
             return
         self.reconciled.emit(report)
 
+    @Slot(object)
+    def check_interrupted_jobs(self, data_dir: object) -> None:
+        """Story 4.27 AC1+AC4 — consulta jobs interrompidos em QThread.
+
+        Substitui o ``Catalog(...) + list_jobs + resume_job`` síncrono que
+        rodava em ``DownloadScreen.__init__`` (R11 P0-U2 violation: 5-200ms
+        no MainThread em catalogs grandes).
+
+        Emite :attr:`interrupted_job_found` com payload ``dict`` (caso de
+        hit) ou ``None`` (catalog ausente / sem jobs interrompidos).
+
+        Args:
+            data_dir: Path raiz dos dados (str ou Path) — passado via signal
+                payload (cross-thread). Catalog.db esperado em
+                ``data_dir/_internal/catalog.db`` (ADR-024).
+
+        ADR-029 (sign-off Aria): SQLite I/O → Worker, não Defer. Esta slot
+        roda na thread do adapter (``catalog-adapter``), serializada com
+        outras operações do catalog (list/delete/reconcile).
+        """
+        self._propagate_context()
+        try:
+            payload = self._compute_interrupted_payload(Path(str(data_dir)))
+        except Exception as exc:
+            # Story 4.27 — best-effort: erro silencioso, banner não aparece.
+            # Não emitimos via ``error`` (não é falha do usuário: catalog
+            # ausente / schema legado / etc. são casos esperados de no-op).
+            with contextlib.suppress(Exception):
+                from data_downloader.observability import bind_context
+
+                bind_context(check_interrupted_jobs_error=str(exc))
+            self.interrupted_job_found.emit(None)
+            return
+        self.interrupted_job_found.emit(payload)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -240,7 +282,11 @@ class CatalogAdapter(QObject):
             self._debounce_timer.stop()
         try:
             self._thread.quit()
-            self._thread.wait(2000)
+            # Story 4.27 AC8 (P1-C1): reduzir wait(2000) → wait(500). N
+            # adapters * 2000ms = pior caso vários segundos para closeEvent;
+            # 500ms é teto razoável para uma query SQLite drain. Se a thread
+            # não responder em 500ms, deleteLater best-effort cuida do GC.
+            self._thread.wait(500)
         except Exception:
             pass
 
@@ -319,6 +365,7 @@ class CatalogAdapter(QObject):
         on_reconciled: object | None = None,
         on_error: object | None = None,
         on_partition_registered: object | None = None,
+        on_interrupted: object | None = None,
     ) -> None:
         """Conecta sinais usando ``Qt.QueuedConnection`` (R11).
 
@@ -326,6 +373,10 @@ class CatalogAdapter(QObject):
         recebe notificações debounced (500ms) quando o catálogo registra
         uma nova partition/chunk em runtime. CatalogScreen liga este sinal
         ao :meth:`refresh` para auto-atualização durante downloads.
+
+        Story 4.27 AC1+AC4 — ``on_interrupted(payload)`` recebe o resultado
+        de :meth:`check_interrupted_jobs`. ``payload`` é ``dict`` ou ``None``
+        (ver docstring do signal :attr:`interrupted_job_found`).
         """
         if on_partitions is not None:
             self.partitions_loaded.connect(on_partitions, Qt.ConnectionType.QueuedConnection)
@@ -341,6 +392,8 @@ class CatalogAdapter(QObject):
             self.partition_registered.connect(
                 on_partition_registered, Qt.ConnectionType.QueuedConnection
             )
+        if on_interrupted is not None:
+            self.interrupted_job_found.connect(on_interrupted, Qt.ConnectionType.QueuedConnection)
 
     # ------------------------------------------------------------------
     # Internal — operações de catálogo (rodam dentro da thread do adapter).
@@ -468,3 +521,48 @@ class CatalogAdapter(QObject):
 
         with self._open_catalog(data_dir) as catalog:
             return catalog.reconcile(auto_correct=True)
+
+    def _compute_interrupted_payload(self, data_dir: Path) -> dict | None:
+        """Story 4.27 AC1 — helper síncrono (roda dentro da QThread).
+
+        Replica a lógica que estava em ``DownloadScreen._check_for_interrupted_download``:
+        abre Catalog (catalog.db), consulta jobs com status in_progress/partial
+        (limit=1) e, se houver, computa resume_job para extrair done/total
+        chunks. Retorna ``None`` se não há nada a retomar.
+
+        Worker thread — R11 OK (ADR-029).
+        """
+        db_path = data_dir / "_internal" / "catalog.db"
+        if not db_path.exists():
+            return None
+        from data_downloader.storage.catalog import Catalog
+
+        job = None
+        plan = None
+        catalog = Catalog(db_path=db_path, data_dir=data_dir)
+        try:
+            jobs = catalog.list_jobs(statuses=("in_progress", "partial"), limit=1)
+            if jobs:
+                job = jobs[0]
+                with contextlib.suppress(Exception):
+                    plan = catalog.resume_job(job.job_id)
+        finally:
+            with contextlib.suppress(Exception):
+                catalog.close()
+        if job is None:
+            return None
+        symbol = getattr(job, "symbol", "?") or "?"
+        if plan is not None:
+            done = len(getattr(plan, "completed_partitions", ()) or ())
+            pending = len(getattr(plan, "pending_chunks", ()) or ())
+            total = done + pending
+        else:
+            done = 0
+            total = 0
+        return {
+            "job_id": getattr(job, "job_id", None),
+            "symbol": symbol,
+            "done_chunks": done,
+            "total_chunks": total,
+            "data_dir": data_dir,
+        }

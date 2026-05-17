@@ -332,6 +332,64 @@ class _ReconcileWorker(QObject):
         self.finished.emit(n_added, n_removed, error_msg)
 
 
+class _StorageStatusWorker(QObject):
+    """Story 4.27 AC2 (P0-U3 — R11): worker para refresh do Storage status.
+
+    Substitui o `_refresh_storage_status` síncrono que rodava no
+    `SettingsScreen.__init__` / `_load_initial_values` (5-300ms de
+    `shutil.disk_usage` + `sqlite3.connect` + `SELECT COUNT(*)` no
+    MainThread em boot path).
+
+    Worker thread — R11 OK (ADR-029). Padrão consistente com
+    `_TestConnectionWorker`/`_IntegrityWorker`/`_ReconcileWorker`.
+    """
+
+    finished = Signal(str, str, str)  # free_space_text, catalog_status_text, error_msg
+
+    def __init__(self, data_dir: Path) -> None:
+        super().__init__()
+        self._data_dir = data_dir
+
+    @Slot()
+    def run(self) -> None:
+        free_space_text = "—"
+        catalog_status_text = "—"
+        error_msg = ""
+        try:
+            # Espaço livre (shutil.disk_usage — syscall barata, mas em path
+            # de rede pode passar de 5ms; mantemos fora do MainThread).
+            try:
+                probe = self._data_dir if self._data_dir.exists() else self._data_dir.parent
+                usage = shutil.disk_usage(str(probe))
+                free_gb = usage.free / (1024**3)
+                total_gb = usage.total / (1024**3)
+                free_space_text = format_msg(
+                    "LBL_STORAGE_FREE_SPACE",
+                    free_gb=f"{free_gb:.1f}",
+                    total_gb=f"{total_gb:.1f}",
+                )
+            except Exception:
+                free_space_text = "—"
+
+            # Catalog status — COUNT(*) em sqlite3 (~5ms baseline, pode
+            # crescer com catalogs grandes). ADR-029: SQLite → Worker.
+            db_path = self._data_dir / "_internal" / "catalog.db"
+            n_partitions = 0
+            if db_path.exists():
+                try:
+                    import sqlite3
+
+                    with sqlite3.connect(str(db_path)) as conn:
+                        cursor = conn.execute("SELECT COUNT(*) FROM partitions")
+                        n_partitions = int(cursor.fetchone()[0])
+                except Exception:
+                    pass
+            catalog_status_text = format_msg("LBL_STORAGE_CATALOG_OK", n_partitions=n_partitions)
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+        self.finished.emit(free_space_text, catalog_status_text, error_msg)
+
+
 class SettingsScreen(QWidget):
     """Tela Configurações — 4 seções em QScrollArea (5 estados).
 
@@ -855,7 +913,17 @@ class SettingsScreen(QWidget):
 
         data_dir = os.environ.get("DATA_DOWNLOADER_DATA_DIR") or str(default_data_dir())
         self._data_dir_edit.setText(data_dir)
-        self._refresh_storage_status(Path(data_dir))
+        # Story 4.27 AC2 (P0-U3 — R11): refresh storage status async.
+        # ADR-029: shutil.disk_usage + sqlite3.connect → Worker, não Defer.
+        # Labels começam com placeholder "—" (microcopy LBL_STORAGE_LOADING
+        # opcional; "—" é neutro e já usado em outros lugares — AC11).
+        self._free_space_label.setText("—")
+        self._catalog_status_label.setText("—")
+        # Kick-off do worker é Defer (QTimer.singleShot(0, ...)) — não para
+        # esconder I/O (worker fará isso), mas para garantir que o paint
+        # inicial aconteça antes da criação da QThread.
+        self._pending_storage_dispatch_dir = Path(data_dir)
+        QTimer.singleShot(0, self._dispatch_storage_worker)
 
         # Updates section — popula versão atual (sem checagem de rede).
         # Story 4.4: check só acontece em click explícito do usuário
@@ -873,38 +941,64 @@ class SettingsScreen(QWidget):
         self._dirty = False
 
     def _refresh_storage_status(self, data_dir: Path) -> None:
-        # Espaço livre.
+        """Story 4.27 AC2 — wrapper async para retrocompat.
+
+        Antes de 4.27 esta função rodava ``shutil.disk_usage`` +
+        ``sqlite3.connect`` + ``COUNT(*)`` SÍNCRONO no MainThread (R11
+        violation P0-U3). Agora delega ao :class:`_StorageStatusWorker`
+        via :meth:`_dispatch_storage_worker`.
+
+        ADR-029: NÃO há mais I/O síncrono aqui. Esta API pública é mantida
+        apenas para back-compat de chamadores externos (nenhum teste atual
+        chama; conservada para evitar quebra futura).
+        """
+        # Worker thread — R11 OK. Dispara via QTimer.singleShot(0, ...)
+        # para garantir que o caller MainThread retorne imediatamente.
+        self._free_space_label.setText("—")
+        self._catalog_status_label.setText("—")
+        self._pending_storage_dispatch_dir = data_dir
+        QTimer.singleShot(0, self._dispatch_storage_worker)
+
+    def _dispatch_storage_worker(self) -> None:
+        """Story 4.27 AC2 (P0-U3) — kick-off do StorageStatusWorker.
+
+        Mantém referências em ``self`` para evitar GC. Cleanup é idempotente
+        (deleteLater agendado nos signals).
+        """
+        data_dir = getattr(self, "_pending_storage_dispatch_dir", None)
+        if data_dir is None:
+            return
+        self._pending_storage_dispatch_dir = None
+
+        self._storage_thread = QThread(self)
+        self._storage_thread.setObjectName("settings-storage-status")
+        self._storage_worker = _StorageStatusWorker(data_dir)
+        self._storage_worker.moveToThread(self._storage_thread)
+
+        self._storage_thread.started.connect(self._storage_worker.run)
+        self._storage_worker.finished.connect(
+            self._on_storage_status_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self._storage_worker.finished.connect(self._storage_thread.quit)
+        self._storage_worker.finished.connect(self._storage_worker.deleteLater)
+        self._storage_thread.finished.connect(self._storage_thread.deleteLater)
+        self._storage_thread.start()
+
+    @Slot(str, str, str)
+    def _on_storage_status_finished(
+        self, free_space_text: str, catalog_status_text: str, error_msg: str
+    ) -> None:
+        """Story 4.27 AC2 — slot MainThread aplicando o resultado do worker."""
+        # Defensive: se a screen está em teardown, signals podem chegar
+        # após widgets serem destruídos.
         try:
-            usage = shutil.disk_usage(str(data_dir if data_dir.exists() else data_dir.parent))
-            free_gb = usage.free / (1024**3)
-            total_gb = usage.total / (1024**3)
-            self._free_space_label.setText(
-                format_msg(
-                    "LBL_STORAGE_FREE_SPACE",
-                    free_gb=f"{free_gb:.1f}",
-                    total_gb=f"{total_gb:.1f}",
-                )
-            )
-        except Exception:
-            self._free_space_label.setText("—")
-
-        # Catalog status — count partitions sem auto-reconcile (rápido).
-        db_path = data_dir / "_internal" / "catalog.db"
-        n_partitions = 0
-        if db_path.exists():
-            try:
-                import sqlite3
-
-                with sqlite3.connect(str(db_path)) as conn:
-                    cursor = conn.execute("SELECT COUNT(*) FROM partitions")
-                    n_partitions = int(cursor.fetchone()[0])
-            except Exception:
-                pass
-            self._catalog_status_label.setText(
-                format_msg("LBL_STORAGE_CATALOG_OK", n_partitions=n_partitions)
-            )
-        else:
-            self._catalog_status_label.setText(format_msg("LBL_STORAGE_CATALOG_OK", n_partitions=0))
+            self._free_space_label.setText(free_space_text or "—")
+            self._catalog_status_label.setText(catalog_status_text or "—")
+        except RuntimeError:
+            # Widget destruído — ignora.
+            return
+        # error_msg fica como diagnostic; não exibimos toast nesta operação
+        # silenciosa de boot. Best-effort.
 
     # ------------------------------------------------------------------
     # Slots
@@ -1102,7 +1196,12 @@ class SettingsScreen(QWidget):
         if folder:
             self._data_dir_edit.setText(folder)
             self._mark_dirty()
-            self._refresh_storage_status(Path(folder))
+            # Story 4.27 AC2 (P0-U3 — R11): kick-off async via worker.
+            # Labels mostram placeholder enquanto o worker computa.
+            self._free_space_label.setText("—")
+            self._catalog_status_label.setText("—")
+            self._pending_storage_dispatch_dir = Path(folder)
+            QTimer.singleShot(0, self._dispatch_storage_worker)
 
     def _on_open_data_dir_clicked(self) -> None:
         path_str = self._data_dir_edit.text().strip()
