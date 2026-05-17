@@ -1677,6 +1677,32 @@ class Catalog:
                     "catalog.cleanup_orphans.unlink_failed",
                     extra={"path": str(path), "err": str(exc)},
                 )
+
+        # AC8 — defense-in-depth: purga _pending_commits rows com mais de
+        # 1 dia (recovery em __post_init__ ja deveria ter pegado, mas
+        # caso o psutil tenha dado falso-positivo de pid_alive por janela
+        # de tempo (boot demorado, etc), garantimos eventual limpeza.
+        # Rows recentes (<1 dia) sao preservadas — podem ser writes ativos.
+        try:
+            with self._transaction():
+                conn = self._conn_or_raise()
+                cursor = conn.execute(
+                    "DELETE FROM _pending_commits "
+                    "WHERE pid IS NOT NULL "
+                    "AND started_at < datetime('now', '-1 day')"
+                )
+                stale_purged = cursor.rowcount
+            if stale_purged > 0:
+                _LOG.info(
+                    "catalog.cleanup_orphans.pending_purged",
+                    extra={"removed_count": stale_purged},
+                )
+        except sqlite3.Error as exc:  # pragma: no cover defensive
+            _LOG.warning(
+                "catalog.cleanup_orphans.pending_purge_failed",
+                extra={"err": str(exc)},
+            )
+
         return removed
 
     # ------------------------------------------------------------------
