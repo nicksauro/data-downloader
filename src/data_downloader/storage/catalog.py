@@ -1712,6 +1712,11 @@ class Catalog:
             )
 
         try:
+            # Story 4.23 / ADR-026 §2.1: passamos ``catalog=self`` para
+            # que o ``os.replace`` do ``{MM}.parquet`` seja enquadrado em
+            # ``pending_commit``. A UPSERT mensal (day=NULL) é feita
+            # IMEDIATAMENTE após o replace via ``handle.complete()`` —
+            # pulamos abaixo o re-INSERT redundante.
             result = compact_month(
                 self.data_dir,
                 exchange=exchange,
@@ -1719,6 +1724,7 @@ class Catalog:
                 year=year,
                 month=month,
                 dll_version=dll_version,
+                catalog=self,
             )
         except Exception as exc:
             with contextlib.suppress(sqlite3.Error), self._transaction():
@@ -1736,7 +1742,7 @@ class Catalog:
 
         # Persistir estado SQLite ATOMICAMENTE:
         # - DELETE rows diárias do (symbol, exchange, year, month) em partitions
-        # - UPSERT row mensal (day=NULL) se compact_month executou
+        # - (UPSERT mensal já feita por compact_month → pending_commit.complete)
         # - UPDATE compactions completed_at
         finished = _utcnow_iso()
         with self._transaction():
@@ -1746,40 +1752,6 @@ class Catalog:
                 "AND year = ? AND month = ? AND day IS NOT NULL",
                 (symbol, exchange, year, month),
             )
-            if result is not None:
-                rel_path = relative_partition_path(result.path, self.data_dir)
-                conn.execute(
-                    """
-                    INSERT INTO partitions(
-                        partition_path, symbol, exchange, year, month, day,
-                        row_count, first_ts_ns, last_ts_ns, schema_version,
-                        checksum_sha256, file_size_bytes, written_at, job_id
-                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)
-                    ON CONFLICT(partition_path) DO UPDATE SET
-                        row_count = excluded.row_count,
-                        first_ts_ns = excluded.first_ts_ns,
-                        last_ts_ns = excluded.last_ts_ns,
-                        schema_version = excluded.schema_version,
-                        checksum_sha256 = excluded.checksum_sha256,
-                        file_size_bytes = excluded.file_size_bytes,
-                        day = NULL,
-                        written_at = excluded.written_at
-                    """,
-                    (
-                        rel_path,
-                        symbol,
-                        exchange,
-                        year,
-                        month,
-                        result.row_count,
-                        result.first_ts_ns,
-                        result.last_ts_ns,
-                        self._get_meta("parquet_schema_min_supported") or "1.0.0",
-                        result.checksum_sha256,
-                        result.file_size_bytes,
-                        finished,
-                    ),
-                )
             conn.execute(
                 "UPDATE compactions SET completed_at = ? "
                 "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ?",

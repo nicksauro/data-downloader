@@ -512,6 +512,8 @@ def compact_month(
     year: int,
     month: int,
     dll_version: str = "",
+    catalog: Catalog | None = None,
+    job_id: str | None = None,
 ) -> WriteResult | None:
     """Consolida partições diárias ``{DD}.parquet`` num único ``{MM}.parquet`` (ADR-025).
 
@@ -533,6 +535,14 @@ def compact_month(
     existem (crash entre rename e cleanup): completa o cleanup deletando
     os diários.
 
+    **Two-phase commit invertido (Story 4.23 / ADR-026 §2.1):** quando
+    ``catalog`` é injetado, o ``os.replace`` do ``{MM}.parquet`` é
+    enquadrado em :meth:`Catalog.pending_commit` (mesmo padrão de
+    :meth:`ParquetWriter.write`). O DELETE dos diários permanece FORA do
+    bloco — é responsabilidade do caller (``Catalog.maybe_compact_month``)
+    sincronizar o estado SQLite após o commit do mensal. Caller passa
+    ``catalog`` apenas para ganhar a janela atômica do replace mensal.
+
     Args:
         data_dir: Raiz dos dados.
         exchange: ``"F"`` ou ``"B"``.
@@ -540,6 +550,14 @@ def compact_month(
         year: Ano.
         month: Mês 1..12.
         dll_version: Versão da DLL no momento da compactação (metadata).
+        catalog: Catalog opcional para enquadrar o replace mensal no
+            protocolo two-phase invertido. Quando passado, a UPSERT em
+            ``partitions`` é feita IMEDIATAMENTE após o replace (via
+            ``handle.complete``); caller ainda é responsável pelo DELETE
+            dos diários e ``compactions.completed_at``.
+        job_id: UUID do job que originou a compactação (forwardado para
+            ``pending_commit`` quando ``catalog`` injetado). Geralmente
+            ``None`` — compactação não está atrelada a um job único.
 
     Returns:
         :class:`WriteResult` se compactou (ou completou cleanup); ``None``
@@ -548,6 +566,8 @@ def compact_month(
     Raises:
         IntegrityError: dados corrompidos (ex.: linhas com timestamp_ns
             inconsistente) — compactação aborta sem deletar diários.
+        ConcurrentWriterError: outro processo detém claim no
+            ``{MM}.parquet`` (somente quando ``catalog`` injetado).
     """
     monthly_partition = PartitionKey(exchange=exchange, symbol=symbol, year=year, month=month)
     monthly_path = resolve_partition_path(monthly_partition, data_dir)
@@ -600,8 +620,49 @@ def compact_month(
         file_size = tmp_path.stat().st_size
 
         _fsync_directory(monthly_path.parent)
-        os.replace(tmp_path, monthly_path)
-        _fsync_directory(monthly_path.parent)
+
+        if combined.num_rows == 0:
+            first_ts_ns = 0
+            last_ts_ns = 0
+        else:
+            ts_col = combined.column("timestamp_ns")
+            first_ts_ns = int(pa.compute.min(ts_col).as_py())
+            last_ts_ns = int(pa.compute.max(ts_col).as_py())
+
+        write_result = WriteResult(
+            path=monthly_path,
+            row_count=combined.num_rows,
+            first_ts_ns=first_ts_ns,
+            last_ts_ns=last_ts_ns,
+            checksum_sha256=checksum,
+            file_size_bytes=file_size,
+        )
+
+        # Fase 2 (replace atômico) — enquadrado em pending_commit
+        # quando catalog injetado (Story 4.23 / ADR-026 §2.1). Quando
+        # None, comportamento legacy: replace + caller faz UPSERT
+        # mensal subsequente em maybe_compact_month.
+        if catalog is not None:
+            if catalog.data_dir is None:  # pragma: no cover defensive
+                raise RuntimeError("catalog.data_dir must be set for two-phase commit")
+            rel_path = (
+                monthly_path.resolve()
+                .relative_to((catalog.data_dir / "history").resolve())
+                .as_posix()
+            )
+            with catalog.pending_commit(
+                rel_path=rel_path,
+                partition=monthly_partition,
+                expected_sha256=checksum,
+                expected_size=file_size,
+                job_id=job_id,
+            ) as handle:
+                os.replace(tmp_path, monthly_path)
+                _fsync_directory(monthly_path.parent)
+                handle.complete(write_result)
+        else:
+            os.replace(tmp_path, monthly_path)
+            _fsync_directory(monthly_path.parent)
     except Exception:
         if tmp_path.exists():
             try:
@@ -632,14 +693,6 @@ def compact_month(
     except OSError:
         pass
 
-    if combined.num_rows == 0:
-        first_ts_ns = 0
-        last_ts_ns = 0
-    else:
-        ts_col = combined.column("timestamp_ns")
-        first_ts_ns = int(pa.compute.min(ts_col).as_py())
-        last_ts_ns = int(pa.compute.max(ts_col).as_py())
-
     _LOG.info(
         "compact_month.success",
         extra={
@@ -653,14 +706,7 @@ def compact_month(
         },
     )
 
-    return WriteResult(
-        path=monthly_path,
-        row_count=combined.num_rows,
-        first_ts_ns=first_ts_ns,
-        last_ts_ns=last_ts_ns,
-        checksum_sha256=checksum,
-        file_size_bytes=file_size,
-    )
+    return write_result
 
 
 __all__ = [
