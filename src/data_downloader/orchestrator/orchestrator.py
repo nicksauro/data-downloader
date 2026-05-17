@@ -163,6 +163,13 @@ class JobConfig:
         resolve_contract: Se ``True`` (default), trata ``symbol`` como raiz
             e resolve via catalog. Se ``False``, usa ``symbol`` como já
             contrato vigente (skip lookup).
+        resolve_contract_per_chunk: Story 4.26 / ADR-028 — se ``True``,
+            re-resolve ``vigent_contract`` por chunk (opt-in para downloads
+            multi-rollover). Bypassa a validação ``_validate_no_rollover_in_window``
+            (caller assume responsabilidade). Default ``False`` =
+            fail-loudly (Q-DRIFT-32 defense): se o range cruza rollover
+            sob uma raiz, o orchestrator levanta
+            :class:`AmbiguousRolloverError` cedo no ``_validate_config``.
     """
 
     symbol: str
@@ -176,6 +183,7 @@ class JobConfig:
     retry_factor: float = DEFAULT_FACTOR
     retry_jitter: float = DEFAULT_JITTER
     resolve_contract: bool = True
+    resolve_contract_per_chunk: bool = False
 
 
 @dataclass
@@ -479,13 +487,26 @@ class Orchestrator:
 
         try:
             # 3. Resolve contract vigente.
-            contract_code = self._resolve_contract(config)
-            log.info(
-                "orchestrator.contract_resolved",
-                job_id=job_id,
-                symbol_root=config.symbol,
-                contract_code=contract_code,
-            )
+            # Story 4.26 / ADR-028: em modo per-chunk, ``contract_code`` é
+            # apenas placeholder semantico (vira config.symbol, a raiz). O
+            # contract code REAL e re-resolvido por chunk dentro do loop
+            # (ver bloco "per-chunk resolve" abaixo). Em modo single-contract
+            # (default), comportamento legado: 1 resolve no inicio do job.
+            if config.resolve_contract_per_chunk:
+                contract_code = config.symbol  # placeholder — raiz
+                log.info(
+                    "orchestrator.per_chunk_mode_enabled",
+                    job_id=job_id,
+                    symbol_root=config.symbol,
+                )
+            else:
+                contract_code = self._resolve_contract(config)
+                log.info(
+                    "orchestrator.contract_resolved",
+                    job_id=job_id,
+                    symbol_root=config.symbol,
+                    contract_code=contract_code,
+                )
 
             # 4. Calcula chunks faltantes (granularidade DIÁRIA — Wave 1B).
             #    ``_compute_chunks`` consulta ``chunk_ledger`` e remove os
@@ -500,12 +521,35 @@ class Orchestrator:
             #    Distingue "partição existe" de "range coberto" (finding H8)
             #    com granularidade diária (não mais o bug do "mês tocado").
             if not chunks:
-                completed = self._catalog.get_completed_partitions(contract_code, config.exchange)
+                # Story 4.26 AC6 — em modo per-chunk, partitions podem estar
+                # sob contract_codes heterogeneos (WDOH26, WDOJ26, WDOK26).
+                # Coleta union de get_completed_partitions(code) sobre todos
+                # os contracts no range.
+                if config.resolve_contract_per_chunk:
+                    contracts_in_range = self._catalog.list_contracts_in_range(
+                        root=config.symbol,
+                        start=config.start.date(),
+                        end=config.end.date(),
+                    )
+                    completed: list[Partition] = []
+                    seen_paths: set[str] = set()
+                    for c in contracts_in_range:
+                        for part in self._catalog.get_completed_partitions(
+                            c.contract_code, config.exchange
+                        ):
+                            if part.partition_path not in seen_paths:
+                                completed.append(part)
+                                seen_paths.add(part.partition_path)
+                else:
+                    completed = self._catalog.get_completed_partitions(
+                        contract_code, config.exchange
+                    )
                 log.info(
                     "orchestrator.cache_hit",
                     job_id=job_id,
                     contract_code=contract_code,
                     partitions=len(completed),
+                    per_chunk=config.resolve_contract_per_chunk,
                 )
                 self._catalog.update_job_progress(
                     job_id,
@@ -593,10 +637,31 @@ class Orchestrator:
                         )
                         break
 
+                # Story 4.26 / ADR-028 §2.2 — em modo per-chunk, re-resolve
+                # vigent_contract para o dia do chunk. Propaga InvalidContract
+                # caso a tabela contracts nao cubra esse dia (fail-loudly por
+                # chunk — escolha consciente; caller deve popular contracts).
+                if config.resolve_contract_per_chunk:
+                    chunk_contract_code = vigent_contract(
+                        self._catalog,
+                        config.symbol,
+                        chunk.start.date(),
+                        exchange=config.exchange,
+                    )
+                    log.info(
+                        "orchestrator.per_chunk_contract_resolved",
+                        job_id=job_id,
+                        chunk_start=chunk.start.date().isoformat(),
+                        contract_code=chunk_contract_code,
+                        symbol_root=config.symbol,
+                    )
+                else:
+                    chunk_contract_code = contract_code
+
                 result, event_status, chunk_duration, chunk_trades = self._process_chunk(
                     job_id=job_id,
                     config=config,
-                    contract_code=contract_code,
+                    contract_code=chunk_contract_code,
                     chunk=chunk,
                     metrics=metrics,
                 )
@@ -757,6 +822,48 @@ class Orchestrator:
         if config.max_retry_attempts < 1:
             raise ValueError(f"max_retry_attempts must be >= 1; got {config.max_retry_attempts}")
 
+        # Story 4.26 / ADR-028 — defesa contra rollover-spanning silencioso
+        # (Q-DRIFT-32). Se o range [start, end] cobre múltiplos contratos
+        # vigentes sob a raiz config.symbol, falha cedo com mensagem
+        # prescritiva. Bypass quando ``resolve_contract_per_chunk=True``
+        # (caller assume responsabilidade — per-chunk re-resolve cobre
+        # cross-rollover sem perda silenciosa).
+        if config.resolve_contract and not config.resolve_contract_per_chunk:
+            self._validate_no_rollover_in_window(config)
+
+    def _validate_no_rollover_in_window(self, config: JobConfig) -> None:
+        """Levanta :class:`AmbiguousRolloverError` se ``[start, end]`` cruza
+        rollover sob ``config.symbol`` (Story 4.26 / ADR-028 §2.1).
+
+        Conta quantos contratos vigentes cobrem o range. > 1 = rollover
+        detectado → bloqueia. 0 ou 1 = safe (0 será capturado depois pelo
+        ``vigent_contract`` com mensagem mais específica de
+        :class:`InvalidContract` — fail-late deliberado).
+        """
+        contracts_in_range = self._catalog.list_contracts_in_range(
+            root=config.symbol,
+            start=config.start.date(),
+            end=config.end.date(),
+        )
+        if len(contracts_in_range) > 1:
+            from data_downloader.public_api.exceptions import AmbiguousRolloverError
+
+            codes = sorted(c.contract_code for c in contracts_in_range)
+            log.warning(
+                "orchestrator.rollover_spanning_blocked",
+                symbol_root=config.symbol,
+                start=config.start.date().isoformat(),
+                end=config.end.date().isoformat(),
+                contracts_in_range=codes,
+                remedy="use_continuous_future_or_split_or_opt_in_per_chunk",
+            )
+            raise AmbiguousRolloverError(
+                symbol_root=config.symbol,
+                start=config.start.date(),
+                end=config.end.date(),
+                contracts_in_range=codes,
+            )
+
     def _resolve_job(
         self,
         config: JobConfig,
@@ -849,6 +956,13 @@ class Orchestrator:
         na assinatura por compatibilidade; no caminho resume só serve como
         sinal de que estamos retomando — o filtro autoritativo é o ledger
         diário (que é estritamente mais fino que o set de meses completos).
+
+        Story 4.26 AC6 — em modo ``resolve_contract_per_chunk=True``,
+        ``contract_code`` recebido aqui e config.symbol (raiz). O ledger
+        pode ter rows sob multiplos codes (WDOH26, WDOJ26, WDOK26). O
+        ``Catalog.completed_days`` recebe ``roots=set(c.contract_code for c
+        in list_contracts_in_range(...))`` — filtro IN em vez de = unico.
+        Cache-hit em re-run idempotente preservado.
         """
         _ = resume_pending_chunks  # legado Story 1.5 — substituído pelo ledger diário
         chunk_days_map = self._resolve_chunk_days_map(config, contract_code)
@@ -867,13 +981,34 @@ class Orchestrator:
         # a catalog sem a tabela (DB pré-v1.2.0 que ainda não migrou) — mas
         # o ``__init__`` do Catalog aplica migrations, então em prática a
         # tabela existe sempre.
+        # Story 4.26 AC6 — em modo per-chunk, passa roots={code1, code2, ...}.
         try:
-            done_days = self._catalog.completed_days(
-                contract_code,
-                config.exchange,
-                config.start.date(),
-                config.end.date(),
-            )
+            if config.resolve_contract_per_chunk:
+                contracts_in_range = self._catalog.list_contracts_in_range(
+                    root=config.symbol,
+                    start=config.start.date(),
+                    end=config.end.date(),
+                )
+                roots = {c.contract_code for c in contracts_in_range}
+                if roots:
+                    done_days = self._catalog.completed_days(
+                        contract_code,
+                        config.exchange,
+                        config.start.date(),
+                        config.end.date(),
+                        roots=roots,
+                    )
+                else:
+                    # Sem contratos no range — caller vai descobrir via
+                    # vigent_contract no loop (fail-late InvalidContract).
+                    done_days = set()
+            else:
+                done_days = self._catalog.completed_days(
+                    contract_code,
+                    config.exchange,
+                    config.start.date(),
+                    config.end.date(),
+                )
         except Exception as exc:  # pragma: no cover defensive — fail-safe
             log.warning("orchestrator.completed_days_failed", error=repr(exc))
             done_days = set()

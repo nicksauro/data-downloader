@@ -44,8 +44,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
+from typing import TYPE_CHECKING
 
 from data_downloader.storage._paths import hide_directory_windows
+
+if TYPE_CHECKING:
+    from data_downloader.orchestrator.contracts import Contract
 from data_downloader.storage.catalog_models import (
     ChunkRange,
     Gap,
@@ -1165,7 +1169,7 @@ class Catalog:
         root: str,
         start: date,
         end: date,
-    ) -> list[object]:
+    ) -> list[Contract]:
         """Lista contratos vigentes para ``root`` que se sobrepoem ao range
         ``[start, end]`` — Story 4.26 / ADR-028 AC2.
 
@@ -1184,12 +1188,6 @@ class Catalog:
             ordenada por ``vigent_from`` ASC. Vazia se a raiz nao tem
             vigencia alguma cobrindo o range — caller decide tratamento
             (fail-late no ``vigent_contract`` posterior).
-
-        Notes:
-            Retorno tipado como ``list[object]`` no signature publico para
-            evitar ciclo de import (Contract vive em ``orchestrator/``,
-            que ja importa ``Catalog``). Caller deve esperar
-            ``Contract`` instances — a import lazy interna garante isso.
         """
         from data_downloader.orchestrator.contracts import _row_to_contract
 
