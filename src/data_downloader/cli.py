@@ -1137,6 +1137,14 @@ def download_cmd(
     Microcopy 100% via ``ui.microcopy_loader`` (R17 — Uma).
     Ctrl+C produz graceful shutdown (CLI_PATTERNS §7); exit code 130 (POSIX).
     """
+    # Story 4.31 AC13: gc.freeze() boot-only — antes era chamado por job no
+    # Orchestrator.run() e o heap "permanente" do GC crescia
+    # monotonicamente. Idempotente (no-op em re-chamadas dentro do mesmo
+    # processo).
+    from data_downloader._internal.gc_boot import freeze_once
+
+    freeze_once()
+
     console = _make_console()
 
     # ---- 1. Normaliza lista de símbolos ----

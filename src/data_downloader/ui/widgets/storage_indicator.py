@@ -66,6 +66,13 @@ _COLOR_GREEN = "#3FCB6F"
 _COLOR_YELLOW = "#F2C94C"
 _COLOR_RED = "#F25656"
 
+# Story 4.31 AC9 — prefixos textuais para acessibilidade colorblind.
+# Dual-encoding: o usuário identifica severity tanto pela cor (verde/
+# amarelo/vermelho) quanto pelo prefixo textual.
+_PREFIX_OK = "OK"
+_PREFIX_MEDIUM = "!"
+_PREFIX_CRITICAL = "!!"
+
 
 def format_gb_ptbr(value_gb: float) -> str:
     """Formata um valor em GB no padrão pt-BR.
@@ -297,18 +304,23 @@ class StorageIndicator(QWidget):
         self._last_used_gb = used_gb
         self._last_total_gb = total_gb
 
-        text = format_msg(
-            "LBL_STORAGE_INDICATOR",
-            free=format_gb_ptbr(free_gb),
-            used=format_gb_ptbr(used_gb),
-        )
-        self._label.setText(text)
-
         # Cor semântica.
         color = self._pick_color(free_gb)
         # Property para QSS poder estilizar (severity-based) + style inline
         # como defesa-em-profundidade (caso QSS não carregue).
         sev = self.severity()
+        # Story 4.31 AC9 — prefixo textual dual-encoded por severity para
+        # acessibilidade colorblind. Vai antes do payload formatado para que
+        # leitores de tela e usuários com daltonismo identifiquem o estado
+        # sem depender só da cor.
+        prefix = self._prefix_for_severity(sev)
+        body = format_msg(
+            "LBL_STORAGE_INDICATOR",
+            free=format_gb_ptbr(free_gb),
+            used=format_gb_ptbr(used_gb),
+        )
+        self._label.setText(f"{prefix} · {body}")
+
         self._label.setProperty("severity", sev)
         self._label.setStyleSheet(f"color: {color};")
         # Forçar re-aplicar QSS após property change.
@@ -345,6 +357,15 @@ class StorageIndicator(QWidget):
         if free_gb < _THRESHOLD_MEDIUM_GB:
             return _COLOR_YELLOW
         return _COLOR_GREEN
+
+    @staticmethod
+    def _prefix_for_severity(severity: str) -> str:
+        """Mapeia severity -> prefixo textual (Story 4.31 AC9)."""
+        if severity == "critical":
+            return _PREFIX_CRITICAL
+        if severity == "medium":
+            return _PREFIX_MEDIUM
+        return _PREFIX_OK
 
     # ------------------------------------------------------------------
     # Qt event hooks

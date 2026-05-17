@@ -4,28 +4,26 @@ Pacote raiz. Exporta ``__version__`` (versão do PACOTE) e re-exporta APIs
 públicas via :mod:`data_downloader.public_api` (SemVer rastreado por
 ``__api_version__``).
 
-Resolução de versão (Story v1.0.8 fix — Pichau live test 2026-05-06):
+Resolução de versão (Story 4.31 AC4 — 2026-05-16):
 
-A versão é resolvida primeiro a partir de uma constante literal mantida
-em sync com ``pyproject.toml::project.version``. Se :mod:`importlib.metadata`
-reportar uma versão MAIOR (caso comum quando o usuário rodou
-``pip install -e .`` em um pacote já bumpado externamente), preferimos a
-metadata como source-of-truth. Se reportar uma versão MENOR (caso comum em
-dev: ``pip install -e .`` antigo ficou pinned em 0.1.0 enquanto
-``pyproject.toml`` foi bumpado para 1.0.7), preservamos a literal — assim
-o usuário NÃO vê "v0.1.0" stale na status bar.
+A versão é resolvida via :mod:`importlib.metadata` lendo o
+``pyproject.toml::project.version`` da distribuição instalada. Em
+ambientes onde :mod:`importlib.metadata` não enxerga a distribuição (e.g.
+frozen builds PyInstaller sem ``.dist-info`` bundled), fallback para um
+literal mantido como **safety net** apenas (não mais como source-of-truth).
 
-Bug v1.0.7 raiz: ``__version__ = "0.1.0"`` literal estava dessincronizado
-de ``pyproject.toml::project.version = "1.0.7"``. Quando ``MainWindow`` lia
-o atributo via ``importlib.metadata.version("data_downloader")``, recebia
-"0.1.0" da dist-info stale e mostrava "v0.1.0" na status bar — Pichau
-reportou ver "v1.0.0" por confusão visual com o ``__api_version__``
-(intencionalmente travado em "1.0.0" para ADR-007a).
+Bug-class eliminada (v1.0.7 RCA): o literal antigo ``_PACKAGE_VERSION``
+podia dessincronizar de ``pyproject.toml`` em bumps de versão (drift
+``__init__`` vs ``pyproject``). Com a leitura via ``importlib.metadata``
+como caminho primário, a única forma de drift é o usuário rodar com
+``pip install -e .`` stale — o literal de fallback minimiza o impacto
+visual nesse caso (legado da v1.0.8).
 
-Procedimento de bump:
+Procedimento de bump (simplificado):
     1. Editar ``pyproject.toml::project.version``.
-    2. Atualizar ``_PACKAGE_VERSION`` abaixo (mesma string).
-    3. (Opcional) ``pip install -e .`` para refrescar dist-info local.
+    2. (Opcional) ``pip install -e .`` para refrescar dist-info local.
+    3. (Opcional, defensivo para frozen) Atualizar ``_PACKAGE_VERSION_FALLBACK``
+       abaixo. Não é load-bearing em dev/install normais.
 """
 
 from __future__ import annotations
@@ -33,32 +31,34 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
-# Story v1.0.8: literal mantida em sync com pyproject.toml::project.version.
-# É a source-of-truth canônica em dev mode (onde dist-info pode estar stale)
-# e em frozen builds onde importlib.metadata pode não enxergar a distribuição
-# (PyInstaller sem .dist-info bundled).
-_PACKAGE_VERSION = "1.3.0"
+# Fallback literal — usado APENAS quando importlib.metadata.version() não
+# enxerga a distribuição (frozen builds sem .dist-info, ambientes
+# corrompidos). Em dev/install normais não é load-bearing.
+#
+# Compat: alias ``_PACKAGE_VERSION`` mantido como export interno para
+# callers existentes (tests, MainWindow status bar). Não remover sem
+# auditoria de callers (grep _PACKAGE_VERSION).
+_PACKAGE_VERSION_FALLBACK = "1.3.0"
+_PACKAGE_VERSION = _PACKAGE_VERSION_FALLBACK  # backward-compat alias
 
 
 def _resolve_version() -> str:
-    try:
-        installed = _pkg_version("data_downloader")
-    except PackageNotFoundError:
-        return _PACKAGE_VERSION
-    # Se metadata reporta versão MAIOR que a literal (raro — sinal de que
-    # alguém bumpou pyproject + pip install -e . sem atualizar a literal
-    # aqui), confiamos na metadata. Se reporta MENOR (dist-info stale),
-    # preferimos a literal canônica.
-    try:
-        # Comparação SemVer naive — split por pontos, parsing tolerante.
-        installed_tuple = tuple(int(x) for x in installed.split(".")[:3])
-        literal_tuple = tuple(int(x) for x in _PACKAGE_VERSION.split(".")[:3])
-    except ValueError:
-        # Versão pre-release ou non-numérica — confia na metadata.
-        return installed
-    if installed_tuple >= literal_tuple:
-        return installed
-    return _PACKAGE_VERSION
+    """Resolve a versão do pacote.
+
+    Caminho primário: :func:`importlib.metadata.version`. Fallback:
+    literal ``_PACKAGE_VERSION_FALLBACK`` quando metadata não disponível
+    (frozen build sem dist-info, ambientes corrompidos).
+    """
+    # Tenta ambos os nomes (PEP 503 normalization): underscore (canônico
+    # em pyproject) e hyphen (PyPI-style). Ambos resolvem para a mesma
+    # distribuição em práticas modernas, mas defendemos contra
+    # ambientes onde apenas uma forma está registrada.
+    for dist_name in ("data_downloader", "data-downloader"):
+        try:
+            return _pkg_version(dist_name)
+        except PackageNotFoundError:
+            continue
+    return _PACKAGE_VERSION_FALLBACK
 
 
 __version__ = _resolve_version()

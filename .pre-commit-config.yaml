@@ -108,6 +108,37 @@ repos:
         exclude: ^tests/
 
   # ===========================================================================
+  # 4b. bandit — security lint (Story 4.31 AC6)
+  # ===========================================================================
+  # Detecta padrões inseguros em código Python (e.g. eval/exec, subprocess
+  # com shell=True, assert em prod, etc.). Roda apenas em ``src/`` — testes
+  # legitimamente usam assert + temp files que disparariam falsos-positivos.
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.10
+    hooks:
+      - id: bandit
+        args: ["-r", "src/", "-q"]
+        files: ^src/.*\.py$
+        pass_filenames: false
+
+  # ===========================================================================
+  # 4c. pip-audit — CVE em dependências (Story 4.31 AC6)
+  # ===========================================================================
+  # Audita ``pyproject.toml`` contra o database OSV/PyPI Advisory por CVEs
+  # conhecidas. Idempotente — não modifica nada; só reporta.
+  - repo: https://github.com/pypa/pip-audit
+    rev: v2.7.3
+    hooks:
+      - id: pip-audit
+        args: ["--strict"]
+        # Sem ``files`` filter — pip-audit lê pyproject.toml diretamente
+        # via descoberta default; passar arquivos individuais não faz
+        # sentido. ``always_run: false`` por default — só roda se algum
+        # arquivo relevante (pyproject/requirements*) muda.
+        files: ^(pyproject\.toml|requirements.*\.txt)$
+        pass_filenames: false
+
+  # ===========================================================================
   # 5. Custom hooks locais — guard-rails específicos do squad
   # ===========================================================================
   - repo: local

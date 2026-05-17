@@ -45,6 +45,11 @@ import pyarrow as pa
 
 from data_downloader.public_api.exceptions import IntegrityError
 
+# Single source-of-truth: ``storage/partition.py`` define o frozenset de
+# exchanges válidas (Story 4.31 AC15 — dedup). Re-export local mantido
+# para compat de callers internos que ainda importam de ``schema``.
+from data_downloader.storage.partition import _VALID_EXCHANGES
+
 SCHEMA_VERSION: str = "1.1.0"
 """Versão semver do schema Parquet atual (Sol — SCHEMA.md §1).
 
@@ -52,10 +57,6 @@ Bump v1.0.0 -> v1.1.0 (aditivo, R4 — SCHEMA.md §6) introduz 3 campos
 nullable: ``buy_agent_name``, ``sell_agent_name``, ``trade_type_name``.
 Nelo Council 32 release blocker.
 """
-
-
-# Conjunto de exchanges válidas (SCHEMA.md §1.1 + INVARIANTE INT-5).
-_VALID_EXCHANGES: frozenset[str] = frozenset({"F", "B"})
 
 
 # =====================================================================

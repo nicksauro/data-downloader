@@ -69,7 +69,19 @@ NÃO entram aqui:
 
 | versão | data | tag | sha | tipo | changelog | sha256_exe | audit_ref |
 |--------|------|-----|-----|------|-----------|------------|-----------|
-| _(nenhuma release ainda — primeira esperada: v0.1.0 ao fechar Epic 1)_ | | | | | | | |
+| v1.1.0 | 2026-05-12 | `v1.1.0` | `c305672d` | MINOR | [release-notes/v1.1.0-draft.md](../release-notes/v1.1.0-draft.md) | `77485049...345DD5` | pending — backfill |
+| v1.1.1 | 2026-05-12 | `v1.1.1` | `56c17628` | HOTFIX | [release-notes/v1.1.1.md](../release-notes/v1.1.1.md) | `7E029046...CE5BA1` | pending — backfill |
+| v1.2.0 | 2026-05-12 | `v1.2.0` | `bf1448e3` | MINOR | [release-notes/v1.2.0.md](../release-notes/v1.2.0.md) | `DFBB70DC...27ED6A5` | pending — backfill |
+| v1.3.0 | 2026-05-13 | `v1.3.0` | `a57b6e38` | MINOR | [release-notes/v1.3.0.md](../release-notes/v1.3.0.md) | `8F7EFA81...BADAE48` | pending — backfill |
+
+> Nota — backfill 2026-05-16 (Story 4.31 AC5): linhas reconstruídas a partir de
+> `CHANGELOG.md`, `docs/release-notes/v1.x.x.md` (SHA256 dos installers Setup.exe)
+> e tags git. v1.0.x não constam: foram **consolidadas** no single ship v1.1.0
+> (ver CHANGELOG.md §1.1.0 "Highlights — Single ship consolidado") — nenhuma tag
+> pushed/GitHub Release foi criada para v1.0.0..v1.0.7, então o critério
+> "oficialmente publicadas" da seção acima as exclui. `audit_ref` ficou
+> `pending — backfill` porque o AUDIT.md atual cobre apenas Stories 0.1..1.7b;
+> entries das tags v1.x serão append-only por @devops em manutenção futura.
 
 ---
 
@@ -77,11 +89,11 @@ NÃO entram aqui:
 
 | Item | Valor |
 |------|-------|
-| Versão | `v0.1.0` |
-| Tipo | MINOR (foundation, primeira release pública) |
-| Milestone | Epic 1 fechado (Stories 0.0..0.4 + 1.0..1.7b + 1.8 + 2.1) |
-| ETA | TBD (depende conclusão Story 0.x + Epic 1) |
-| Bloqueadores ativos | Stories 0.0, 0.1, 0.2, 0.3, 0.4 + Aria ADR-008..017 |
+| Versão | `v1.4.0` (tentativa — pode bumpar para MAJOR conforme escopo) |
+| Tipo | MINOR (UX hardening + CI/security) ou MAJOR (se quebrar public_api) |
+| Milestone | Stories 4.22..4.30 (roadmap v1.4.0 — atomicidade storage, CI pipeline, code signing, refator cli.py) |
+| ETA | TBD |
+| Bloqueadores ativos | em planning |
 | Owner do release | Gage (publicar) + Morgan (autorizar) + Quinn (PASS) |
 
 ---
@@ -91,5 +103,6 @@ NÃO entram aqui:
 | data | mudança | quem |
 |------|---------|------|
 | 2026-05-03 | Arquivo criado (placeholder) | Gage (Story 0.1 spec) |
+| 2026-05-16 | Backfill v1.1.0..v1.3.0 (Story 4.31 AC5) | @dev (Dex) sob orientação @aiox-master Orion |
 
 — Gage, publicando com cuidado ⚙️

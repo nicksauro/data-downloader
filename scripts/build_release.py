@@ -193,7 +193,7 @@ def _run_git(args: list[str], cwd: Path) -> str:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"git {' '.join(args)} failed (rc={result.returncode}): " f"{result.stderr.strip()}"
+            f"git {' '.join(args)} failed (rc={result.returncode}): {result.stderr.strip()}"
         )
     return result.stdout.strip()
 
@@ -319,8 +319,7 @@ def validate_output() -> Path:
         exe_path = onedir / exe_name
         if not exe_path.is_file():
             raise FileNotFoundError(
-                f"Executável ausente: {exe_path} "
-                f"(Story 4.8 dual EXE — UI + CLI ambos requeridos)"
+                f"Executável ausente: {exe_path} (Story 4.8 dual EXE — UI + CLI ambos requeridos)"
             )
 
     for companion in REQUIRED_DLL_COMPANIONS:
@@ -477,7 +476,7 @@ def compile_installer(version: str, repo_root: Path) -> Path:
     setup_exe = repo_root / "dist" / f"data-downloader-Setup-v{version}.exe"
     if not setup_exe.is_file():
         raise FileNotFoundError(
-            f"Output Setup.exe não foi gerado: {setup_exe} " f"(stdout: {result.stdout[:500]})"
+            f"Output Setup.exe não foi gerado: {setup_exe} (stdout: {result.stdout[:500]})"
         )
     return setup_exe
 
@@ -568,6 +567,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
+    # Story 4.31 AC8 — Python pinning guard (R19 / ADR-009):
+    # PyInstaller bytecode + bundled stdlib são dependentes da minor
+    # version. requires-python>=3.12 em pyproject não é o bastante:
+    # build em 3.13/3.14 gera bundle que pode crashar no usuário final
+    # (ABI breaks, deprecated stdlib modules). Para garantir
+    # reproducibilidade bit-exata cross-build, exigimos 3.12.x explícito.
+    #
+    # Em ``--dry-run`` o guard é relaxado para warning porque dry-run
+    # NÃO invoca PyInstaller (apenas valida spec template + emite
+    # manifest stub para tests/integration). Builds reais continuam
+    # bloqueados.
+    if sys.version_info[:2] != (3, 12):
+        msg = (
+            f"build requires Python 3.12.x "
+            f"(current: {sys.version_info.major}.{sys.version_info.minor}). "
+            f"See R19 / ADR-009."
+        )
+        if args.dry_run:
+            print(f"[build_release] WARNING (dry-run): {msg}", file=sys.stderr)
+        else:
+            print(f"[build_release] ERROR: {msg}", file=sys.stderr)
+            return 1
+
     # 1. Resolve version + git context.
     try:
         version = args.version or _read_version_from_pyproject()
@@ -576,6 +598,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     git_sha, git_short, source_epoch = _resolve_git_context(REPO_ROOT)
+    # Story 4.31 AC7 — BUILD_TIMESTAMP determinístico:
+    # DERIVADO de SOURCE_DATE_EPOCH (commit timestamp / fallback). NUNCA
+    # usar datetime.utcnow() ou time.time() — quebra reproducibilidade
+    # bit-exata cross-build (ADR-009 §"Camada 2"). Esta linha é
+    # load-bearing: alterá-la requer revisar ADR-009 e re-validar o
+    # smoke test test_build_release_dry.
     build_ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(source_epoch))
 
     ctx = BuildContext(
@@ -600,9 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     spec_size, spec_template_sha = _hash_file(SPEC_TEMPLATE)
-    print(
-        f"[build_release] spec template sha256={spec_template_sha[:16]}... " f"({spec_size} bytes)"
-    )
+    print(f"[build_release] spec template sha256={spec_template_sha[:16]}... ({spec_size} bytes)")
 
     # 3. Apply deterministic env vars.
     apply_deterministic_env(ctx)
