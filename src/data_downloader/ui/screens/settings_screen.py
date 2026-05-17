@@ -565,6 +565,16 @@ class SettingsScreen(QWidget):
         self._open_dll_folder_btn.clicked.connect(self._on_open_dll_folder_clicked)
         actions.addWidget(self._open_dll_folder_btn)
 
+        # Story 4.29 — botao "Abrir pasta de logs" para self-service de suporte.
+        # Pichau 2026-05-17 reportou que "a DLL nao loga" — procurou no lugar
+        # errado porque os logs nativos ficam em <install>/_internal/Logs/
+        # (nao adjacentes ao .exe). Este botao abre a pasta no Explorer.
+        self._open_logs_folder_btn = QPushButton(format_msg("BTN_OPEN_LOGS_FOLDER"), section)
+        self._open_logs_folder_btn.setObjectName("openLogsFolderBtn")
+        self._open_logs_folder_btn.setToolTip(format_msg("TOOLTIP_OPEN_LOGS_FOLDER"))
+        self._open_logs_folder_btn.clicked.connect(self._on_open_logs_folder_clicked)
+        actions.addWidget(self._open_logs_folder_btn)
+
         actions.addStretch(1)
         actions_widget = QWidget(section)
         actions_widget.setLayout(actions)
@@ -998,6 +1008,49 @@ class SettingsScreen(QWidget):
         if not path_str:
             return
         self._open_in_explorer(Path(path_str).parent)
+
+    def _on_open_logs_folder_clicked(self) -> None:
+        """Story 4.29 AC5 — abre ``<install>/_internal/Logs/`` no Explorer.
+
+        Self-service para suporte tecnico: usuario com problema de licenca
+        MaxHID (Pichau 2026-05-17) recebe banner com link "Ver logs" + tem
+        botao acessivel nas Settings. Resolve o caminho via
+        :func:`bundle_paths.exe_dir` em frozen mode (``<install>/_internal/
+        Logs``) e via ``dll_path.parent / "Logs"`` em dev (caminho relativo
+        ao DLL configurado pelo usuario).
+
+        Fallback robusto: se ``_internal/Logs`` nao existir (instalacao
+        portable nao-canonica, ou DLL nunca rodou), tenta a pasta-pai do
+        path da DLL — mesmo path que :meth:`ProfitDLL._logs_dir` calcula.
+
+        Idempotente / best-effort: ``_open_in_explorer`` engole erros
+        silenciosamente (mesmo padrao de ``_on_open_dll_folder_clicked``).
+        """
+        # 1. Tentativa primaria — frozen mode: <install>/_internal/Logs/
+        from data_downloader._internal.bundle_paths import exe_dir, is_frozen
+
+        candidates: list[Path] = []
+        if is_frozen():
+            candidates.append(exe_dir() / "_internal" / "Logs")
+        # 2. Fallback — relativo ao DLL configurado (mesmo path que o wrapper
+        # usa para o LogDesktop). Funciona em dev (profitdll/DLLs/Win64/Logs/)
+        # e em frozen quando a tentativa primaria nao existir.
+        dll_path_str = self._dll_path_edit.text().strip()
+        if dll_path_str:
+            candidates.append(Path(dll_path_str).parent / "Logs")
+        # 3. Ultimo recurso — abre o diretorio do exe (usuario navega).
+        candidates.append(exe_dir())
+
+        for candidate in candidates:
+            try:
+                if candidate.is_dir():
+                    self._open_in_explorer(candidate)
+                    return
+            except OSError:
+                continue
+        # Nenhum candidato existe — abre o exe_dir mesmo assim (Explorer
+        # mostra um dialogo se path invalido; melhor do que silent no-op).
+        self._open_in_explorer(exe_dir())
 
     def _on_dll_browse_clicked(self) -> None:
         """Abre QFileDialog para usuário selecionar ``ProfitDLL.dll`` do disco.
