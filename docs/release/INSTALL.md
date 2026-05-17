@@ -402,6 +402,38 @@ Solução:
 2. Confirme `PROFITDLL_KEY` com a Nelogica (ela pode estar expirada ou
    não habilitada para sua máquina).
 
+### 8.3b Licença em uso (MaxHID) — banner "Licença Nelogica em uso"
+
+Causa: o servidor Nelogica recusou o login porque **todos os HIDs**
+(computadores/sessões) da licença já estão em uso. O bug Pichau
+2026-05-17 expôs este caso — antes do v1.4.0, o app ficava ~990s em
+spinner sem mensagem clara; Story 4.29 detecta MaxHID em <3s e mostra
+banner dedicado.
+
+Sintoma: ao iniciar download, em ~3s aparece o card vermelho **"Licença
+Nelogica em uso"** com 3 remedies + botões "Abrir portal Nelogica" /
+"Tentar de novo" + link **"Ver logs"**.
+
+Solução (3 passos prescritos pelo banner — Q-DRIFT-41):
+
+1. **Feche todas as instâncias do data-downloader e do ProfitChart** —
+   inclusive em outros computadores. O HID é por máquina/sessão;
+   licença Nelogica básica permite poucos HIDs simultâneos.
+2. **Acesse o portal Nelogica** (botão "Abrir portal Nelogica" ou
+   navegue direto para `https://www.nelogica.com.br/area-cliente`) e
+   **desconecte os HIDs ativos** na sua conta.
+3. **Aguarde 5–30 minutos** e clique em "Tentar de novo". O servidor
+   pode levar alguns minutos para liberar o slot após o disconnect.
+
+Se persistir após 30 min com tudo fechado:
+
+- Clique em **"Ver logs"** (no banner) ou **"Abrir pasta de logs"**
+  (em Configurações → ProfitDLL) e anexe o arquivo
+  `LogDesktop_YYYY_MM_DD.log` mais recente.
+- Abra ticket em **suporte@nelogica.com.br** com assunto "licença
+  travada em MaxHID" e a evidência do log (linha
+  `TInfoClientProcessor.ProcessLoginResult: ActivationResult=MaxHID`).
+
 ### 8.4 Logs
 
 Logs estruturados (JSON) em:
