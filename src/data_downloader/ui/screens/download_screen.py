@@ -108,6 +108,10 @@ class DownloadScreen(QWidget):
     # com tipos não-Qt).
     _request_start = Signal(str, str, object, object, object)
     _request_cancel = Signal()
+    # Story 4.27 AC1+AC4 — dispatch para CatalogAdapter.check_interrupted_jobs
+    # (cross-thread Queued). Payload é ``data_dir`` (object/Path).
+    # ADR-029: SQLite I/O → Worker, não Defer.
+    _request_check_interrupted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -123,6 +127,21 @@ class DownloadScreen(QWidget):
         # Conexões internas: signals → slots do adapter (cross-thread Queued).
         self._request_start.connect(self._adapter.start, Qt.ConnectionType.QueuedConnection)
         self._request_cancel.connect(self._adapter.cancel, Qt.ConnectionType.QueuedConnection)
+
+        # Story 4.27 AC1+AC4 — CatalogAdapter dedicado ao DownloadScreen,
+        # usado APENAS para a checagem de jobs interrompidos (R11 P0-U2).
+        # ADR-029: SQLite I/O → Worker — não duplicamos adapter (reuso); o
+        # CatalogScreen tem o seu próprio para list_partitions/delete/etc.
+        # Aqui criamos um adapter leve (sem listener de partition_registered
+        # — não precisamos para esta checagem one-shot).
+        from data_downloader.ui.adapters.catalog_adapter import CatalogAdapter
+
+        self._catalog_adapter = CatalogAdapter(self)
+        self._catalog_adapter.connect_to(on_interrupted=self._on_interrupted_job_found)
+        self._request_check_interrupted.connect(
+            self._catalog_adapter.check_interrupted_jobs,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._download_active = False
 
@@ -215,12 +234,15 @@ class DownloadScreen(QWidget):
         # Default: estado normal.
         self._current_state = STATE_NORMAL
 
-        # v1.2.0 Wave 1D — ao abrir a tela, checa o catalog por jobs
-        # interrompidos (status in_progress/partial) e oferece retomar.
-        # Best-effort: qualquer falha (catalog ausente, schema antigo) é
-        # silenciada — banner simplesmente não aparece.
+        # Story 4.27 AC1+AC4 (P0-U2 — R11 enforcement): a checagem de jobs
+        # interrompidos era síncrona aqui (5-200ms SQLite I/O no MainThread,
+        # ADR-029 violation). Agora dispara o slot em ``CatalogAdapter`` via
+        # signal Queued — UI pinta primeiro, banner aparece após resposta.
+        # Banner começa hidden (já é o default em ``_build_resume_banner``).
+        self._resume_banner.setVisible(False)
         with contextlib.suppress(Exception):
-            self._check_for_interrupted_download()
+            # ADR-029: SQLite I/O → Worker, não Defer.
+            self._request_check_interrupted.emit(_default_data_dir())
 
     # ------------------------------------------------------------------
     # Public API consumida pelo MainWindow / testes
@@ -510,46 +532,37 @@ class DownloadScreen(QWidget):
         banner.setVisible(False)
         return banner
 
-    def _check_for_interrupted_download(self) -> None:
-        """Consulta o catalog por jobs interrompidos e mostra o banner.
+    @Slot(object)
+    def _on_interrupted_job_found(self, payload: object) -> None:
+        """Story 4.27 AC1 (P0-U2 — R11): slot MainThread consumindo o payload.
 
-        Usa ``Catalog.list_jobs(statuses=("in_progress","partial"))``. Se
-        existir, popula o banner com o job mais recente. Best-effort.
+        Recebe o resultado do ``CatalogAdapter.check_interrupted_jobs`` via
+        ``Qt.QueuedConnection``. Payload é ``dict`` (hit) ou ``None``
+        (nada a retomar). Aplica o banner inline — nenhuma I/O aqui.
+
+        Race-mitigation (story Risk #1): se o usuário já clicou "Baixar"
+        antes do worker responder, suprimimos o banner (download em curso
+        prevalece).
         """
-        data_dir = _default_data_dir()
-        job = None
-        plan = None
-        try:
-            from data_downloader.storage.catalog import Catalog
-
-            db_path = data_dir / "_internal" / "catalog.db"
-            if not db_path.exists():
-                return
-            catalog = Catalog(db_path=db_path, data_dir=data_dir)
-            try:
-                jobs = catalog.list_jobs(statuses=("in_progress", "partial"), limit=1)
-                if jobs:
-                    job = jobs[0]
-                    with contextlib.suppress(Exception):
-                        plan = catalog.resume_job(job.job_id)
-            finally:
-                with contextlib.suppress(Exception):
-                    catalog.close()
-        except Exception:
+        if payload is None:
             return
-        if job is None:
+        if self._download_active:
+            # Risk #1 — download iniciou antes do worker responder; banner
+            # seria UX-ruim (sobrepõe o estado de loading).
             return
-        self._resume_job_id = getattr(job, "job_id", None)
-        self._resume_job_data_dir = data_dir
-        symbol = getattr(job, "symbol", "?") or "?"
-        # done/total em chunks — usa partições completas vs chunks pendentes.
-        if plan is not None:
-            done = len(getattr(plan, "completed_partitions", ()) or ())
-            pending = len(getattr(plan, "pending_chunks", ()) or ())
-            total = done + pending
-            where = f"parou em {done}/{total} chunks" if total else "parcial em disco"
-        else:
-            where = "parcial em disco"
+        if not isinstance(payload, dict):
+            return
+        self._resume_job_id = payload.get("job_id")
+        data_dir = payload.get("data_dir")
+        if isinstance(data_dir, Path):
+            self._resume_job_data_dir = data_dir
+        elif data_dir is not None:
+            with contextlib.suppress(Exception):
+                self._resume_job_data_dir = Path(str(data_dir))
+        symbol = payload.get("symbol") or "?"
+        done = int(payload.get("done_chunks", 0) or 0)
+        total = int(payload.get("total_chunks", 0) or 0)
+        where = f"parou em {done}/{total} chunks" if total else "parcial em disco"
         self._resume_banner_label.setText(f"Retomar download de {symbol}? ({where})")
         self._resume_banner.setVisible(True)
 
