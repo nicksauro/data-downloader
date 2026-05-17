@@ -1,5 +1,8 @@
 # data-downloader
 
+[![CI](https://github.com/nicksauro/data-downloader/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/nicksauro/data-downloader/actions/workflows/test.yml)
+[![Release](https://github.com/nicksauro/data-downloader/actions/workflows/release.yml/badge.svg)](https://github.com/nicksauro/data-downloader/actions/workflows/release.yml)
+
 > Downloader de histórico de ativos via **ProfitDLL** (Nelogica).
 > Fundação para todos os projetos de quant/backtest/research que vierem.
 
