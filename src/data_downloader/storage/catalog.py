@@ -1737,6 +1737,330 @@ class Catalog:
         )
         return dest
 
+    def recover_pending_commits(self) -> PendingRecoveryReport:
+        """Resolve entradas órfãs de ``_pending_commits`` após crash.
+
+        Política ADR-026 §2.2 / INTEGRITY.md §4.3:
+
+        - PID vivo (``_pid_alive`` True) -> ``skipped`` (não tocar).
+        - PID morto + arquivo ausente -> DELETE pending (``cleaned``,
+          motivo ``no_file``).
+        - PID morto + arquivo presente + SHA256/size match -> UPSERT em
+          ``partitions`` via ``_register_recovered_partition`` + DELETE
+          pending (``recovered``).
+        - PID morto + arquivo presente + mismatch -> quarentena via
+          ``_quarantine_partition`` + DELETE pending (``quarantined``,
+          motivo ``sha_mismatch`` ou ``size_mismatch``).
+
+        Chamado em ``__post_init__`` ANTES de ``cleanup_orphans`` e
+        ``reconcile`` (recovery precisa validar antes de cleanup tocar
+        tmp/files; reconcile depende do FS estar consistente).
+
+        Returns:
+            ``PendingRecoveryReport`` imutável com as 4 categorias.
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return PendingRecoveryReport()
+
+        conn = self._conn_or_raise()
+        try:
+            rows = conn.execute(
+                "SELECT partition_path, started_at, expected_sha256, "
+                "expected_size, pid, job_id FROM _pending_commits"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Tabela ainda não existe (DB pré-migrations) -> no-op.
+            return PendingRecoveryReport()
+
+        history_root = self.data_dir / "history"
+        recovered: list[str] = []
+        cleaned: list[tuple[str, str]] = []
+        quarantined: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+
+        for row in rows:
+            rel_path = str(row["partition_path"])
+            started_at_raw = row["started_at"]
+            expected_sha = str(row["expected_sha256"])
+            expected_size = int(row["expected_size"])
+            pid_value = row["pid"]
+            pid: int | None = int(pid_value) if pid_value is not None else None
+            job_id_value = row["job_id"]
+            job_id: str | None = str(job_id_value) if job_id_value is not None else None
+
+            try:
+                started_at = _parse_ts(started_at_raw)
+            except (ValueError, TypeError):  # pragma: no cover defensive
+                # Row corrompida — trata como morto (sem timestamp confiável).
+                started_at = datetime.now(UTC) - timedelta(days=1)
+
+            if _pid_alive(pid, started_at):
+                skipped.append((rel_path, "pid_alive"))
+                continue
+
+            abs_path = history_root / rel_path
+            if not abs_path.is_file():
+                # Crash entre Fase 1 e os.replace — nada para recuperar.
+                self._delete_pending(rel_path)
+                cleaned.append((rel_path, "no_file"))
+                continue
+
+            try:
+                actual_size = abs_path.stat().st_size
+            except OSError as exc:  # pragma: no cover defensive
+                _LOG.warning(
+                    "catalog.recovery.stat_failed",
+                    extra={"path": str(abs_path), "err": str(exc)},
+                )
+                # Não consegue ler -> trata como mismatch e quarentena.
+                if self._quarantine_partition(rel_path) is not None:
+                    self._delete_pending(rel_path)
+                    quarantined.append((rel_path, "stat_failed"))
+                continue
+
+            if actual_size != expected_size:
+                if self._quarantine_partition(rel_path) is not None:
+                    self._delete_pending(rel_path)
+                    quarantined.append((rel_path, "size_mismatch"))
+                # Se quarantine falhou: NÃO deleta pending — retry no próximo boot.
+                continue
+
+            actual_sha = _sha256_file(abs_path)
+            if actual_sha != expected_sha:
+                if self._quarantine_partition(rel_path) is not None:
+                    self._delete_pending(rel_path)
+                    quarantined.append((rel_path, "sha_mismatch"))
+                continue
+
+            # SHA + size match — re-registra em partitions.
+            registered = self._register_recovered_partition(
+                rel_path=rel_path,
+                abs_path=abs_path,
+                checksum=actual_sha,
+                file_size=actual_size,
+                job_id=job_id,
+            )
+            if registered:
+                self._delete_pending(rel_path)
+                recovered.append(rel_path)
+            # Se _register_recovered_partition falhou (metadata corrompida),
+            # já logou; mantemos a pending row para investigação humana.
+
+        return PendingRecoveryReport(
+            recovered=tuple(recovered),
+            cleaned=tuple(cleaned),
+            quarantined=tuple(quarantined),
+            skipped=tuple(skipped),
+        )
+
+    def dry_run_recovery_pending(self) -> PendingRecoveryReport:
+        """Versão read-only de ``recover_pending_commits()`` para CLI.
+
+        Aplica a mesma resolution table SEM mutações: nenhum DELETE,
+        nenhum UPSERT, nenhum move para quarentena. Apenas classifica
+        cada row e retorna o report — útil para operadores avaliarem
+        o impacto antes de rodar a recovery real.
+
+        Returns:
+            ``PendingRecoveryReport`` reflete o que aconteceria se
+            ``recover_pending_commits()`` fosse chamado agora.
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return PendingRecoveryReport()
+
+        conn = self._conn_or_raise()
+        try:
+            rows = conn.execute(
+                "SELECT partition_path, started_at, expected_sha256, "
+                "expected_size, pid, job_id FROM _pending_commits"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return PendingRecoveryReport()
+
+        history_root = self.data_dir / "history"
+        recovered: list[str] = []
+        cleaned: list[tuple[str, str]] = []
+        quarantined: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+
+        for row in rows:
+            rel_path = str(row["partition_path"])
+            started_at_raw = row["started_at"]
+            expected_sha = str(row["expected_sha256"])
+            expected_size = int(row["expected_size"])
+            pid_value = row["pid"]
+            pid: int | None = int(pid_value) if pid_value is not None else None
+
+            try:
+                started_at = _parse_ts(started_at_raw)
+            except (ValueError, TypeError):  # pragma: no cover defensive
+                started_at = datetime.now(UTC) - timedelta(days=1)
+
+            if _pid_alive(pid, started_at):
+                skipped.append((rel_path, "pid_alive"))
+                continue
+
+            abs_path = history_root / rel_path
+            if not abs_path.is_file():
+                cleaned.append((rel_path, "no_file"))
+                continue
+
+            try:
+                actual_size = abs_path.stat().st_size
+            except OSError:  # pragma: no cover defensive
+                quarantined.append((rel_path, "stat_failed"))
+                continue
+
+            if actual_size != expected_size:
+                quarantined.append((rel_path, "size_mismatch"))
+                continue
+
+            actual_sha = _sha256_file(abs_path)
+            if actual_sha != expected_sha:
+                quarantined.append((rel_path, "sha_mismatch"))
+                continue
+
+            recovered.append(rel_path)
+
+        return PendingRecoveryReport(
+            recovered=tuple(recovered),
+            cleaned=tuple(cleaned),
+            quarantined=tuple(quarantined),
+            skipped=tuple(skipped),
+        )
+
+    def _delete_pending(self, rel_path: str) -> None:
+        """DELETE row em ``_pending_commits`` (helper interno)."""
+        with self._transaction():
+            conn = self._conn_or_raise()
+            conn.execute(
+                "DELETE FROM _pending_commits WHERE partition_path = ?",
+                (rel_path,),
+            )
+
+    def _register_recovered_partition(
+        self,
+        *,
+        rel_path: str,
+        abs_path: Path,
+        checksum: str,
+        file_size: int,
+        job_id: str | None,
+    ) -> bool:
+        """Re-registra uma partição em ``partitions`` durante recovery (AC6).
+
+        Lê metadata Parquet on-disk (``pyarrow.parquet.read_metadata``)
+        para extrair ``row_count``, ``first_ts_ns``, ``last_ts_ns``,
+        ``schema_version``. Resolve ``PartitionKey`` via
+        ``parse_partition_path`` para validar layout. UPSERT em
+        ``partitions`` usando ``checksum``/``file_size`` da pending row
+        (que agora foram validados pelo recovery).
+
+        Args:
+            rel_path: Path relativo a ``data_dir/history/``.
+            abs_path: Path absoluto do arquivo Parquet.
+            checksum: SHA256 validado (matches expected).
+            file_size: Tamanho validado (matches expected).
+            job_id: Job de origem (pode ser ``None``).
+
+        Returns:
+            ``True`` se registrado com sucesso; ``False`` se metadata
+            corrompida ou layout inválido (caller mantém pending row).
+        """
+        from data_downloader.storage.partition import parse_partition_path
+
+        partition_key = parse_partition_path(Path(rel_path))
+        if partition_key is None:
+            _LOG.warning(
+                "catalog.recovery.invalid_layout",
+                extra={"path": rel_path},
+            )
+            return False
+
+        try:
+            import pyarrow.parquet as pq
+
+            md_obj = pq.read_metadata(abs_path).metadata
+        except (OSError, ValueError) as exc:
+            _LOG.warning(
+                "catalog.recovery.metadata_read_failed",
+                extra={"path": rel_path, "err": str(exc)},
+            )
+            return False
+
+        if md_obj is None:
+            _LOG.warning("catalog.recovery.no_metadata", extra={"path": rel_path})
+            return False
+
+        try:
+            row_count = int(md_obj.get(b"row_count", b"0").decode())
+            first_ts = int(md_obj.get(b"first_ts_ns", b"0").decode())
+            last_ts = int(md_obj.get(b"last_ts_ns", b"0").decode())
+            fallback_version = self._get_meta("parquet_schema_min_supported") or "1.0.0"
+            schema_version = md_obj.get(b"schema_version", fallback_version.encode()).decode()
+        except (ValueError, AttributeError) as exc:
+            _LOG.warning(
+                "catalog.recovery.metadata_parse_failed",
+                extra={"path": rel_path, "err": str(exc)},
+            )
+            return False
+
+        now = _utcnow_iso()
+        try:
+            with self._transaction():
+                conn = self._conn_or_raise()
+                conn.execute(
+                    """
+                    INSERT INTO partitions(
+                        partition_path, symbol, exchange, year, month, day,
+                        row_count, first_ts_ns, last_ts_ns, schema_version,
+                        checksum_sha256, file_size_bytes, written_at, job_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(partition_path) DO UPDATE SET
+                        row_count = excluded.row_count,
+                        first_ts_ns = excluded.first_ts_ns,
+                        last_ts_ns = excluded.last_ts_ns,
+                        schema_version = excluded.schema_version,
+                        checksum_sha256 = excluded.checksum_sha256,
+                        file_size_bytes = excluded.file_size_bytes,
+                        day = excluded.day,
+                        written_at = excluded.written_at,
+                        job_id = COALESCE(excluded.job_id, partitions.job_id)
+                    """,
+                    (
+                        rel_path,
+                        partition_key.symbol,
+                        partition_key.exchange,
+                        partition_key.year,
+                        partition_key.month,
+                        partition_key.day,
+                        row_count,
+                        first_ts,
+                        last_ts,
+                        schema_version,
+                        checksum,
+                        file_size,
+                        now,
+                        job_id,
+                    ),
+                )
+        except sqlite3.Error as exc:
+            _LOG.warning(
+                "catalog.recovery.upsert_failed",
+                extra={"path": rel_path, "err": str(exc)},
+            )
+            return False
+
+        _LOG.info(
+            "catalog.recovery.recovered",
+            extra={
+                "path": rel_path,
+                "row_count": row_count,
+                "checksum": checksum,
+            },
+        )
+        return True
+
     # ------------------------------------------------------------------
     # AC9 + AC11 — reconcile (drift A/B/C)
     # ------------------------------------------------------------------
