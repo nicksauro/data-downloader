@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import warnings
@@ -2064,6 +2065,161 @@ def doctor(
         verbose=verbose,
     )
     raise typer.Exit(code=exit_code)
+
+
+# =====================================================================
+# catalog subcommand group (Story 4.22 — Sol/ADR-026 §2.2)
+# =====================================================================
+
+catalog_app = typer.Typer(
+    name="catalog",
+    help="Operações sobre o catalogo SQLite (recover-pending — Story 4.22).",
+    no_args_is_help=True,
+)
+app.add_typer(catalog_app, name="catalog")
+
+
+_CATALOG_RECOVER_DATA_DIR_OPT = typer.Option(
+    Path("data"), "--data-dir", "-d", help="Raiz dos dados (default: ./data)."
+)
+_CATALOG_RECOVER_DRY_RUN_OPT = typer.Option(
+    False,
+    "--dry-run",
+    help="Apenas classifica pending rows; nao aplica DELETE/UPSERT/quarantine.",
+)
+
+
+def _print_recovery_report(
+    report: object,  # PendingRecoveryReport — typed via TYPE_CHECKING para evitar import circular
+    console: Console,
+    *,
+    dry_run: bool,
+) -> None:
+    """Imprime tabela Rich com counts e detalhes do recovery report."""
+    from data_downloader.storage.catalog import PendingRecoveryReport
+
+    if not isinstance(report, PendingRecoveryReport):  # pragma: no cover defensive
+        raise TypeError("report must be PendingRecoveryReport")
+
+    mode = "DRY-RUN" if dry_run else "APPLY"
+    table = Table(title=f"catalog.recover-pending — {mode}", show_lines=False)
+    table.add_column("Category", style="cyan", no_wrap=True)
+    table.add_column("Count", justify="right", style="bold")
+    table.add_column("Sample (max 3 paths)", style="dim")
+
+    categories: list[tuple[str, int, list[str]]] = [
+        (
+            "recovered",
+            len(report.recovered),
+            list(report.recovered[:3]),
+        ),
+        (
+            "cleaned",
+            len(report.cleaned),
+            [f"{p} ({r})" for p, r in report.cleaned[:3]],
+        ),
+        (
+            "quarantined",
+            len(report.quarantined),
+            [f"{p} ({r})" for p, r in report.quarantined[:3]],
+        ),
+        (
+            "skipped",
+            len(report.skipped),
+            [f"{p} ({r})" for p, r in report.skipped[:3]],
+        ),
+    ]
+    for name, count, samples in categories:
+        sample_str = "\n".join(samples) if samples else "—"
+        table.add_row(name, str(count), sample_str)
+    console.print(table)
+
+
+@catalog_app.command("recover-pending")  # type: ignore[misc,unused-ignore]
+def catalog_recover_pending(
+    data_dir: Path = _CATALOG_RECOVER_DATA_DIR_OPT,
+    dry_run: bool = _CATALOG_RECOVER_DRY_RUN_OPT,
+) -> None:
+    """Executa o protocolo de recovery em ``_pending_commits`` (ADR-026 §2.2).
+
+    Resolve entries orfas apos crash entre as fases do two-phase commit
+    (writer Parquet -> os.replace -> UPSERT partitions). Para cada pending
+    row aplica:
+
+    - PID vivo -> skipped (nao toca)
+    - PID morto + arquivo ausente -> DELETE pending (cleaned)
+    - PID morto + sha/size match -> re-registra em partitions (recovered)
+    - PID morto + mismatch -> quarentena + DELETE pending (quarantined)
+
+    Com ``--dry-run`` apenas classifica e imprime contagens.
+
+    Exit codes:
+        - ``0``: sucesso (report limpo OU mutacoes sem quarantine).
+        - ``2``: houve quarentena (alerta operacional).
+        - ``3``: erro de operacao (catalogo inacessivel, OSError, etc.).
+    """
+    from data_downloader.storage.catalog import Catalog as _Catalog
+
+    console = Console()
+    db_path = data_dir / "_internal" / "catalog.db"
+
+    try:
+        catalog = _Catalog(
+            db_path=db_path,
+            data_dir=data_dir,
+            auto_reconcile=False,
+            auto_cleanup_orphans=False,
+        )
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        console.print(f"[red]Erro ao abrir catalogo:[/red] {exc}")
+        raise typer.Exit(code=3) from exc
+
+    try:
+        if dry_run:
+            report = catalog.dry_run_recovery_pending()
+        else:
+            report = catalog.recover_pending_commits()
+    except (OSError, sqlite3.Error) as exc:
+        console.print(f"[red]Erro durante recovery:[/red] {exc}")
+        with contextlib.suppress(Exception):
+            catalog.close()
+        raise typer.Exit(code=3) from exc
+
+    _print_recovery_report(report, console, dry_run=dry_run)
+
+    with contextlib.suppress(Exception):
+        catalog.close()
+
+    if report.quarantined:
+        console.print(
+            Panel(
+                f"[yellow]{len(report.quarantined)} partition(s) quarantined[/yellow] — "
+                "inspect data/_quarantine/ for forensic analysis.",
+                border_style="yellow",
+                title="QUARANTINE",
+            )
+        )
+        raise typer.Exit(code=2)
+
+    if report.is_clean:
+        console.print(
+            Panel(
+                "[green]No pending commits to recover.[/green]",
+                border_style="green",
+                title="CLEAN",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                f"[green]Recovery complete[/green] — "
+                f"recovered={len(report.recovered)} cleaned={len(report.cleaned)} "
+                f"skipped={len(report.skipped)}",
+                border_style="green",
+                title="OK",
+            )
+        )
+    raise typer.Exit(code=0)
 
 
 # =====================================================================

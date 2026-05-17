@@ -1303,17 +1303,19 @@ class Orchestrator:
             month=chunk.start.month,
             day=chunk.start.day,
         )
+        # Story 4.23 / ADR-026 §2.1 — two-phase commit invertido.
+        # Injetar ``catalog`` no writer faz com que a Fase 1
+        # (INSERT _pending_commits) ocorra ANTES do os.replace e a
+        # Fase 3 (UPSERT partitions + DELETE pending) ocorra DEPOIS,
+        # tudo enquadrado em ``Catalog.pending_commit`` context manager.
+        # Não precisamos mais chamar ``register_partition`` explicitamente
+        # (deprecated wrapper continua disponível para callers v1.3.x).
         write_result = self._writer.write(
             trade_records,
             partition,
             dll_version=self._safe_dll_version(),
             chunk_id=chunk_result.chunk_id,
-        )
-        # Register no catalog (two-phase commit emulado — Story 1.5 AC13).
-        # ``day`` flui implicitamente via partition.day → coluna SQL.
-        self._catalog.register_partition(
-            write_result,
-            partition,
+            catalog=self._catalog,
             job_id=job_id,
         )
         # Wave 1B — marca o(s) dia(s) útil(eis) deste chunk como prontos no

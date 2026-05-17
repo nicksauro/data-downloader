@@ -35,16 +35,20 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shutil
 import sqlite3
+import sys
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 
+from data_downloader.public_api.exceptions import ConcurrentWriterError
 from data_downloader.storage._paths import hide_directory_windows
 from data_downloader.storage.catalog_models import (
     ChunkRange,
@@ -517,6 +521,209 @@ def _migrate_legacy_catalog_path(data_dir: Path, new_path: Path) -> None:
         # ou inexistente; modo de falha mais claro downstream).
 
 
+# ----------------------------------------------------------------------
+# v1.4.0 (Story 4.22 / ADR-026 §2.2) — recovery on boot
+# ----------------------------------------------------------------------
+#
+# Resolução de entradas órfãs de ``_pending_commits`` após crash entre as
+# fases do two-phase commit. Ver ADR-026 §2.2 + INTEGRITY.md §4.3/§4.5.
+#
+# ``PendingRecoveryReport`` é o retorno público do método
+# ``Catalog.recover_pending_commits()`` (e também do dry-run via CLI).
+# Imutável (``frozen=True``) — consumidores podem comparar/contar sem
+# medo de mutação.
+
+
+@dataclass(frozen=True)
+class PendingRecoveryReport:
+    """Resultado imutável de ``Catalog.recover_pending_commits()``.
+
+    Cada categoria é uma tupla de ``(partition_path, reason)`` exceto
+    ``recovered`` (apenas paths — recuperação é binária, sem motivo).
+
+    Attributes:
+        recovered: Partições re-registradas em ``partitions`` após
+            validação SHA256/size. PID original morto, arquivo on-disk
+            íntegro. Tupla de ``partition_path``.
+        cleaned: Pending rows deletadas porque o arquivo final não
+            existe (crash entre Fase 1 e ``os.replace``). Tupla de
+            ``(partition_path, reason)`` — reason é ``'no_file'``.
+        quarantined: Pending rows cujo arquivo on-disk não bate com
+            ``expected_sha256``/``expected_size``. Arquivo movido para
+            ``data/_quarantine/{utc_iso}/{partition_path}`` antes do
+            DELETE. Tupla de ``(partition_path, reason)`` — reason é
+            ``'sha_mismatch'`` ou ``'size_mismatch'``.
+        skipped: Pending rows com PID ainda vivo (outro writer ativo).
+            Tupla de ``(partition_path, reason)`` — reason é
+            ``'pid_alive'``. Não devem ocorrer em recovery on-boot
+            single-flight; presentes para uso futuro (CLI manual).
+    """
+
+    recovered: tuple[str, ...] = ()
+    cleaned: tuple[tuple[str, str], ...] = ()
+    quarantined: tuple[tuple[str, str], ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def is_clean(self) -> bool:
+        """``True`` se nada precisou ser recuperado/limpo/quarentenado.
+
+        ``skipped`` ainda é considerado "clean" no sentido de "recovery
+        não teve trabalho ativo a fazer" — apenas absteve-se de tocar
+        rows com PID vivo.
+        """
+        return not (self.recovered or self.cleaned or self.quarantined)
+
+
+def _pid_alive(pid: int | None, started_at: datetime) -> bool:
+    """Verifica se o PID ainda está vivo com defesa contra PID recycling.
+
+    Política ADR-026 §2.2:
+
+    1. ``pid is None`` -> ``False`` (sem ID, sem dono — pode resolver).
+    2. Se ``psutil`` indisponível (ImportError) -> fallback timestamp:
+       considera vivo apenas se ``started_at`` é recente (< 1h atrás).
+    3. ``psutil.pid_exists(pid) is False`` -> morto.
+    4. ``psutil.Process(pid).create_time()`` comparado com ``started_at``:
+       se o processo foi criado APÓS ``started_at``, é outro processo
+       (PID reciclado pelo OS) -> tratado como morto.
+    5. Caso contrário -> vivo (skip).
+
+    Args:
+        pid: PID do processo que originou a pending row (pode ser
+            ``None`` para rows legadas / corrompidas).
+        started_at: ``datetime`` (UTC) de quando a pending foi criada.
+            Deve ser ``aware`` (tzinfo) — convertemos defensivamente
+            se vier naive.
+
+    Returns:
+        ``True`` se o processo aparentemente ainda está rodando e
+        deve ser respeitado (skip recovery); ``False`` se morto/inexistente.
+    """
+    if pid is None:
+        return False
+
+    # Defensive: garante comparações coerentes (started_at do SQLite vem
+    # naive UTC após _parse_ts). Promove para aware UTC.
+    started_at_utc = started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at
+
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover defensive — psutil é dep transitiva
+        # Fallback timestamp-only: considera vivo se started_at é recente.
+        # Janela de 1h é o mesmo limite usado em ADR-026 §2.3 (writer race).
+        return started_at_utc > datetime.now(UTC) - timedelta(hours=1)
+
+    if not psutil.pid_exists(pid):
+        return False
+
+    try:
+        proc = psutil.Process(pid)
+        create_time = datetime.fromtimestamp(proc.create_time(), tz=UTC)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):  # pragma: no cover defensive
+        return False
+
+    # PID recycling defense: se o processo foi criado APÓS started_at, é
+    # um processo DIFERENTE que herdou o mesmo PID -> tratar como morto.
+    return create_time <= started_at_utc
+
+
+# ----------------------------------------------------------------------
+# v1.4.0 (Story 4.23 / ADR-026 §2.1) — two-phase commit invertido
+# ----------------------------------------------------------------------
+#
+# ``PendingCommitHandle`` é o handle retornado por
+# ``Catalog.pending_commit()`` context manager (AC1/AC2). Encapsula o
+# estado da Fase 1 (claim já feito em ``_pending_commits``) e expõe
+# ``complete(write_result)`` que executa a Fase 3 (UPSERT em
+# ``partitions`` + DELETE pending row + WAL checkpoint + notify
+# observers) dentro da mesma transação SQLite.
+#
+# Design: ``slots=True`` + reference back para o Catalog (não copiamos
+# a conexão; usamos os helpers do dono). Apenas ``_completed`` é mutável
+# (após ``complete()`` retornar). ``_completed`` segunda chamada raise
+# ``RuntimeError`` — guarda contra double-complete (bug de caller).
+
+
+@dataclass(slots=True)
+class PendingCommitHandle:
+    """Handle imutável emitido por :meth:`Catalog.pending_commit` (Story 4.23).
+
+    Carrega o claim atômico já registrado em ``_pending_commits``
+    (Fase 1 do two-phase commit invertido — ADR-026 §2.1) + referência
+    para o ``Catalog`` dono. O caller chama :meth:`complete` após o
+    ``os.replace(tmp, final)`` para executar a Fase 3 (UPSERT em
+    ``partitions`` + DELETE da pending row + WAL checkpoint + dispatch
+    de observers).
+
+    A ordem prescrita do two-phase commit (INTEGRITY.md §4) é:
+
+    1. **Fase 1** — INSERT em ``_pending_commits`` (já feito por
+       ``pending_commit.__enter__``).
+    2. **Fase 2** — ``os.replace(tmp, final)`` (responsabilidade do
+       caller, dentro do ``with`` block).
+    3. **Fase 3** — UPSERT em ``partitions`` + DELETE pending (esta
+       chamada).
+
+    Se o caller chamar :meth:`complete` 2x (bug), raise
+    ``RuntimeError`` — defesa contra uso incorreto. Se sair do ``with``
+    sem chamar :meth:`complete` E sem exception, o context manager loga
+    warning ``catalog.pending_commit.not_completed`` e preserva a pending
+    row (recovery no próximo boot resolve).
+
+    Attributes:
+        rel_path: Path relativo (formato POSIX) a ``data_dir/history/``.
+        partition: ``PartitionKey`` da partição alvo.
+        expected_sha256: SHA256 calculado pelo writer pre-replace.
+        expected_size: Tamanho on-disk pre-replace.
+        job_id: UUID do job que originou (pode ser ``None``).
+        pid: PID do processo que detém o claim (``os.getpid()``).
+        started_at: Timestamp ISO (formato SQLite) do claim.
+    """
+
+    rel_path: str
+    partition: PartitionKey
+    expected_sha256: str
+    expected_size: int
+    job_id: str | None
+    pid: int
+    started_at: str
+    _catalog: Catalog  # forward ref resolvido por `from __future__ import annotations`
+    _completed: bool = False
+
+    def complete(self, write_result: WriteResult) -> None:
+        """Executa Fase 3 do two-phase commit invertido.
+
+        UPSERT em ``partitions`` com ``write_result`` (SHA256/size/bounds
+        finais do arquivo on-disk) + DELETE da pending row + WAL
+        checkpoint + dispatch de observers — tudo em transação SQLite
+        única.
+
+        Idempotente em casos legítimos (UPSERT por ``partition_path``):
+        re-completar uma partição com o mesmo handle é bloqueado por
+        ``_completed`` flag (raise ``RuntimeError``). Para re-registrar
+        a mesma partição via outro handle, basta criar novo
+        ``pending_commit`` para o mesmo ``rel_path`` (claim sobrescreve
+        no UPSERT do ``_pending_commits``).
+
+        Args:
+            write_result: Saída de :meth:`ParquetWriter.write` (path,
+                row_count, bounds, checksum, size).
+
+        Raises:
+            RuntimeError: ``complete()`` chamado 2x para o mesmo handle.
+            sqlite3.Error: Falha no UPSERT/DELETE (caller decide;
+                pending row é preservada para recovery).
+        """
+        if self._completed:
+            raise RuntimeError(
+                f"PendingCommitHandle.complete() already invoked for "
+                f"rel_path={self.rel_path!r} (pid={self.pid})"
+            )
+        self._catalog._finalize_pending_commit(self, write_result)
+        self._completed = True
+
+
 @dataclass
 class Catalog:
     """Catálogo SQLite — fonte única de verdade do estado de downloads.
@@ -582,6 +789,27 @@ class Catalog:
         self._conn = self._open_connection()
         self._apply_pragmas()
         self._apply_migrations()
+
+        # ADR-026 §2.2 (Story 4.22): recovery DEVE rodar ANTES de
+        # cleanup_orphans (cleanup poderia deletar tmps que recovery
+        # ainda quer validar como pending) e ANTES de reconcile
+        # (reconcile assume FS+catalog consistente). Try/except amplo
+        # garante que boot NUNCA falha por causa do recovery — falha
+        # apenas loga + segue.
+        try:
+            recovery_report = self.recover_pending_commits()
+            if not recovery_report.is_clean:
+                _LOG.info(
+                    "catalog.recover_pending.startup",
+                    extra={
+                        "recovered": len(recovery_report.recovered),
+                        "cleaned": len(recovery_report.cleaned),
+                        "quarantined": len(recovery_report.quarantined),
+                        "skipped": len(recovery_report.skipped),
+                    },
+                )
+        except (OSError, sqlite3.Error) as exc:
+            _LOG.warning("catalog.recover_pending.failed", extra={"err": str(exc)})
 
         if self.auto_cleanup_orphans:
             try:
@@ -860,57 +1088,80 @@ class Catalog:
             if cursor.rowcount == 0:
                 raise ValueError(f"job_id not found: {job_id}")
 
-    def register_partition(
+    # ------------------------------------------------------------------
+    # Story 4.23 / ADR-026 §2.1 — two-phase commit invertido
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def pending_commit(
         self,
-        write_result: WriteResult,
+        rel_path: str,
         partition: PartitionKey,
         *,
+        expected_sha256: str,
+        expected_size: int,
         job_id: str | None = None,
-        day: int | None = None,
-    ) -> None:
-        """Registra (UPSERT) uma partição escrita pelo writer.
+    ) -> Iterator[PendingCommitHandle]:
+        """Context manager para o two-phase commit invertido (Story 4.23).
 
-        Implementa o two-phase commit emulado (AC13):
+        Enquadra a operação completa: Fase 1 (INSERT em
+        ``_pending_commits`` com claim atômico WHERE-guarded) ocorre em
+        ``__enter__``; o caller faz Fase 2 (``os.replace(tmp, final)``)
+        dentro do bloco; Fase 3 (UPSERT em ``partitions`` + DELETE
+        pending) ocorre quando o caller chama
+        :meth:`PendingCommitHandle.complete` (tipicamente como última
+        linha do bloco).
 
-        1. INSERT em ``_pending_commits`` com hash esperado.
-        2. (writer já fez ``os.replace`` antes desta chamada — assumimos
-           atomicidade do replace.)
-        3. UPSERT em ``partitions`` + DELETE de ``_pending_commits``.
+        **Política de claim atômico (ADR-026 §2.3 / AC4):** o INSERT em
+        ``_pending_commits`` usa ``ON CONFLICT(partition_path) DO UPDATE
+        ... WHERE``-guarded — sobrescreve apenas se a row existente é
+        stale (``started_at < now-1h``) OU se é deste mesmo PID (retry
+        idempotente). Caso contrário, o SELECT pós-INSERT detecta
+        ``pid != os.getpid()`` e levantamos
+        :class:`ConcurrentWriterError` — sinal advisory-lock cross-process
+        para o caller (writer policy de retry é Story 4.24).
 
-        UPSERT por ``partition_path`` torna a operação idempotente
-        (AC6): re-registrar a mesma partição atualiza row_count,
-        timestamps e checksum sem duplicar linhas.
+        **Comportamento em exception no bloco:** a pending row é
+        **preservada** (não deletada). Recovery on boot (Story 4.22)
+        resolve no próximo start:
 
-        Após commit bem-sucedido, força ``wal_checkpoint(TRUNCATE)``
-        (AC12) para evitar perda em crash entre write e checkpoint
-        default. Trade-off: ~10ms extra por partição vs. ganho de
-        durabilidade — aceitável dado que partições são escritas em
-        granularidade mensal (não por trade).
+        - Sem arquivo final em disco -> ``cleaned`` (no_file).
+        - Arquivo presente + SHA/size match -> ``recovered``.
+        - Arquivo presente + mismatch -> ``quarantined``.
+
+        **Comportamento em exit normal sem complete():** loga warning
+        ``catalog.pending_commit.not_completed`` e preserva a pending
+        row (defesa contra esquecimento do caller). Recovery resolve.
 
         Args:
-            write_result: Saída de ``ParquetWriter.write``.
-            partition: ``PartitionKey`` correspondente.
-            job_id: UUID do job que originou esta escrita (opcional).
+            rel_path: Path relativo (POSIX) a ``data_dir/history/``
+                — mesmo formato usado em ``_pending_commits.partition_path``
+                e em ``partitions.partition_path``.
+            partition: :class:`PartitionKey` correspondente.
+            expected_sha256: SHA256 hex (64 chars) calculado pelo writer
+                ANTES do ``os.replace`` (sobre o ``.tmp.{uuid}``). Usado
+                pelo recovery para validar integridade pós-crash.
+            expected_size: Tamanho on-disk em bytes do ``.tmp`` (==
+                tamanho do final, ``os.replace`` preserva).
+            job_id: UUID do job que originou esta escrita (FK opcional).
+
+        Yields:
+            :class:`PendingCommitHandle` com claim ativo. Caller faz
+            ``os.replace`` então chama ``handle.complete(write_result)``.
 
         Raises:
-            sqlite3.IntegrityError: Violação de constraint (ex:
-                ``row_count < 0`` — defesa contra bug de writer).
+            :class:`ConcurrentWriterError`: outro writer (PID diferente
+                vivo OU dentro da janela de 1h) detém o claim para
+                ``rel_path``.
+            sqlite3.Error: falha SQLite no INSERT da Fase 1.
         """
-        if self.data_dir is None:  # pragma: no cover  defensive
-            raise RuntimeError("data_dir not set; required for register_partition")
-
-        rel_path = relative_partition_path(write_result.path, self.data_dir)
-        now = _utcnow_iso()
         pid = os.getpid()
+        started_at = _utcnow_iso()
 
-        # ADR-025 v1.3.0: ``day`` derivado em prioridade da ``PartitionKey``
-        # (fonte canônica do layout); caller pode sobrescrever via kwarg
-        # ``day`` se quiser registrar uma partição mensal a partir de uma
-        # PartitionKey diária (uso raro — defensivo). NULL = mensal
-        # compactado; NOT NULL = diário parcial.
-        resolved_day = day if day is not None else partition.day
-
-        # Fase 1 — pending commit (AC13).
+        # Fase 1 — claim atômico WHERE-guarded.
+        # WHERE clause em ON CONFLICT DO UPDATE faz o UPSERT só sobrescrever
+        # entries stale (started_at < now - 1h) OU do mesmo PID (retry).
+        # Caller diferente vivo -> UPDATE no-op, mantém row anterior.
         with self._transaction():
             conn = self._conn_or_raise()
             conn.execute(
@@ -924,19 +1175,106 @@ class Catalog:
                     expected_size = excluded.expected_size,
                     job_id = excluded.job_id,
                     pid = excluded.pid
+                WHERE _pending_commits.started_at < datetime('now', '-1 hour')
+                   OR _pending_commits.pid = excluded.pid
                 """,
                 (
                     rel_path,
-                    now,
-                    write_result.checksum_sha256,
-                    write_result.file_size_bytes,
+                    started_at,
+                    expected_sha256,
+                    expected_size,
                     job_id,
                     pid,
                 ),
             )
 
-        # Fase 2 — arquivo já está em disco (writer fez os.replace antes).
-        # Fase 3 — UPSERT em partitions + clear pending commit.
+        # Verifica claim: a row pode ter sido inserida nova OU sobrescrita.
+        # Se DO UPDATE WHERE bloqueou (outro PID ainda dentro da janela 1h),
+        # a row continua com o pid antigo -> ConcurrentWriterError.
+        conn = self._conn_or_raise()
+        row = conn.execute(
+            "SELECT pid FROM _pending_commits WHERE partition_path = ?",
+            (rel_path,),
+        ).fetchone()
+        if row is None or int(row["pid"]) != pid:
+            current_pid = int(row["pid"]) if row is not None else -1
+            raise ConcurrentWriterError(
+                partition_path=rel_path,
+                current_pid=current_pid,
+                own_pid=pid,
+            )
+
+        handle = PendingCommitHandle(
+            rel_path=rel_path,
+            partition=partition,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
+            job_id=job_id,
+            pid=pid,
+            started_at=started_at,
+            _catalog=self,
+        )
+
+        exc_info_pre = sys.exc_info()[0]
+        try:
+            yield handle
+        except Exception:
+            # Exception propagada do bloco caller. NÃO deletamos a pending
+            # row — recovery on boot resolve com base no estado on-disk.
+            # Story 4.24: ``except Exception`` (não ``BaseException``) — o
+            # objetivo é preservar pending em caso de erro de aplicação;
+            # KeyboardInterrupt/SystemExit não são erros lógicos e podem
+            # propagar sem custom handling (recovery on boot ainda cobre).
+            raise
+        else:
+            # Exit normal. Se caller esqueceu de chamar complete(), loga
+            # warning para diagnóstico (recovery on boot ainda resolve;
+            # pending row segue preservada).
+            if not handle._completed and sys.exc_info()[0] is exc_info_pre:
+                _LOG.warning(
+                    "catalog.pending_commit.not_completed",
+                    extra={
+                        "rel_path": rel_path,
+                        "pid": pid,
+                        "job_id": job_id,
+                    },
+                )
+
+    def _finalize_pending_commit(
+        self,
+        handle: PendingCommitHandle,
+        write_result: WriteResult,
+    ) -> None:
+        """Fase 3 do two-phase commit invertido (Story 4.23 / ADR-026 §2.1).
+
+        Executado por :meth:`PendingCommitHandle.complete`. UPSERT em
+        ``partitions`` + DELETE da pending row + WAL checkpoint + dispatch
+        de observers — tudo dentro da mesma transação SQLite (atômico).
+
+        Implementação espelha o Phase 3 antigo de ``register_partition``
+        (preservando idempotência R5/AC6 via UPSERT por
+        ``partition_path``). ``day`` vem de ``handle.partition.day``
+        (fonte canônica do layout ADR-025 — NULL = mensal compactado,
+        NOT NULL = diário).
+
+        Args:
+            handle: Handle ativo (não-completado). Usado para
+                ``rel_path``, ``partition``, ``job_id``.
+            write_result: Saída de :meth:`ParquetWriter.write`.
+
+        Raises:
+            sqlite3.Error: falha SQLite (caller decide; pending row é
+                preservada para recovery).
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            raise RuntimeError("data_dir not set; required for _finalize_pending_commit")
+
+        rel_path = handle.rel_path
+        partition = handle.partition
+        job_id = handle.job_id
+        now = _utcnow_iso()
+        resolved_day = partition.day
+
         with self._transaction():
             conn = self._conn_or_raise()
             conn.execute(
@@ -979,17 +1317,120 @@ class Catalog:
                 (rel_path,),
             )
 
-        # AC12 — WAL checkpoint forçado após cada register_partition.
+        # WAL checkpoint forçado após Fase 3 (AC12 — durabilidade vs
+        # default checkpoint delayed). Best-effort: erro não derruba o
+        # commit (que já passou).
         try:
             conn = self._conn_or_raise()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error as exc:
             _LOG.warning("catalog.wal_checkpoint.failed", extra={"err": str(exc)})
 
-        # v1.3.0 Wave 2B — notifica observers (CatalogScreen auto-refresh).
-        # APÓS o commit/checkpoint para que listeners que re-consultem o
-        # catálogo enxerguem a partition recém-gravada.
+        # Dispatch de observers — APÓS o commit/checkpoint para que listeners
+        # que re-consultem o catálogo enxerguem a partition recém-gravada.
         _notify_partition_observers(partition.symbol, partition.year, partition.month)
+
+    def register_partition(
+        self,
+        write_result: WriteResult,
+        partition: PartitionKey,
+        *,
+        job_id: str | None = None,
+        day: int | None = None,
+    ) -> None:
+        """Registra (UPSERT) uma partição já escrita on-disk — **DEPRECATED**.
+
+        Story 4.23 (ADR-026 §2.1) inverteu o protocolo two-phase commit
+        em :meth:`ParquetWriter.write` (kwarg ``catalog``). Esta função
+        permanece como wrapper de compatibilidade para callers v1.3.x
+        que ainda chamam ``write()`` SEM injetar catalog e fazem a
+        registração em sequência.
+
+        Comportamento:
+
+        1. Emite ``DeprecationWarning`` com ``stacklevel=2`` (aponta
+           para o caller).
+        2. Chama :meth:`pending_commit` para o ``write_result.path``
+           (Fase 1 — INSERT atômico em ``_pending_commits``).
+        3. Imediatamente chama ``handle.complete(write_result)`` (Fase 3
+           — UPSERT em ``partitions`` + DELETE pending + WAL checkpoint
+           + notify observers).
+
+        Como o arquivo JÁ está em disco (writer legacy fez ``os.replace``
+        antes desta chamada), a Fase 2 (replace) é no-op aqui — o SHA256
+        passado em ``pending_commit`` é o ``write_result.checksum_sha256``
+        atual; recovery on boot validaria o mesmo SHA contra o arquivo
+        on-disk e re-registraria normalmente.
+
+        Migração recomendada (v1.4.0):
+
+        .. code-block:: python
+
+            # ANTES (v1.3.x — caminho legacy):
+            wr = writer.write(trades, partition, dll_version=v)
+            catalog.register_partition(wr, partition, job_id=jid)
+
+            # DEPOIS (v1.4.0+):
+            wr = writer.write(trades, partition, dll_version=v,
+                              catalog=catalog, job_id=jid)
+            # register_partition NÃO é mais necessário.
+
+        Remoção planejada: v1.5.0.
+
+        Args:
+            write_result: Saída de ``ParquetWriter.write``.
+            partition: ``PartitionKey`` correspondente.
+            job_id: UUID do job que originou esta escrita (opcional).
+            day: Override defensivo para ``partition.day`` (raro — uso
+                em testes). Default ``None`` honra ``partition.day``.
+
+        Raises:
+            sqlite3.IntegrityError: Violação de constraint do SQLite.
+            ConcurrentWriterError: Outro writer detém claim ativo na
+                mesma ``partition_path`` (inesperado se caller já passou
+                pelo replace; pode indicar bug de coordenação).
+
+        .. deprecated:: 1.4.0
+            Pass ``catalog`` to :meth:`ParquetWriter.write` instead.
+        """
+        warnings.warn(
+            "Catalog.register_partition is deprecated; pass catalog to "
+            "ParquetWriter.write() instead (Story 4.23 / ADR-026 sect 2.1). "
+            "Removal planned for v1.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.data_dir is None:  # pragma: no cover  defensive
+            raise RuntimeError("data_dir not set; required for register_partition")
+
+        rel_path = relative_partition_path(write_result.path, self.data_dir)
+
+        # ADR-025 v1.3.0 / Story 4.23: ``day`` override defensivo. Se
+        # caller passou ``day`` explícito, usamos uma PartitionKey ajustada
+        # para que ``_finalize_pending_commit`` use o ``day`` correto.
+        if day is not None and day != partition.day:
+            partition_for_phase3 = PartitionKey(
+                exchange=partition.exchange,
+                symbol=partition.symbol,
+                year=partition.year,
+                month=partition.month,
+                day=day,
+            )
+        else:
+            partition_for_phase3 = partition
+
+        # Fase 1 + Fase 3 em sequência via context manager (Fase 2 é no-op
+        # — caller legacy já fez os.replace antes). Comportamento
+        # observável idêntico ao caminho original: UPSERT em partitions
+        # + DELETE pending + WAL checkpoint + notify observers.
+        with self.pending_commit(
+            rel_path=rel_path,
+            partition=partition_for_phase3,
+            expected_sha256=write_result.checksum_sha256,
+            expected_size=write_result.file_size_bytes,
+            job_id=job_id,
+        ) as handle:
+            handle.complete(write_result)
 
     def register_gap(
         self,
@@ -1189,15 +1630,22 @@ class Catalog:
         Pipeline:
 
         1. Checa ``is_month_complete`` — se False, no-op.
-        2. INSERT em ``compactions`` (started_at=now, completed_at=NULL).
+        2. **Claim atômico WHERE-guarded em ``compactions``** (Story 4.24 /
+           ADR-026 §2.4): INSERT ... ON CONFLICT DO UPDATE WHERE só
+           sobrescreve se row anterior é stale (>1h) OU já completada.
+           Pós-INSERT re-SELECT compara ``started_at`` com o ``now``
+           passado — se diferente, outro processo claim'd primeiro
+           (no-op, retorna ``False``, log ``claim_lost``).
         3. Chama :func:`compact_month` (lê diários → write mensal atômico → DELETE diários).
         4. UPSERT na tabela ``partitions``: row mensal (day=NULL) + DELETE
            das rows diárias do mesmo ``(symbol, exchange, year, month)``.
         5. UPDATE ``compactions`` completed_at=now.
 
-        Crash entre passos 3 e 5: ``reconcile`` detecta ``compactions``
-        in-flight e completa (se ``MM.parquet`` íntegro) OU reverte
-        (se inconsistente) — ver ADR-025 §2.4.
+        Crash entre passos 3 e 5: ``_recover_inflight_compactions`` detecta
+        ``compactions`` in-flight no próximo boot e completa (se
+        ``MM.parquet`` íntegro) OU reverte (se inconsistente) — ver
+        ADR-025 §2.4. Claims stale (>1h) tornam-se reclamáveis pelo
+        WHERE-guard de §2.4.
 
         Idempotência: se ``compact_month`` retorna ``None`` (no-op — já
         compactado, sem diários), apenas garante que o estado SQLite
@@ -1212,7 +1660,8 @@ class Catalog:
 
         Returns:
             ``True`` se compactou (executou IO); ``False`` se no-op
-            (mês incompleto OU já compactado).
+            (mês incompleto OU já compactado OU claim perdido p/ outro
+            processo).
         """
         if self.data_dir is None:  # pragma: no cover defensive
             return False
@@ -1223,8 +1672,22 @@ class Catalog:
         # Import lazy para evitar ciclo (parquet_writer já importa schema).
         from data_downloader.storage.parquet_writer import compact_month
 
-        now = _utcnow_iso()
-        # Marca início da compactação (idempotente — UPSERT).
+        # Story 4.24: ``started_at`` precisa de granularidade sub-segundo
+        # para diferenciar claims concorrentes. ``_utcnow_iso()`` produz
+        # apenas precisao de segundos (compatibilidade SQLite ``datetime(
+        # 'now')``); usamos microssegundos APENAS aqui — comparacao
+        # WHERE-guard ``started_at < datetime('now', '-1 hour')`` continua
+        # correta lexicamente (sub-segundos sao mais "altos" que segundos).
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+        # Story 4.24 / ADR-026 §2.4 — claim atômico WHERE-guarded em
+        # ``compactions`` como advisory lock cross-process. Substitui o
+        # UPSERT incondicional v1.3.x (que sobrescrevia in-flight). Permite
+        # sobrescrever apenas se a row anterior está stale (>1h sem
+        # ``completed_at``) OU já completada. Pós-INSERT, re-SELECT
+        # ``started_at`` e comparamos com o ``now`` original: se diferente,
+        # outro processo claim'd dentro da janela de 1h — no-op (retorna
+        # ``False``). Evita o race em que 2 processos chamam
+        # ``compact_month`` na mesma chave.
         try:
             with self._transaction():
                 conn = self._conn_or_raise()
@@ -1237,16 +1700,49 @@ class Catalog:
                         started_at = excluded.started_at,
                         completed_at = NULL,
                         error = NULL
+                    WHERE compactions.completed_at IS NOT NULL
+                       OR compactions.started_at < datetime('now', '-1 hour')
                     """,
                     (symbol, exchange, year, month, now),
                 )
+                claim_row = conn.execute(
+                    "SELECT started_at FROM compactions WHERE symbol = ? "
+                    "AND exchange = ? AND year = ? AND month = ?",
+                    (symbol, exchange, year, month),
+                ).fetchone()
         except sqlite3.Error as exc:
             _LOG.warning(
                 "catalog.maybe_compact_month.tracker_failed",
                 extra={"err": str(exc), "symbol": symbol, "year": year, "month": month},
             )
+            return False
+
+        # AC6/AC7 — verifica se o claim foi conquistado: o ``started_at``
+        # da row precisa bater com o ``now`` que passamos no INSERT.
+        # Diferente = outro processo claim'd primeiro (DO UPDATE bloqueado
+        # pelo WHERE) -> no-op.
+        if claim_row is None or str(claim_row["started_at"]) != now:
+            _LOG.info(
+                "catalog.maybe_compact_month.claim_lost",
+                extra={
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "year": year,
+                    "month": month,
+                    "own_started_at": now,
+                    "holder_started_at": str(claim_row["started_at"])
+                    if claim_row is not None
+                    else None,
+                },
+            )
+            return False
 
         try:
+            # Story 4.23 / ADR-026 §2.1: passamos ``catalog=self`` para
+            # que o ``os.replace`` do ``{MM}.parquet`` seja enquadrado em
+            # ``pending_commit``. A UPSERT mensal (day=NULL) é feita
+            # IMEDIATAMENTE após o replace via ``handle.complete()`` —
+            # pulamos abaixo o re-INSERT redundante.
             result = compact_month(
                 self.data_dir,
                 exchange=exchange,
@@ -1254,6 +1750,7 @@ class Catalog:
                 year=year,
                 month=month,
                 dll_version=dll_version,
+                catalog=self,
             )
         except Exception as exc:
             with contextlib.suppress(sqlite3.Error), self._transaction():
@@ -1271,7 +1768,7 @@ class Catalog:
 
         # Persistir estado SQLite ATOMICAMENTE:
         # - DELETE rows diárias do (symbol, exchange, year, month) em partitions
-        # - UPSERT row mensal (day=NULL) se compact_month executou
+        # - (UPSERT mensal já feita por compact_month → pending_commit.complete)
         # - UPDATE compactions completed_at
         finished = _utcnow_iso()
         with self._transaction():
@@ -1281,40 +1778,6 @@ class Catalog:
                 "AND year = ? AND month = ? AND day IS NOT NULL",
                 (symbol, exchange, year, month),
             )
-            if result is not None:
-                rel_path = relative_partition_path(result.path, self.data_dir)
-                conn.execute(
-                    """
-                    INSERT INTO partitions(
-                        partition_path, symbol, exchange, year, month, day,
-                        row_count, first_ts_ns, last_ts_ns, schema_version,
-                        checksum_sha256, file_size_bytes, written_at, job_id
-                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)
-                    ON CONFLICT(partition_path) DO UPDATE SET
-                        row_count = excluded.row_count,
-                        first_ts_ns = excluded.first_ts_ns,
-                        last_ts_ns = excluded.last_ts_ns,
-                        schema_version = excluded.schema_version,
-                        checksum_sha256 = excluded.checksum_sha256,
-                        file_size_bytes = excluded.file_size_bytes,
-                        day = NULL,
-                        written_at = excluded.written_at
-                    """,
-                    (
-                        rel_path,
-                        symbol,
-                        exchange,
-                        year,
-                        month,
-                        result.row_count,
-                        result.first_ts_ns,
-                        result.last_ts_ns,
-                        self._get_meta("parquet_schema_min_supported") or "1.0.0",
-                        result.checksum_sha256,
-                        result.file_size_bytes,
-                        finished,
-                    ),
-                )
             conn.execute(
                 "UPDATE compactions SET completed_at = ? "
                 "WHERE symbol = ? AND exchange = ? AND year = ? AND month = ?",
@@ -1548,7 +2011,438 @@ class Catalog:
                     "catalog.cleanup_orphans.unlink_failed",
                     extra={"path": str(path), "err": str(exc)},
                 )
+
+        # AC8 — defense-in-depth: purga _pending_commits rows com mais de
+        # 1 dia (recovery em __post_init__ ja deveria ter pegado, mas
+        # caso o psutil tenha dado falso-positivo de pid_alive por janela
+        # de tempo (boot demorado, etc), garantimos eventual limpeza.
+        # Rows recentes (<1 dia) sao preservadas — podem ser writes ativos.
+        try:
+            with self._transaction():
+                conn = self._conn_or_raise()
+                cursor = conn.execute(
+                    "DELETE FROM _pending_commits "
+                    "WHERE pid IS NOT NULL "
+                    "AND started_at < datetime('now', '-1 day')"
+                )
+                stale_purged = cursor.rowcount
+            if stale_purged > 0:
+                _LOG.info(
+                    "catalog.cleanup_orphans.pending_purged",
+                    extra={"removed_count": stale_purged},
+                )
+        except sqlite3.Error as exc:  # pragma: no cover defensive
+            _LOG.warning(
+                "catalog.cleanup_orphans.pending_purge_failed",
+                extra={"err": str(exc)},
+            )
+
         return removed
+
+    # ------------------------------------------------------------------
+    # Story 4.22 / ADR-026 §2.2 — recovery on boot helpers
+    # ------------------------------------------------------------------
+
+    def _quarantine_partition(self, rel_path: str) -> Path | None:
+        """Move um arquivo de partição para ``data/_quarantine/{utc}/...``.
+
+        Convention ADR-026 §2.2: cada quarantine event cria um diretório
+        raiz timestamped (UTC ISO compact, ex.: ``20260516T143211Z``) e
+        preserva a hierarquia interna a partir de ``data_dir/history/``
+        para evitar colisões e facilitar auditoria forense.
+
+        Usa ``os.replace`` (atômico mesmo FS) com fallback para
+        ``shutil.move`` caso quarantine resida em outro drive Windows.
+        Diretórios pais são criados antes do move.
+
+        Args:
+            rel_path: Path relativo a ``data_dir/history/`` (mesmo
+                formato armazenado em ``_pending_commits.partition_path``).
+
+        Returns:
+            Path absoluto do arquivo no destino se o move foi bem
+            sucedido; ``None`` se o source não existe ou se o move
+            falhou (log de erro emitido).
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return None
+
+        source = self.data_dir / "history" / rel_path
+        if not source.is_file():
+            _LOG.warning(
+                "catalog.recovery.quarantine_source_missing",
+                extra={"path": str(source)},
+            )
+            return None
+
+        utc_compact = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        dest = self.data_dir / "_quarantine" / utc_compact / rel_path
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _LOG.error(
+                "catalog.recovery.quarantine_failed",
+                extra={
+                    "src": str(source),
+                    "dst": str(dest),
+                    "err": str(exc),
+                    "stage": "mkdir",
+                },
+            )
+            return None
+
+        try:
+            os.replace(source, dest)
+        except OSError as replace_exc:
+            # Fallback: cross-drive ou cross-FS no Windows -> shutil.move
+            # (não atômico, mas tolerante a moves cross-volume).
+            try:
+                shutil.move(str(source), str(dest))
+            except OSError as move_exc:
+                _LOG.error(
+                    "catalog.recovery.quarantine_failed",
+                    extra={
+                        "src": str(source),
+                        "dst": str(dest),
+                        "err_replace": str(replace_exc),
+                        "err_move": str(move_exc),
+                        "stage": "move",
+                    },
+                )
+                return None
+
+        _LOG.info(
+            "catalog.recovery.quarantined",
+            extra={"src": str(source), "dst": str(dest), "rel_path": rel_path},
+        )
+        return dest
+
+    def recover_pending_commits(self) -> PendingRecoveryReport:
+        """Resolve entradas órfãs de ``_pending_commits`` após crash.
+
+        Política ADR-026 §2.2 / INTEGRITY.md §4.3:
+
+        - PID vivo (``_pid_alive`` True) -> ``skipped`` (não tocar).
+        - PID morto + arquivo ausente -> DELETE pending (``cleaned``,
+          motivo ``no_file``).
+        - PID morto + arquivo presente + SHA256/size match -> UPSERT em
+          ``partitions`` via ``_register_recovered_partition`` + DELETE
+          pending (``recovered``).
+        - PID morto + arquivo presente + mismatch -> quarentena via
+          ``_quarantine_partition`` + DELETE pending (``quarantined``,
+          motivo ``sha_mismatch`` ou ``size_mismatch``).
+
+        Chamado em ``__post_init__`` ANTES de ``cleanup_orphans`` e
+        ``reconcile`` (recovery precisa validar antes de cleanup tocar
+        tmp/files; reconcile depende do FS estar consistente).
+
+        Returns:
+            ``PendingRecoveryReport`` imutável com as 4 categorias.
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return PendingRecoveryReport()
+
+        conn = self._conn_or_raise()
+        try:
+            rows = conn.execute(
+                "SELECT partition_path, started_at, expected_sha256, "
+                "expected_size, pid, job_id FROM _pending_commits"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Tabela ainda não existe (DB pré-migrations) -> no-op.
+            return PendingRecoveryReport()
+
+        history_root = self.data_dir / "history"
+        recovered: list[str] = []
+        cleaned: list[tuple[str, str]] = []
+        quarantined: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+
+        for row in rows:
+            rel_path = str(row["partition_path"])
+            started_at_raw = row["started_at"]
+            expected_sha = str(row["expected_sha256"])
+            expected_size = int(row["expected_size"])
+            pid_value = row["pid"]
+            pid: int | None = int(pid_value) if pid_value is not None else None
+            job_id_value = row["job_id"]
+            job_id: str | None = str(job_id_value) if job_id_value is not None else None
+
+            try:
+                started_at = _parse_ts(started_at_raw)
+            except (ValueError, TypeError):  # pragma: no cover defensive
+                # Row corrompida — trata como morto (sem timestamp confiável).
+                started_at = datetime.now(UTC) - timedelta(days=1)
+
+            if _pid_alive(pid, started_at):
+                skipped.append((rel_path, "pid_alive"))
+                continue
+
+            abs_path = history_root / rel_path
+            if not abs_path.is_file():
+                # Crash entre Fase 1 e os.replace — nada para recuperar.
+                self._delete_pending(rel_path)
+                cleaned.append((rel_path, "no_file"))
+                continue
+
+            try:
+                actual_size = abs_path.stat().st_size
+            except OSError as exc:  # pragma: no cover defensive
+                _LOG.warning(
+                    "catalog.recovery.stat_failed",
+                    extra={"path": str(abs_path), "err": str(exc)},
+                )
+                # Não consegue ler -> trata como mismatch e quarentena.
+                if self._quarantine_partition(rel_path) is not None:
+                    self._delete_pending(rel_path)
+                    quarantined.append((rel_path, "stat_failed"))
+                continue
+
+            if actual_size != expected_size:
+                if self._quarantine_partition(rel_path) is not None:
+                    self._delete_pending(rel_path)
+                    quarantined.append((rel_path, "size_mismatch"))
+                # Se quarantine falhou: NÃO deleta pending — retry no próximo boot.
+                continue
+
+            actual_sha = _sha256_file(abs_path)
+            if actual_sha != expected_sha:
+                if self._quarantine_partition(rel_path) is not None:
+                    self._delete_pending(rel_path)
+                    quarantined.append((rel_path, "sha_mismatch"))
+                continue
+
+            # SHA + size match — re-registra em partitions.
+            registered = self._register_recovered_partition(
+                rel_path=rel_path,
+                abs_path=abs_path,
+                checksum=actual_sha,
+                file_size=actual_size,
+                job_id=job_id,
+            )
+            if registered:
+                self._delete_pending(rel_path)
+                recovered.append(rel_path)
+            # Se _register_recovered_partition falhou (metadata corrompida),
+            # já logou; mantemos a pending row para investigação humana.
+
+        return PendingRecoveryReport(
+            recovered=tuple(recovered),
+            cleaned=tuple(cleaned),
+            quarantined=tuple(quarantined),
+            skipped=tuple(skipped),
+        )
+
+    def dry_run_recovery_pending(self) -> PendingRecoveryReport:
+        """Versão read-only de ``recover_pending_commits()`` para CLI.
+
+        Aplica a mesma resolution table SEM mutações: nenhum DELETE,
+        nenhum UPSERT, nenhum move para quarentena. Apenas classifica
+        cada row e retorna o report — útil para operadores avaliarem
+        o impacto antes de rodar a recovery real.
+
+        Returns:
+            ``PendingRecoveryReport`` reflete o que aconteceria se
+            ``recover_pending_commits()`` fosse chamado agora.
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return PendingRecoveryReport()
+
+        conn = self._conn_or_raise()
+        try:
+            rows = conn.execute(
+                "SELECT partition_path, started_at, expected_sha256, "
+                "expected_size, pid, job_id FROM _pending_commits"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return PendingRecoveryReport()
+
+        history_root = self.data_dir / "history"
+        recovered: list[str] = []
+        cleaned: list[tuple[str, str]] = []
+        quarantined: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+
+        for row in rows:
+            rel_path = str(row["partition_path"])
+            started_at_raw = row["started_at"]
+            expected_sha = str(row["expected_sha256"])
+            expected_size = int(row["expected_size"])
+            pid_value = row["pid"]
+            pid: int | None = int(pid_value) if pid_value is not None else None
+
+            try:
+                started_at = _parse_ts(started_at_raw)
+            except (ValueError, TypeError):  # pragma: no cover defensive
+                started_at = datetime.now(UTC) - timedelta(days=1)
+
+            if _pid_alive(pid, started_at):
+                skipped.append((rel_path, "pid_alive"))
+                continue
+
+            abs_path = history_root / rel_path
+            if not abs_path.is_file():
+                cleaned.append((rel_path, "no_file"))
+                continue
+
+            try:
+                actual_size = abs_path.stat().st_size
+            except OSError:  # pragma: no cover defensive
+                quarantined.append((rel_path, "stat_failed"))
+                continue
+
+            if actual_size != expected_size:
+                quarantined.append((rel_path, "size_mismatch"))
+                continue
+
+            actual_sha = _sha256_file(abs_path)
+            if actual_sha != expected_sha:
+                quarantined.append((rel_path, "sha_mismatch"))
+                continue
+
+            recovered.append(rel_path)
+
+        return PendingRecoveryReport(
+            recovered=tuple(recovered),
+            cleaned=tuple(cleaned),
+            quarantined=tuple(quarantined),
+            skipped=tuple(skipped),
+        )
+
+    def _delete_pending(self, rel_path: str) -> None:
+        """DELETE row em ``_pending_commits`` (helper interno)."""
+        with self._transaction():
+            conn = self._conn_or_raise()
+            conn.execute(
+                "DELETE FROM _pending_commits WHERE partition_path = ?",
+                (rel_path,),
+            )
+
+    def _register_recovered_partition(
+        self,
+        *,
+        rel_path: str,
+        abs_path: Path,
+        checksum: str,
+        file_size: int,
+        job_id: str | None,
+    ) -> bool:
+        """Re-registra uma partição em ``partitions`` durante recovery (AC6).
+
+        Lê metadata Parquet on-disk (``pyarrow.parquet.read_metadata``)
+        para extrair ``row_count``, ``first_ts_ns``, ``last_ts_ns``,
+        ``schema_version``. Resolve ``PartitionKey`` via
+        ``parse_partition_path`` para validar layout. UPSERT em
+        ``partitions`` usando ``checksum``/``file_size`` da pending row
+        (que agora foram validados pelo recovery).
+
+        Args:
+            rel_path: Path relativo a ``data_dir/history/``.
+            abs_path: Path absoluto do arquivo Parquet.
+            checksum: SHA256 validado (matches expected).
+            file_size: Tamanho validado (matches expected).
+            job_id: Job de origem (pode ser ``None``).
+
+        Returns:
+            ``True`` se registrado com sucesso; ``False`` se metadata
+            corrompida ou layout inválido (caller mantém pending row).
+        """
+        from data_downloader.storage.partition import parse_partition_path
+
+        # parse_partition_path espera segmento "history" no path; rel_path
+        # eh relativo a data_dir/history -> prepend para satisfazer o parser.
+        partition_key = parse_partition_path(Path("history") / rel_path)
+        if partition_key is None:
+            _LOG.warning(
+                "catalog.recovery.invalid_layout",
+                extra={"path": rel_path},
+            )
+            return False
+
+        try:
+            import pyarrow.parquet as pq
+
+            md_obj = pq.read_metadata(abs_path).metadata
+        except (OSError, ValueError) as exc:
+            _LOG.warning(
+                "catalog.recovery.metadata_read_failed",
+                extra={"path": rel_path, "err": str(exc)},
+            )
+            return False
+
+        if md_obj is None:
+            _LOG.warning("catalog.recovery.no_metadata", extra={"path": rel_path})
+            return False
+
+        try:
+            row_count = int(md_obj.get(b"row_count", b"0").decode())
+            first_ts = int(md_obj.get(b"first_ts_ns", b"0").decode())
+            last_ts = int(md_obj.get(b"last_ts_ns", b"0").decode())
+            fallback_version = self._get_meta("parquet_schema_min_supported") or "1.0.0"
+            schema_version = md_obj.get(b"schema_version", fallback_version.encode()).decode()
+        except (ValueError, AttributeError) as exc:
+            _LOG.warning(
+                "catalog.recovery.metadata_parse_failed",
+                extra={"path": rel_path, "err": str(exc)},
+            )
+            return False
+
+        now = _utcnow_iso()
+        try:
+            with self._transaction():
+                conn = self._conn_or_raise()
+                conn.execute(
+                    """
+                    INSERT INTO partitions(
+                        partition_path, symbol, exchange, year, month, day,
+                        row_count, first_ts_ns, last_ts_ns, schema_version,
+                        checksum_sha256, file_size_bytes, written_at, job_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(partition_path) DO UPDATE SET
+                        row_count = excluded.row_count,
+                        first_ts_ns = excluded.first_ts_ns,
+                        last_ts_ns = excluded.last_ts_ns,
+                        schema_version = excluded.schema_version,
+                        checksum_sha256 = excluded.checksum_sha256,
+                        file_size_bytes = excluded.file_size_bytes,
+                        day = excluded.day,
+                        written_at = excluded.written_at,
+                        job_id = COALESCE(excluded.job_id, partitions.job_id)
+                    """,
+                    (
+                        rel_path,
+                        partition_key.symbol,
+                        partition_key.exchange,
+                        partition_key.year,
+                        partition_key.month,
+                        partition_key.day,
+                        row_count,
+                        first_ts,
+                        last_ts,
+                        schema_version,
+                        checksum,
+                        file_size,
+                        now,
+                        job_id,
+                    ),
+                )
+        except sqlite3.Error as exc:
+            _LOG.warning(
+                "catalog.recovery.upsert_failed",
+                extra={"path": rel_path, "err": str(exc)},
+            )
+            return False
+
+        _LOG.info(
+            "catalog.recovery.recovered",
+            extra={
+                "path": rel_path,
+                "row_count": row_count,
+                "checksum": checksum,
+            },
+        )
+        return True
 
     # ------------------------------------------------------------------
     # AC9 + AC11 — reconcile (drift A/B/C)
@@ -1639,7 +2533,7 @@ class Catalog:
         )
 
     def _recover_inflight_compactions(self) -> None:
-        """Resolve compactações in-flight (ADR-025 §2.4).
+        """Resolve compactações in-flight (ADR-025 §2.4 + ADR-026 §2.4).
 
         Crash entre write ``{MM}.parquet`` e DELETE diários deixa rows em
         ``compactions`` com ``started_at`` mas sem ``completed_at``. Para
@@ -1651,6 +2545,14 @@ class Catalog:
         - Caso contrário (`MM.parquet` inexistente OU menor que diários):
           REVERTE — deleta o `{MM}.parquet` se existir, marca
           ``compactions.error='reverted'`` para inspeção humana.
+
+        **Integração single-flight (Story 4.24 / ADR-026 §2.4):** após o
+        claim atômico WHERE-guarded em ``maybe_compact_month``, rows com
+        ``started_at < now-1h`` são consideradas crash residuals e
+        tornam-se reclamáveis pelo próximo claim. Este método é o
+        "garbage collector" da `completed_at IS NULL` queue — completa ou
+        reverte conforme o estado on-disk, deixando o catálogo coerente
+        para a próxima janela de claim.
         """
         if self.data_dir is None:  # pragma: no cover defensive
             return
@@ -1994,6 +2896,8 @@ __all__ = [
     "MIGRATIONS",
     "Catalog",
     "PartitionObserver",
+    "PendingCommitHandle",
+    "PendingRecoveryReport",
     "register_partition_observer",
     "unregister_partition_observer",
 ]

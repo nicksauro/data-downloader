@@ -46,11 +46,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from data_downloader.public_api.exceptions import IntegrityError
+from data_downloader.public_api.exceptions import ConcurrentWriterError, IntegrityError
 from data_downloader.storage._vectorized import (
     assign_sequence_within_ns_vectorized,
     compute_sha256_streaming,
@@ -70,6 +71,11 @@ from data_downloader.storage.schema import (
     pyarrow_schema,
 )
 
+if TYPE_CHECKING:
+    # Forward-only: catalog.py importa WriteResult deste módulo (ciclo
+    # ascendente). Annotation lazy via `from __future__ import annotations`.
+    from data_downloader.storage.catalog import Catalog
+
 _LOG = logging.getLogger(__name__)
 
 # Configuração Parquet (ADR-002 + ADR-025).
@@ -85,6 +91,15 @@ _WRITE_STATISTICS: bool = True
 # disto; mensais compactados (~10-13M rows WDOFUT) também. Limit é guard
 # contra partições absurdas (símbolo errado, ano errado), não política.
 _PARTITION_ROW_LIMIT: int = 50_000_000
+
+# Story 4.24 / ADR-026 §2.3 — retry policy do writer ao receber
+# ``ConcurrentWriterError`` em ``Catalog.pending_commit()``. Backoff fixo
+# com 3 tentativas totais (100ms → 500ms → 2s = 2.6s no pior caso).
+# Após o 3º attempt fracassado, propaga ``ConcurrentWriterError`` para o
+# orchestrator (que marca o chunk como ``failed`` no ``chunk_ledger`` para
+# retry futuro — ver ADR-026 §2.3). Backoff curto evita storm; não pode
+# crescer demais para não bloquear o writer indefinidamente.
+_RETRY_DELAYS_MS: tuple[int, ...] = (100, 500, 2000)
 
 
 def _check_no_field_drop(sample: TradeRecord) -> None:
@@ -259,11 +274,24 @@ class ParquetWriter:
         *,
         dll_version: str,
         chunk_id: str | None = None,
+        catalog: Catalog | None = None,
+        job_id: str | None = None,
     ) -> WriteResult:
         """Escreve um lote de trades atomicamente.
 
         Pipeline (ver módulo docstring). Append + dedup automático se a
         partição já existe (idempotência R5).
+
+        **Two-phase commit invertido (Story 4.23 / ADR-026 §2.1):**
+        quando ``catalog`` é injetado, o writer enquadra o
+        ``os.replace(tmp, final)`` em :meth:`Catalog.pending_commit` —
+        Fase 1 (INSERT em ``_pending_commits`` com SHA256/size esperados
+        pré-replace) ANTES do replace, Fase 3 (UPSERT em ``partitions``
+        + DELETE pending) DEPOIS. Crash em qualquer ponto deixa estado
+        recuperável (Story 4.22). Quando ``catalog is None`` (callers
+        legacy v1.3.x), comportamento original é preservado: writer
+        apenas faz ``os.replace`` e retorna ``WriteResult``; caller
+        decide se/como registrar (via ``Catalog.register_partition``).
 
         Args:
             trades: Lote a persistir. Cópia defensiva é feita
@@ -274,6 +302,11 @@ class ParquetWriter:
                 no boot (NOT NULL no schema).
             chunk_id: UUID do chunk de origem (auditoria). Pode ser
                 ``None`` se merge de múltiplos chunks.
+            catalog: Catalog opcional para enquadrar o commit no protocolo
+                two-phase invertido. Quando passado, ``register_partition``
+                NÃO deve ser chamado pelo caller (já está incluído).
+            job_id: UUID do job que originou a escrita; forwardado para
+                ``Catalog.pending_commit`` quando ``catalog`` injetado.
 
         Returns:
             ``WriteResult`` com path, row_count, bounds, SHA256, size.
@@ -282,6 +315,11 @@ class ParquetWriter:
             IntegrityError: registro inválido OU partição excede
                 ``_PARTITION_ROW_LIMIT`` (guard paliativo; particionamento
                 diário real é ADR-025 — v1.2.0 Wave 2).
+            ConcurrentWriterError: outro writer detém claim em
+                ``_pending_commits`` após esgotar ``_RETRY_DELAYS_MS``
+                (3 tentativas com backoff 100ms→500ms→2s — Story 4.24 /
+                ADR-026 §2.3). Somente quando ``catalog`` injetado. O
+                ``tmp_path`` é deletado antes da propagação (limpo).
         """
         if not trades:
             # No-op semântico — não cria arquivo vazio.
@@ -415,11 +453,86 @@ class ParquetWriter:
             # 10. fsync(parent_dir) — best-effort.
             _fsync_directory(path.parent)
 
-            # 11. os.replace (atômico Windows + Linux).
-            os.replace(tmp_path, path)
+            # 11. Compute WriteResult bounds antes do replace — usado tanto
+            # no caminho legacy quanto no two-phase commit (handle.complete).
+            if table.num_rows == 0:
+                # Defesa — não devíamos chegar aqui (input validado não vazio).
+                first_ts_ns = 0
+                last_ts_ns = 0
+            else:
+                ts_col = table.column("timestamp_ns")
+                first_ts_ns = int(pa.compute.min(ts_col).as_py())
+                last_ts_ns = int(pa.compute.max(ts_col).as_py())
 
-            # 12. fsync(parent_dir) novamente para persistir a entrada renomeada.
-            _fsync_directory(path.parent)
+            write_result = WriteResult(
+                path=path,
+                row_count=table.num_rows,
+                first_ts_ns=first_ts_ns,
+                last_ts_ns=last_ts_ns,
+                checksum_sha256=checksum,
+                file_size_bytes=file_size,
+            )
+
+            # 12. Fase 2 (replace atômico) — enquadrado em pending_commit
+            # quando catalog injetado (Story 4.23 / ADR-026 §2.1).
+            if catalog is not None:
+                # Catalog.data_dir é Path | None mas Catalog garante
+                # set em __post_init__ (data_dir fallback para
+                # db_path.parent.parent se None) — guard defensivo.
+                if catalog.data_dir is None:  # pragma: no cover defensive
+                    raise RuntimeError("catalog.data_dir must be set for two-phase commit")
+                rel_path = (
+                    path.resolve().relative_to((catalog.data_dir / "history").resolve()).as_posix()
+                )
+                # Story 4.24 / ADR-026 §2.3 — retry com backoff em
+                # ``ConcurrentWriterError`` (outro writer detém o claim
+                # advisory-lock para a mesma partition_path). Limite
+                # ``_RETRY_DELAYS_MS`` (3 tentativas; 100ms → 500ms → 2s).
+                # Após esgotar, propaga; o ``except Exception`` block
+                # abaixo limpa o ``tmp_path`` (AC4).
+                for attempt, delay_ms in enumerate(_RETRY_DELAYS_MS):
+                    try:
+                        with catalog.pending_commit(
+                            rel_path=rel_path,
+                            partition=partition,
+                            expected_sha256=checksum,
+                            expected_size=file_size,
+                            job_id=job_id,
+                        ) as handle:
+                            # Fase 2 — replace atômico DENTRO do bloco (claim ativo).
+                            os.replace(tmp_path, path)
+                            _fsync_directory(path.parent)
+                            # Fase 3 — UPSERT em partitions + DELETE pending.
+                            handle.complete(write_result)
+                        break  # sucesso — sai do retry loop
+                    except ConcurrentWriterError as exc:
+                        if attempt == len(_RETRY_DELAYS_MS) - 1:
+                            # Último attempt — propaga; cleanup do tmp
+                            # fica para o ``except Exception`` block abaixo.
+                            _LOG.warning(
+                                "parquet_writer.concurrent_writer.exhausted",
+                                extra={
+                                    "rel_path": rel_path,
+                                    "attempts": len(_RETRY_DELAYS_MS),
+                                    "holder_pid": exc.current_pid,
+                                },
+                            )
+                            raise
+                        _LOG.info(
+                            "parquet_writer.concurrent_writer.retry",
+                            extra={
+                                "attempt": attempt + 1,
+                                "delay_ms": delay_ms,
+                                "rel_path": rel_path,
+                                "holder_pid": exc.current_pid,
+                            },
+                        )
+                        time.sleep(delay_ms / 1000.0)
+            else:
+                # Caminho legacy v1.3.x — caller é responsável por
+                # Catalog.register_partition(write_result, partition).
+                os.replace(tmp_path, path)
+                _fsync_directory(path.parent)
         except Exception:
             # Cleanup tmp em caso de qualquer falha.
             if tmp_path.exists():
@@ -432,24 +545,7 @@ class ParquetWriter:
                     )
             raise
 
-        # WriteResult bounds vêm da tabela final (já ordenada).
-        if table.num_rows == 0:
-            # Defesa — não devíamos chegar aqui (input validado não vazio).
-            first_ts_ns = 0
-            last_ts_ns = 0
-        else:
-            ts_col = table.column("timestamp_ns")
-            first_ts_ns = int(pa.compute.min(ts_col).as_py())
-            last_ts_ns = int(pa.compute.max(ts_col).as_py())
-
-        return WriteResult(
-            path=path,
-            row_count=table.num_rows,
-            first_ts_ns=first_ts_ns,
-            last_ts_ns=last_ts_ns,
-            checksum_sha256=checksum,
-            file_size_bytes=file_size,
-        )
+        return write_result
 
 
 def compact_month(
@@ -460,6 +556,8 @@ def compact_month(
     year: int,
     month: int,
     dll_version: str = "",
+    catalog: Catalog | None = None,
+    job_id: str | None = None,
 ) -> WriteResult | None:
     """Consolida partições diárias ``{DD}.parquet`` num único ``{MM}.parquet`` (ADR-025).
 
@@ -481,6 +579,14 @@ def compact_month(
     existem (crash entre rename e cleanup): completa o cleanup deletando
     os diários.
 
+    **Two-phase commit invertido (Story 4.23 / ADR-026 §2.1):** quando
+    ``catalog`` é injetado, o ``os.replace`` do ``{MM}.parquet`` é
+    enquadrado em :meth:`Catalog.pending_commit` (mesmo padrão de
+    :meth:`ParquetWriter.write`). O DELETE dos diários permanece FORA do
+    bloco — é responsabilidade do caller (``Catalog.maybe_compact_month``)
+    sincronizar o estado SQLite após o commit do mensal. Caller passa
+    ``catalog`` apenas para ganhar a janela atômica do replace mensal.
+
     Args:
         data_dir: Raiz dos dados.
         exchange: ``"F"`` ou ``"B"``.
@@ -488,6 +594,14 @@ def compact_month(
         year: Ano.
         month: Mês 1..12.
         dll_version: Versão da DLL no momento da compactação (metadata).
+        catalog: Catalog opcional para enquadrar o replace mensal no
+            protocolo two-phase invertido. Quando passado, a UPSERT em
+            ``partitions`` é feita IMEDIATAMENTE após o replace (via
+            ``handle.complete``); caller ainda é responsável pelo DELETE
+            dos diários e ``compactions.completed_at``.
+        job_id: UUID do job que originou a compactação (forwardado para
+            ``pending_commit`` quando ``catalog`` injetado). Geralmente
+            ``None`` — compactação não está atrelada a um job único.
 
     Returns:
         :class:`WriteResult` se compactou (ou completou cleanup); ``None``
@@ -496,6 +610,8 @@ def compact_month(
     Raises:
         IntegrityError: dados corrompidos (ex.: linhas com timestamp_ns
             inconsistente) — compactação aborta sem deletar diários.
+        ConcurrentWriterError: outro processo detém claim no
+            ``{MM}.parquet`` (somente quando ``catalog`` injetado).
     """
     monthly_partition = PartitionKey(exchange=exchange, symbol=symbol, year=year, month=month)
     monthly_path = resolve_partition_path(monthly_partition, data_dir)
@@ -548,8 +664,49 @@ def compact_month(
         file_size = tmp_path.stat().st_size
 
         _fsync_directory(monthly_path.parent)
-        os.replace(tmp_path, monthly_path)
-        _fsync_directory(monthly_path.parent)
+
+        if combined.num_rows == 0:
+            first_ts_ns = 0
+            last_ts_ns = 0
+        else:
+            ts_col = combined.column("timestamp_ns")
+            first_ts_ns = int(pa.compute.min(ts_col).as_py())
+            last_ts_ns = int(pa.compute.max(ts_col).as_py())
+
+        write_result = WriteResult(
+            path=monthly_path,
+            row_count=combined.num_rows,
+            first_ts_ns=first_ts_ns,
+            last_ts_ns=last_ts_ns,
+            checksum_sha256=checksum,
+            file_size_bytes=file_size,
+        )
+
+        # Fase 2 (replace atômico) — enquadrado em pending_commit
+        # quando catalog injetado (Story 4.23 / ADR-026 §2.1). Quando
+        # None, comportamento legacy: replace + caller faz UPSERT
+        # mensal subsequente em maybe_compact_month.
+        if catalog is not None:
+            if catalog.data_dir is None:  # pragma: no cover defensive
+                raise RuntimeError("catalog.data_dir must be set for two-phase commit")
+            rel_path = (
+                monthly_path.resolve()
+                .relative_to((catalog.data_dir / "history").resolve())
+                .as_posix()
+            )
+            with catalog.pending_commit(
+                rel_path=rel_path,
+                partition=monthly_partition,
+                expected_sha256=checksum,
+                expected_size=file_size,
+                job_id=job_id,
+            ) as handle:
+                os.replace(tmp_path, monthly_path)
+                _fsync_directory(monthly_path.parent)
+                handle.complete(write_result)
+        else:
+            os.replace(tmp_path, monthly_path)
+            _fsync_directory(monthly_path.parent)
     except Exception:
         if tmp_path.exists():
             try:
@@ -580,14 +737,6 @@ def compact_month(
     except OSError:
         pass
 
-    if combined.num_rows == 0:
-        first_ts_ns = 0
-        last_ts_ns = 0
-    else:
-        ts_col = combined.column("timestamp_ns")
-        first_ts_ns = int(pa.compute.min(ts_col).as_py())
-        last_ts_ns = int(pa.compute.max(ts_col).as_py())
-
     _LOG.info(
         "compact_month.success",
         extra={
@@ -601,14 +750,7 @@ def compact_month(
         },
     )
 
-    return WriteResult(
-        path=monthly_path,
-        row_count=combined.num_rows,
-        first_ts_ns=first_ts_ns,
-        last_ts_ns=last_ts_ns,
-        checksum_sha256=checksum,
-        file_size_bytes=file_size,
-    )
+    return write_result
 
 
 __all__ = [

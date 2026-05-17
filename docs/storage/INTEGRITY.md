@@ -26,7 +26,7 @@ Integridade não é evento — é regime. Os checks abaixo são **invariantes qu
 | INT-7 | `partitions.checksum_sha256` = SHA256 do arquivo on-disk.                                        | `check_checksums`                         |
 | INT-8 | `partitions.first_ts_ns ≤ partitions.last_ts_ns` e ambos batem com min/max do arquivo.           | `check_partition_bounds`                  |
 | INT-9 | Sem gaps inesperados em datas de pregão B3 dentro da janela de download declarada.               | `check_gaps_against_b3_calendar`          |
-| INT-10| `_pending_commits` está vazio (ou tem entradas com pid ainda vivo).                              | `check_pending_commits_clean`             |
+| INT-10| `_pending_commits` está vazio (ou tem entradas com pid ainda vivo).                              | `check_pending_commits_clean` + `Catalog.recover_pending_commits()` (Story 4.22) |
 | INT-11| `dll_version` no metadata Parquet está dentro do conjunto de versões aprovadas.                  | `check_dll_version_known`                 |
 | INT-12| `ingestion_ts_ns >= timestamp_ns` (não pode ter chegado antes de ocorrer).                       | `check_ingestion_temporal_order`          |
 
@@ -267,6 +267,12 @@ DELETE FROM _pending_commits WHERE partition_path = ?;
 COMMIT;
 ```
 
+**Implementação (v1.4.0 — Story 4.23 / ADR-026 §2.1):**
+
+A ordem prescrita acima é implementada por `Catalog.pending_commit()` context manager em `src/data_downloader/storage/catalog.py`. O writer (`ParquetWriter.write`) e `compact_month` ganharam um kwarg opcional `catalog: Catalog | None`: quando passado, enquadram `os.replace(tmp, final)` no context manager — Fase 1 acontece em `__enter__` (claim atômico WHERE-guarded — ver §4.5), Fase 2 é o `os.replace` dentro do bloco, Fase 3 é executada por `handle.complete(write_result)`.
+
+A versão anterior do `Catalog.register_partition` (que invertia a ordem: replace → INSERT pending → UPSERT) foi mantida como **wrapper deprecated** (`DeprecationWarning`, remoção planejada para v1.5.0): wraps `pending_commit` + `handle.complete` para callers v1.3.x que ainda fazem `writer.write(...)` + `register_partition(...)` em sequência. Recovery de pending órfãs no boot é coberto em [§4.5](#45-recovery-on-boot--protocolo-story-422--adr-026-22).
+
 ### 4.3 Recovery no boot
 
 ```python
@@ -310,6 +316,87 @@ def recover_pending_commits(catalog, root: Path) -> RecoveryReport:
 1. Writer faz retry com backoff (max 3 tentativas, 100ms→500ms→2s).
 2. Se falhar definitivamente, deixa `_pending_commits` populado e arquivo `.tmp` no disco, alarmando. Próxima execução tenta de novo.
 3. Política para projetos downstream: ler via `pq.ParquetFile(path).read()` (que abre+lê+fecha) em vez de manter file handle aberto.
+
+### 4.5 Recovery on boot — protocolo (Story 4.22 / ADR-026 §2.2)
+
+**Implementação:** `Catalog.recover_pending_commits()` em `src/data_downloader/storage/catalog.py` (substitui o pseudo-código documental §4.3 anterior — agora é executável e coberto por unit + integration tests).
+
+**Chamada no boot:** `__post_init__` invoca `self.recover_pending_commits()` ANTES de `cleanup_orphans` e `reconcile`. Try/except `(OSError, sqlite3.Error)` garante que falha de recovery NÃO derruba o boot — apenas loga `catalog.recover_pending.failed` e segue. Próximo boot tenta de novo (idempotente).
+
+**Resolution table** (por row em `_pending_commits`):
+
+| Condição | Ação | Categoria |
+|----------|------|-----------|
+| `_pid_alive(pid, started_at)` retorna `True` | nada | `skipped` (motivo: `pid_alive`) |
+| PID morto + arquivo ausente em `data_dir/history/{rel_path}` | `DELETE` da pending row | `cleaned` (motivo: `no_file`) |
+| PID morto + arquivo presente + `size + sha256` match | UPSERT em `partitions` via `_register_recovered_partition` + `DELETE` pending | `recovered` |
+| PID morto + arquivo presente + `size` mismatch | `_quarantine_partition` + `DELETE` pending | `quarantined` (motivo: `size_mismatch`) |
+| PID morto + arquivo presente + `sha256` mismatch | `_quarantine_partition` + `DELETE` pending | `quarantined` (motivo: `sha_mismatch`) |
+| Falha de I/O em `stat` | `_quarantine_partition` + `DELETE` pending | `quarantined` (motivo: `stat_failed`) |
+
+Se `_quarantine_partition` falhar (disco cheio, FS read-only), a row pending é **preservada** para retry no próximo boot — quarantine é idempotente.
+
+**PID liveness algorithm** (`_pid_alive(pid, started_at)`):
+
+1. `pid is None` → `False`.
+2. Se `psutil` indisponível (`ImportError`) → fallback timestamp: `True` apenas se `started_at > now - 1h`.
+3. `psutil.pid_exists(pid)` → se `False` → morto.
+4. `psutil.Process(pid).create_time()` (epoch UTC) comparado com `started_at`. Se `create_time > started_at` → PID reciclado pelo OS (processo diferente) → morto.
+5. Caso contrário → vivo (skip recovery).
+
+**Defesa contra PID recycling:** a comparação `create_time vs started_at` é essencial. Sem ela, `psutil.pid_exists` pode dar falso positivo se outro processo nascer com o mesmo PID após o crash do writer original.
+
+**Quarantine convention:** `data/_quarantine/{YYYYMMDDTHHMMSSZ}/{partition_path_relativo}`. Cada evento cria um diretório raiz timestamped (UTC compact) e preserva a hierarquia interna a partir de `data_dir/history/`. Move via `os.replace` (atômico, mesmo FS); fallback `shutil.move` para cross-drive Windows.
+
+**Defense-in-depth:** `cleanup_orphans` (Story 1.5 AC7) ganhou `DELETE FROM _pending_commits WHERE pid IS NOT NULL AND started_at < datetime('now', '-1 day')` ao final — garante eventual limpeza mesmo se recovery deu falso-positivo de `pid_alive` em alguma janela patológica.
+
+**CLI manual:**
+
+```bash
+# Read-only — classifica e mostra counts sem mutar nada
+data-downloader catalog recover-pending --dry-run
+
+# Aplica o protocolo (DELETE/UPSERT/quarantine conforme tabela acima)
+data-downloader catalog recover-pending
+```
+
+Exit codes:
+
+- `0` — report limpo OU mutações aplicadas sem quarantine.
+- `2` — uma ou mais partições foram quarentenadas (alerta operacional; inspecionar `data/_quarantine/`).
+- `3` — erro de operação (catálogo inacessível, `OSError`, `sqlite3.Error`).
+
+**Logs estruturados** (úteis para grep em ambiente prod):
+
+- `catalog.recover_pending.startup` — sumário após boot (apenas se houve trabalho).
+- `catalog.recover_pending.failed` — exception durante recovery (degrade, não levanta).
+- `catalog.recovery.recovered` — partição re-registrada com sucesso.
+- `catalog.recovery.quarantined` — arquivo movido para quarantine.
+- `catalog.recovery.quarantine_failed` — quarantine não conseguiu mover (pending preservada).
+- `catalog.recovery.invalid_layout` / `.metadata_read_failed` / `.no_metadata` / `.metadata_parse_failed` / `.upsert_failed` — falhas durante `_register_recovered_partition` (pending preservada).
+- `catalog.cleanup_orphans.pending_purged` — defense-in-depth purgou rows >1 dia.
+
+### 4.6 Writer race + compact single-flight (Story 4.24 / ADR-026 §2.3 + §2.4)
+
+**Implementação:** o claim atômico em `_pending_commits` (writer race) e em `compactions` (compact single-flight) é WHERE-guarded em ambas as tabelas — apenas sobrescreve se a row anterior é stale (>1h sem `completed_at`) OU se é do mesmo PID (writer race apenas — retry idempotente).
+
+**Writer race protection** (`ParquetWriter.write` quando `catalog` injetado):
+
+1. `Catalog.pending_commit(...)` → INSERT WHERE-guarded em `_pending_commits` (Fase 1 do two-phase commit invertido).
+2. Pós-INSERT, `SELECT pid` re-fetch da row. Se `pid != os.getpid()` → outro writer ativo → raise `ConcurrentWriterError`.
+3. Writer retry policy: `_RETRY_DELAYS_MS = (100, 500, 2000)` — 3 tentativas com backoff fixo. Após esgotar, propaga `ConcurrentWriterError` ao orchestrator (`tmp_path` deletado antes da propagação).
+
+**Compact single-flight** (`Catalog.maybe_compact_month`):
+
+1. INSERT WHERE-guarded em `compactions` (mesmo padrão).
+2. Pós-INSERT, `SELECT started_at` re-fetch e compara com o `now` original. Se diferente → outro processo claim'd dentro da janela de 1h → no-op (`return False`), log `catalog.maybe_compact_month.claim_lost`.
+3. `started_at` usa precisão de microssegundos (`%Y-%m-%d %H:%M:%S.%f`) para diferenciar claims concorrentes no mesmo segundo. WHERE-guard `started_at < datetime('now', '-1 hour')` continua lexicamente correto (sub-segundos são maiores que segundos).
+
+**Logs estruturados adicionais:**
+
+- `parquet_writer.concurrent_writer.retry` — INFO em cada retry (attempt, delay_ms, rel_path, holder_pid).
+- `parquet_writer.concurrent_writer.exhausted` — WARNING quando 3 tentativas esgotadas.
+- `catalog.maybe_compact_month.claim_lost` — INFO quando o claim de compactação foi perdido (own_started_at, holder_started_at).
 
 ---
 

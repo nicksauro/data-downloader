@@ -12,6 +12,10 @@ e verificar invariantes:
    ``{MM}.parquet`` + 0 diários, OU 0 mensal + >=1 diários — nunca ambos.
 3. **Consistência catálogo**: rows em ``partitions`` table refletem os
    arquivos no disco.
+4. **Race-safety (Story 4.24 / ADR-026 §2.3):** ``register_partition``
+   chamado back-to-back (2x mesmo PID, mesmo path) é idempotente —
+   apenas 1 row em ``partitions`` para o ``partition_path``. Cobre o
+   caminho "retry idempotente same-PID" do writer race protection.
 
 Estratégia: Hypothesis gera datas em [2018, 2026] inclusive (com B3
 calendar) e tamanhos de trades.
@@ -180,5 +184,85 @@ def test_hybrid_layout_invariants(tmp_path_factory, chunks) -> None:
                 assert "/" + f"{part.month:02d}.parquet" in "/" + part.partition_path
             else:
                 assert f"/{part.month:02d}/{part.day:02d}.parquet" in part.partition_path
+    finally:
+        catalog.close()
+
+
+# Range mais estreito para o property test de invariante 4 (back-to-back
+# register_partition). Foco eh validar idempotencia, nao cobertura
+# temporal — 1 chunk eh suficiente; Hypothesis varia date+size.
+@settings(
+    max_examples=30,
+    deadline=None,
+    suppress_health_check=[
+        HealthCheck.too_slow,
+        HealthCheck.function_scoped_fixture,
+        HealthCheck.data_too_large,
+    ],
+)
+@given(
+    chunk=st.tuples(_business_day(), st.integers(min_value=20, max_value=100)),
+)
+@pytest.mark.property
+def test_back_to_back_writer_register_is_idempotent(tmp_path_factory, chunk) -> None:
+    """Invariante 4 (Story 4.24): writer.write(catalog=cat) chamado 2x
+    para o mesmo (partition_key, PID) eh idempotente — UPSERT em
+    partitions preserva exatamente 1 row.
+
+    Cobre o caminho "retry idempotente same-PID" do writer race protection
+    (ADR-026 sect 2.3): se o writer retentar a mesma escrita (ex.: apos
+    erro transient), o catalogo nao acumula duplicatas.
+
+    Property test NAO simula threading real (Hypothesis + threads eh
+    fragil — race real coberto em tests/integration/test_writer_concurrent.py).
+    """
+    d, n_trades = chunk
+    tmp_path: Path = tmp_path_factory.mktemp("idempotent")
+    data_dir = tmp_path / "data"
+    db_path = data_dir / "_internal" / "catalog.db"
+
+    catalog = Catalog(
+        db_path=db_path,
+        data_dir=data_dir,
+        auto_reconcile=False,
+        auto_cleanup_orphans=False,
+    )
+    writer = ParquetWriter(data_dir=data_dir)
+    symbol = "WDOJ26"
+    exchange = "F"
+    base_ts = int(datetime(d.year, d.month, d.day, 9, 0).timestamp()) * 1_000_000_000
+
+    try:
+        partition = PartitionKey(
+            exchange=exchange,
+            symbol=symbol,
+            year=d.year,
+            month=d.month,
+            day=d.day,
+        )
+        trades = _make_trades(n_trades, base_ts=base_ts)
+        partition_path = f"{exchange}/{symbol}/{d.year:04d}/{d.month:02d}/{d.day:02d}.parquet"
+
+        # 1a escrita: cria pending claim + replace + complete -> 1 row.
+        writer.write(trades, partition, dll_version="test", catalog=catalog)
+        parts_after_1st = catalog.get_completed_partitions(symbol, exchange)
+        matching_1st = [p for p in parts_after_1st if p.partition_path == partition_path]
+        assert len(matching_1st) == 1
+
+        # 2a escrita back-to-back (mesmo PID, mesma partition_key, mesmos
+        # trades): UPSERT idempotente, NAO acumula row, NAO levanta
+        # ConcurrentWriterError (mesmo-PID retry permitido).
+        writer.write(trades, partition, dll_version="test", catalog=catalog)
+        parts_after_2nd = catalog.get_completed_partitions(symbol, exchange)
+        matching_2nd = [p for p in parts_after_2nd if p.partition_path == partition_path]
+        assert len(matching_2nd) == 1, (
+            f"esperado idempotente para {partition_path}; "
+            f"got {len(matching_2nd)} rows: {[p.partition_path for p in matching_2nd]}"
+        )
+
+        # Pending limpo.
+        conn = catalog._conn_or_raise()
+        pending_count = int(conn.execute("SELECT COUNT(*) FROM _pending_commits").fetchone()[0])
+        assert pending_count == 0
     finally:
         catalog.close()
