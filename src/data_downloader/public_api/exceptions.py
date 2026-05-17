@@ -21,6 +21,7 @@ stories futuras (1.4 ``DiskFull``/``IntegrityError``, 1.6 ``InvalidContract``,
 from __future__ import annotations
 
 __all__ = [
+    "ConcurrentWriterError",
     "ConnectionLost",
     "DLLInitError",
     "DataDownloaderError",
@@ -43,6 +44,7 @@ _PUBLIC_ERROR_MICROCOPY_ID: dict[str, str] = {
     "DiskFull": "ERR_DISK_FULL",
     "DownloadError": "ERR_CHUNK_FAILED",
     "IntegrityError": "ERR_CATALOG_DRIFT",
+    "ConcurrentWriterError": "ERR_CATALOG_DRIFT",
     "OperationCancelled": "SUC_CANCEL_DONE",
     "ConnectionLost": "ERR_CONNECTION_LOST",
     "DataDownloaderError": "ERR_DLL_GENERIC",
@@ -218,6 +220,65 @@ class IntegrityError(DataDownloaderError):
 
     Story 1.2: placeholder (raised por storage/validator em Story 2.1).
     """
+
+
+class ConcurrentWriterError(IntegrityError):
+    """Outro writer claim atômico em ``_pending_commits`` para a mesma partição.
+
+    Raised por ``Catalog.pending_commit()`` (Story 4.23 / ADR-026 §2.1+§2.3)
+    quando o INSERT WHERE-guarded em ``_pending_commits`` perde a corrida
+    para outro processo (PID diferente vivo OU started_at recente). É o
+    sinal advisory-lock cross-process: outro writer está escrevendo a
+    mesma partition_path neste instante.
+
+    Subclasse de :class:`IntegrityError` para preservar invariante de
+    fronteira pública (ADR-011): callers que tratam ``IntegrityError``
+    genericamente continuam captando. Callers que querem retry policy
+    específica (Story 4.24 — backoff exponencial 100ms/500ms/2s) podem
+    pegar :class:`ConcurrentWriterError` diretamente.
+
+    Atributos esperados em ``details``:
+
+    - ``partition_path``: ``str`` — path relativo a ``data_dir/history/``
+      (formato canônico do catálogo, ex.: ``"F/WDOJ26/2026/03.parquet"``).
+    - ``current_pid``: ``int`` — PID do outro writer que detém o claim.
+    - ``own_pid``: ``int`` — PID deste processo (caller que falhou).
+
+    Args:
+        partition_path: Identificador da partição em disputa.
+        current_pid: PID do writer que detém a pending row.
+        own_pid: PID do caller que perdeu a corrida.
+        message: Mensagem opcional; default construído a partir dos campos.
+        cause: Exceção interna preservada (opcional).
+        details: Detalhes adicionais a mesclar (opcional).
+    """
+
+    def __init__(
+        self,
+        partition_path: str,
+        current_pid: int,
+        own_pid: int,
+        *,
+        message: str | None = None,
+        cause: Exception | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        msg = message or (
+            f"Concurrent writer detected for partition_path={partition_path!r}: "
+            f"another process (pid={current_pid}) holds the pending commit claim "
+            f"(this pid={own_pid}). Caller should retry after backoff or fail the chunk."
+        )
+        merged_details: dict[str, object] = {
+            "partition_path": partition_path,
+            "current_pid": current_pid,
+            "own_pid": own_pid,
+        }
+        if details:
+            merged_details.update(details)
+        super().__init__(msg, cause=cause, details=merged_details)
+        self.partition_path = partition_path
+        self.current_pid = current_pid
+        self.own_pid = own_pid
 
 
 # ---------------------------------------------------------------------
