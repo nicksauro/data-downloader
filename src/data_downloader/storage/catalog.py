@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -1656,6 +1657,85 @@ class Catalog:
                     extra={"path": str(path), "err": str(exc)},
                 )
         return removed
+
+    # ------------------------------------------------------------------
+    # Story 4.22 / ADR-026 §2.2 — recovery on boot helpers
+    # ------------------------------------------------------------------
+
+    def _quarantine_partition(self, rel_path: str) -> Path | None:
+        """Move um arquivo de partição para ``data/_quarantine/{utc}/...``.
+
+        Convention ADR-026 §2.2: cada quarantine event cria um diretório
+        raiz timestamped (UTC ISO compact, ex.: ``20260516T143211Z``) e
+        preserva a hierarquia interna a partir de ``data_dir/history/``
+        para evitar colisões e facilitar auditoria forense.
+
+        Usa ``os.replace`` (atômico mesmo FS) com fallback para
+        ``shutil.move`` caso quarantine resida em outro drive Windows.
+        Diretórios pais são criados antes do move.
+
+        Args:
+            rel_path: Path relativo a ``data_dir/history/`` (mesmo
+                formato armazenado em ``_pending_commits.partition_path``).
+
+        Returns:
+            Path absoluto do arquivo no destino se o move foi bem
+            sucedido; ``None`` se o source não existe ou se o move
+            falhou (log de erro emitido).
+        """
+        if self.data_dir is None:  # pragma: no cover defensive
+            return None
+
+        source = self.data_dir / "history" / rel_path
+        if not source.is_file():
+            _LOG.warning(
+                "catalog.recovery.quarantine_source_missing",
+                extra={"path": str(source)},
+            )
+            return None
+
+        utc_compact = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        dest = self.data_dir / "_quarantine" / utc_compact / rel_path
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _LOG.error(
+                "catalog.recovery.quarantine_failed",
+                extra={
+                    "src": str(source),
+                    "dst": str(dest),
+                    "err": str(exc),
+                    "stage": "mkdir",
+                },
+            )
+            return None
+
+        try:
+            os.replace(source, dest)
+        except OSError as replace_exc:
+            # Fallback: cross-drive ou cross-FS no Windows -> shutil.move
+            # (não atômico, mas tolerante a moves cross-volume).
+            try:
+                shutil.move(str(source), str(dest))
+            except OSError as move_exc:
+                _LOG.error(
+                    "catalog.recovery.quarantine_failed",
+                    extra={
+                        "src": str(source),
+                        "dst": str(dest),
+                        "err_replace": str(replace_exc),
+                        "err_move": str(move_exc),
+                        "stage": "move",
+                    },
+                )
+                return None
+
+        _LOG.info(
+            "catalog.recovery.quarantined",
+            extra={"src": str(source), "dst": str(dest), "rel_path": rel_path},
+        )
+        return dest
 
     # ------------------------------------------------------------------
     # AC9 + AC11 — reconcile (drift A/B/C)
