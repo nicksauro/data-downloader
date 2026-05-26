@@ -254,6 +254,101 @@ _B3_HOLIDAYS_2020_2030: frozenset[date] = frozenset(
     }
 )
 
+
+# =====================================================================
+# Tabela hardcoded — extensão pré-2020 (Story 4.32 backfill 2013-2017).
+# =====================================================================
+#
+# Nelogica's ``holidays.dat`` tem cobertura severamente esparsa para 2013
+# (apenas 01-01) e gaps menores em outros anos pré-2020. Esta tabela
+# preenche as lacunas, permitindo o backfill 2013-2017 rodar sem stalls
+# em dias de não-pregão. Fonte: B3 official calendar + computus de
+# Easter/Carnaval/Corpus (Meeus), filtrando feriados em fim de semana
+# per Nelogica convention. Inclui feriados estaduais SP (Aniversário SP
+# 25/01, Revolução Constitucionalista 09/07) e Consciência Negra (20/11,
+# B3 SP pré-lei nacional 2024).
+_B3_HOLIDAYS_2013_2017: frozenset[date] = frozenset(
+    {
+        # 2013 (Easter Mar 31; Carnaval Feb 11-12; Corpus May 30)
+        date(2013, 1, 1),  # Confraternização (ter)
+        date(2013, 1, 25),  # Aniversário SP (sex)
+        date(2013, 2, 11),  # Carnaval seg
+        date(2013, 2, 12),  # Carnaval ter
+        date(2013, 3, 29),  # Sexta-feira Santa
+        date(2013, 5, 1),  # Trabalho (qua)
+        date(2013, 5, 30),  # Corpus Christi (qui)
+        date(2013, 7, 9),  # Revolução Constitucionalista (ter)
+        date(2013, 11, 15),  # Proclamação (sex)
+        date(2013, 11, 20),  # Consciência Negra (qua, B3 SP)
+        date(2013, 12, 24),  # Véspera Natal (ter)
+        date(2013, 12, 25),  # Natal (qua)
+        date(2013, 12, 31),  # Véspera Ano Novo (ter)
+        # 2014 (Easter Apr 20; Carnaval Mar 3-4; Corpus Jun 19)
+        date(2014, 1, 1),
+        date(2014, 3, 3),
+        date(2014, 3, 4),
+        date(2014, 4, 18),
+        date(2014, 4, 21),
+        date(2014, 5, 1),
+        date(2014, 6, 19),
+        date(2014, 7, 9),
+        date(2014, 11, 20),
+        date(2014, 12, 24),
+        date(2014, 12, 25),
+        date(2014, 12, 31),
+        # 2015 (Easter Apr 5; Carnaval Feb 16-17; Corpus Jun 4)
+        date(2015, 1, 1),
+        date(2015, 2, 16),
+        date(2015, 2, 17),
+        date(2015, 4, 3),
+        date(2015, 4, 21),
+        date(2015, 5, 1),
+        date(2015, 6, 4),
+        date(2015, 7, 9),
+        date(2015, 9, 7),
+        date(2015, 10, 12),
+        date(2015, 11, 2),
+        date(2015, 11, 20),
+        date(2015, 12, 24),
+        date(2015, 12, 25),
+        date(2015, 12, 31),
+        # 2016 (Easter Mar 27; Carnaval Feb 8-9; Corpus May 26)
+        date(2016, 1, 1),
+        date(2016, 1, 25),
+        date(2016, 2, 8),
+        date(2016, 2, 9),
+        date(2016, 3, 25),
+        date(2016, 4, 21),
+        date(2016, 5, 26),
+        date(2016, 9, 7),
+        date(2016, 10, 12),
+        date(2016, 11, 2),
+        date(2016, 11, 15),
+        date(2016, 12, 30),  # substitui 12-31 (sab)
+        # 2017 (Easter Apr 16; Carnaval Feb 27-28; Corpus Jun 15)
+        date(2017, 1, 25),
+        date(2017, 2, 27),
+        date(2017, 2, 28),
+        date(2017, 4, 14),
+        date(2017, 4, 21),
+        date(2017, 5, 1),
+        date(2017, 6, 15),
+        date(2017, 9, 7),
+        date(2017, 10, 12),
+        date(2017, 11, 2),
+        date(2017, 11, 15),
+        date(2017, 11, 20),
+        date(2017, 12, 25),
+        date(2017, 12, 29),  # substitui 12-31 (dom)
+    }
+)
+
+
+# União hardcoded total: 2013-2017 + 2020-2030. Anos 2018-2019 são cobertos
+# adequadamente pelo ``holidays.dat`` (verificado 2026-05-25).
+_B3_HOLIDAYS_HARDCODED: frozenset[date] = _B3_HOLIDAYS_2013_2017 | _B3_HOLIDAYS_2020_2030
+
+
 # Cache do conjunto efetivo (parser + hardcoded). Lazy-loaded no primeiro
 # uso de is_holiday / b3_holidays. Reset via :func:`_reset_calendar_cache`
 # (testes) ou automaticamente quando mtime do holidays.dat mudar.
@@ -289,7 +384,7 @@ def _load_effective_holidays() -> frozenset[date]:
         if dat_path.is_file():
             try:
                 from_dat = parse_holidays_dat(dat_path)
-                merged = _B3_HOLIDAYS_2020_2030 | from_dat
+                merged = _B3_HOLIDAYS_HARDCODED | from_dat
                 _effective_cache = merged
                 _effective_source = "dat+hardcoded"
                 _effective_dat_mtime = current_mtime
@@ -298,7 +393,7 @@ def _load_effective_holidays() -> frozenset[date]:
                     source="dat+hardcoded",
                     dat_path=str(dat_path),
                     dat_holidays=len(from_dat),
-                    hardcoded_holidays=len(_B3_HOLIDAYS_2020_2030),
+                    hardcoded_holidays=len(_B3_HOLIDAYS_HARDCODED),
                     total=len(merged),
                 )
                 return merged
@@ -317,7 +412,7 @@ def _load_effective_holidays() -> frozenset[date]:
                 dat_path=str(dat_path),
             )
 
-        _effective_cache = _B3_HOLIDAYS_2020_2030
+        _effective_cache = _B3_HOLIDAYS_HARDCODED
         _effective_source = "hardcoded_only"
         _effective_dat_mtime = None
         return _effective_cache
