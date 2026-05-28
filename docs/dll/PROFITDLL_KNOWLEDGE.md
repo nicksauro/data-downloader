@@ -527,6 +527,36 @@ Mudanças notáveis (ordem reversa cronológica) — `agents/profitdll-specialis
 
 ---
 
+## WDO historical data range
+
+**Descoberto:** 2026-05-26 (Story 4.32 — backfill WDOFUT 2013-2017)
+
+| Range observado | Estado em 2026-05-26 |
+|---|---|
+| **2013-01-02 → 2017-01-30** | ✅ acessível (iter 4/5 da Story 4.32, ~988 chunks baixados) |
+| **2017-01-31 → 2017-12-31** | ❌ inacessível (~225 dias úteis — Q-DRIFT-41-NELO) |
+| **2018-01-02 → 2026-05-25** | ✅ acessível (Story 4.20 + Run 1 — 2083 dias) |
+
+**Earliest empirical date (probe Story 4.32 T4):** `2013-01-02` retornou trades válidos (1,894 trades em ~10s). ProfitDLL aceita queries para essa data e mais antigas — não foi probado abaixo de 2013-01-02. **Manual silencioso sobre data mínima absoluta.**
+
+**Cutoff observado mid-run (Q-DRIFT-41-NELO):** 2017-01-31 parou de retornar dados ~9h após o começo do backfill. Comportamento: `NL_OK` + zero trades + zero progress + zero `TC_LAST_PACKET`. Mesmo padrão para 2017-06-01 após 1h cooldown. **Refutada** hipótese rolling-window contínua (cutoff saltou 4 anos em 9h, não 1 dia em 25h).
+
+**Hipótese (Nelo, 2026-05-26):** backend Nelogica rotaciona snapshots históricos em **steps discretos por símbolo** (provavelmente fronteiras trimestrais/semestrais). Não é janela rolante por wall-clock. Próxima rotação pode reabrir 2017-Fev-Dec — ou pode empurrar 2018 para fora. Comportamento opaco; canal comercial (corretora → Nelogica) é única fonte autoritativa.
+
+**Latências observadas (típicas, conta atual em 2026-05-25/26):**
+
+| Cenário | Latência | Trades típicos |
+|---|---|---|
+| Dia recente (2026-05-25) | ~30-50s | 300k+ |
+| Dia 2018-2022 (volume médio-alto) | ~30-90s | 200k-700k |
+| Dia 2014-2016 (volume médio) | ~10-30s | 50k-200k |
+| Dia 2013 (volume baixo) | ~5-15s | 1k-10k |
+| Dia inacessível (Q-DRIFT-41) | 30min silent timeout | 0 |
+
+**Mitigação:** ver [Q-DRIFT-41-NELO em QUIRKS.md](./QUIRKS.md#q-drift-41-nelo) — workaround tactical (fail-fast 120s) + operational (contatar corretora).
+
+---
+
 ## Manutenção
 
 - **Atualizar este arquivo** quando: (a) novo quirk descoberto, (b) nova versão da DLL liberada, (c) divergência manual-vs-prática resolvida.
