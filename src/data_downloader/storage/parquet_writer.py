@@ -514,10 +514,19 @@ def compact_month(
 
     # Lê e concatena (preserve schema canônico — _read_existing_table
     # impõe schema v1.1.0 inclusive sobre eventuais escritos legacy).
-    tables: list[pa.Table] = [_read_existing_table(p) for p in daily_paths]
+    #
+    # Dedup é feito POR ARQUIVO diário (cada ~1M rows — tamanho que o
+    # writer diário já processa), NÃO sobre o combined inteiro. Motivo:
+    # o combined de um mês WDOFUT (~25M rows) estourava o DuckDB em
+    # ``dedup_table_vectorized`` — as window functions ``ROW_NUMBER()
+    # OVER`` não derramam para disco, então OOM acontecia mesmo com
+    # ``memory_limit`` configurado. Como as partições diárias NÃO se
+    # sobrepõem (cada ``timestamp_ns`` cai num único dia → num único
+    # arquivo), não há duplicata cross-arquivo: ``concat(dedup(dia))`` é
+    # equivalente a ``dedup(concat)`` para dados particionados
+    # corretamente, e preserva INV-2 (1ª ocorrência vence).
+    tables: list[pa.Table] = [dedup_table_vectorized(_read_existing_table(p)) for p in daily_paths]
     combined = pa.concat_tables(tables, promote_options="default")
-    # Dedup defensivo (cheap — INV-2 garante 1ª ocorrência preservada).
-    combined = dedup_table_vectorized(combined)
     combined = combined.sort_by(
         [("timestamp_ns", "ascending"), ("sequence_within_ns", "ascending")]
     )

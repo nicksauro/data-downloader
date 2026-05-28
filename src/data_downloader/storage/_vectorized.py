@@ -33,6 +33,7 @@ correctness é gate. Hypothesis garante que o número não veio de bug."
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -43,6 +44,34 @@ from data_downloader.public_api.exceptions import IntegrityError
 from data_downloader.storage.schema import TradeRecord, pyarrow_schema
 
 _VALID_EXCHANGES_LIST: list[str] = ["F", "B"]
+
+# --- Anti-OOM: conexão DuckDB in-memory com guarda de memória -------------
+# A compactação mensal (``compact_month`` -> ``dedup_table_vectorized``)
+# processa ~20-30M trades de uma vez. Com o ``memory_limit`` default do
+# DuckDB (80% da RAM) e SEM ``temp_directory``, operações grandes estouram
+# ("Out of Memory Error") em vez de derramar para disco. Configuramos um
+# limite conservador + spill para disco. ``preserve_insertion_order=false``
+# é seguro: todas as queries deste módulo terminam com ``ORDER BY
+# _orig_idx`` explícito — a ordem final NÃO depende da ordem de inserção
+# do DuckDB.
+_DUCKDB_SPILL_DIR = Path(tempfile.gettempdir()) / "data_downloader_duckdb_spill"
+_DUCKDB_MEMORY_LIMIT = "4GB"
+
+
+def _connect_duckdb_memory_safe() -> duckdb.DuckDBPyConnection:
+    """Conexão DuckDB in-memory com ``memory_limit`` + spill para disco.
+
+    Substitui o ``duckdb.connect(":memory:")`` cru, que herdava o
+    ``memory_limit`` default (80% da RAM) sem ``temp_directory`` — causa
+    raiz dos ``Out of Memory Error`` na compactação mensal de WDOFUT.
+    """
+    _DUCKDB_SPILL_DIR.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(":memory:")
+    con.execute(f"SET memory_limit = '{_DUCKDB_MEMORY_LIMIT}'")
+    con.execute(f"SET temp_directory = '{_DUCKDB_SPILL_DIR.as_posix()}'")
+    con.execute("SET preserve_insertion_order = false")
+    con.execute("SET threads = 4")
+    return con
 
 
 def trades_to_table_vectorized(trades: list[TradeRecord]) -> pa.Table:
@@ -257,7 +286,7 @@ def assign_sequence_within_ns_vectorized(table: pa.Table) -> pa.Table:
     idx_col = pa.array(range(n), type=pa.int64())
     table_with_idx = table.append_column("_orig_idx", idx_col)
 
-    con = duckdb.connect(":memory:")
+    con = _connect_duckdb_memory_safe()
     try:
         con.register("t", table_with_idx)
         # ROW_NUMBER 0-based: usa ROW_NUMBER() - 1.
@@ -322,7 +351,7 @@ def dedup_table_vectorized(table: pa.Table) -> pa.Table:
     idx_col = pa.array(range(n), type=pa.int64())
     table_with_idx = table.append_column("_orig_idx", idx_col)
 
-    con = duckdb.connect(":memory:")
+    con = _connect_duckdb_memory_safe()
     try:
         con.register("t", table_with_idx)
         # ROW_NUMBER particionado pelas chaves canônicas. CASE distingue

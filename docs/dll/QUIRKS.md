@@ -1697,6 +1697,39 @@ ret: int = self._dll.DLLInitializeMarketLogin(
 
 ---
 
+## Q-DRIFT-41-NELO
+
+- **ID:** Q-DRIFT-41-NELO
+- **Status:** ⚠️ **empirical (2026-05-26)** — server-side limit observado mid-run; mecanismo Nelogica não-documentado.
+- **Categoria:** history / server-availability / silent-timeout
+- **Severidade:** **HIGH** (custo de exploração: 2.5h/chunk inacessível com retry loop default; documentação cruel pela falta de error code).
+- **Título:** `GetHistoryTrades` retorna `NL_OK` (code=0) + ZERO trades + ZERO progress + ZERO `TC_LAST_PACKET` para ranges fora da janela de disponibilidade server-side da Nelogica. Backend "finge" aceitar mas nunca despacha dados. Indistinguível de "shard frio ainda carregando" no orchestrator.
+- **Causa raiz:** O backend de histórico Nelogica decide quais ranges estão "quentes" (servidos) vs "frios" (não servidos) por símbolo, com rotação em **steps discretos** — provavelmente trimestral/semestral. NÃO é janela rolante contínua por wall-clock. A iter 4 da Story 4.32 baixou WDOFUT 2013-01-28 às 2026-05-25 21:38 BRT com sucesso; ~25h depois, 2017-06-01 falha em 2026-05-26 22:51 BRT. Janela rolante 9-anos moveria 1 dia em 25h, não 4 anos. **Refutada** hipótese rolling-window contínua. Cutoff exato observado: **2017-01-30 OK / 2017-01-31 FAIL** — fronteira de shard plausível (final Q1/início 2017).
+- **Workaround / fix tactical (NÃO implementado neste run — backlog Story 4.33+):**
+  1. `download_primitive.py` (loop principal `_IngestorThread` wait): após N segundos (default 120s, env-overridable) sem `len(trades)>0 AND len(progress_history)>0 AND ingestor.last_packet_seen`, marcar status `no_data_available` (categoria nova).
+  2. `dll/error_taxonomy.py`: adicionar `no_data_available` como PERMANENT.
+  3. `orchestrator/retry_policy.py`: PERMANENT → no retry.
+  4. Ganho: 225 dias inacessíveis viram **7.5h** em vez de potenciais **562h (23 dias)** queimando default retry × default timeout.
+- **Workaround / fix operational:** contatar corretora (XP/Genial/Clear/etc.) e pedir info: (a) data mínima histórica para WDOFUT na conta atual; (b) tiers de subscrição com mais profundidade. ProfitDLL é silenciosa sobre limites por tier — só canal comercial responde.
+- **Manual diz:** silencioso. Manual ProfitDLL não documenta profundidade histórica nem error codes para "out-of-window". `NL_SERIE_NO_HISTORY` existe em `error_taxonomy.py:206` como PERMANENT mas backend Nelogica NÃO retorna esse código nessa situação — retorna NL_OK + silêncio total. Provavelmente porque o agendador interno não distingue "carregando shard frio" de "shard inexistente".
+- **Evidência:**
+  - Catalog (`D:\data-downloader\data\_internal\catalog.db`) — 3090 chunks completed (min=2013-01-02, max=2026-05-25); 2017-01-30 OK, 2017-Fev-Dez (~225 dias) zero rows mesmo após probes diretos.
+  - Probe 2026-05-26 22:57 BRT: `WDOFUT 2026-05-25` → 307,528 trades em 52s ✓ (DLL+conta saudáveis).
+  - Probe 2026-05-26 22:51 BRT (após 1h cooldown): `WDOFUT 2017-06-01` → 0 trades, timeout ❌.
+  - Probes anteriores mesma data: 2017-02-01, 2017-01-31 — mesmo padrão.
+- **Data descoberta:** 2026-05-26 (Story 4.32 mid-run; @profitdll-specialist Nelo advisory mesma data).
+- **Aplica a stories:** Story 4.32 (backfill 2013-2017 — partial accepted; gap 2017-Fev-Dez documentado); Story 4.33 futura (re-tentativa em 30-90 dias quando próxima rotação Nelogica) e Story tactical fail-fast (backlog).
+- **Refs:**
+  - `src/data_downloader/orchestrator/download_primitive.py` (loop wait — alvo do fix tactical).
+  - `src/data_downloader/dll/error_taxonomy.py:206` (`NL_SERIE_NO_HISTORY` documentado; backend NÃO usa).
+  - `src/data_downloader/orchestrator/retry_policy.py` (TRANSIENT default = retry 5× × ~30min).
+  - `docs/stories/4.32-backfill-wdofut-2013-2017.story.md` (run que descobriu).
+  - Catalog `D:\data-downloader\data\_internal\catalog.db` (evidência empírica).
+  - [Q-DRIFT-31](#q-drift-31), [Q-DRIFT-32](#q-drift-32) (padrão similar: NL_OK + silêncio para outros casos — sucessor vencido, range muito grande).
+  - [Q-DRIFT-01](#q-drift-01) (`SetProgressCallback` não exportada — sem sinalização auxiliar para distinguir "carregando" de "não vai chegar").
+
+---
+
 ## Manutenção
 
 - **Adicionar quirk:** comando Nelo `*add-quirk {description}` OU edit manual aqui.
